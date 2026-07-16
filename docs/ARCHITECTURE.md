@@ -16,17 +16,29 @@
 
 ## Package split
 
+**Current (Phase 0):**
+
 ```
 proactr/
-  ring.odin           # Ring lifecycle: open, submit, wait/peek CQ
-  ops.odin            # accept / recv / send / close / cancel / timeout
-  buf.odin            # registered buffers / slices for fixed ops (later)
-  platform_linux.odin # io_uring syscalls / liburing-free path
+  proactr.odin        # Ring, Op, Error, public submit/reap API surface
+  platform_linux.odin # Linux io_uring path (raw syscalls; see docs/PROACTR_RING.md)
   platform_stub.odin  # non-Linux compile stubs
 
 http/
   # Forked from laytan surface: Request/Response/Router/…
-  # Host: listen_and_serve driven only by proactr completions
+  # Host stubs: listen_and_serve → Unsupported; no nbio
+```
+
+**Target layout (may split later):**
+
+```
+proactr/
+  proactr.odin / ring.odin / ops.odin / buf.odin  # optional file split as surface grows
+  platform_linux.odin # io_uring syscalls / liburing-free path
+  platform_stub.odin  # non-Linux compile stubs
+
+http/
+  # Same protocol surface; host driven only by proactr completions
 ```
 
 ## Completion loop (target)

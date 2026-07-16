@@ -188,7 +188,10 @@ start_peer() {
         >"$LOGDIR/seastar.server.log" 2>&1 &
       ;;
     proactr)
-      echo "proactr host not live"; return 1
+      if [[ ! -x proactr/tfb-proactr.bin ]]; then
+        (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
+      fi
+      env PORT="$PORT" ./proactr/tfb-proactr.bin >"$LOGDIR/proactr.server.log" 2>&1 &
       ;;
     *)
       echo "unknown peer $name" >&2; return 1

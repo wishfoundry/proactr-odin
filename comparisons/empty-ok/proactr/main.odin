@@ -13,7 +13,7 @@ main :: proc() {
 	context.logger = log.create_console_logger(.Info)
 
 	port: int = 18080
-	if p, ok := os.lookup_env("PORT"); ok {
+	if p, ok := os.lookup_env("PORT", context.allocator); ok {
 		if v, ok2 := strconv.parse_int(p); ok2 {
 			port = v
 		}
@@ -23,12 +23,12 @@ main :: proc() {
 	http.router_init(&router)
 	defer http.router_destroy(&router)
 
-	http.route_get(&router, "/", proc(req: ^http.Request, res: ^http.Response) {
+	http.route_get(&router, "/", http.handler(proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "OK")
-	})
-	http.route_get(&router, "/health", proc(req: ^http.Request, res: ^http.Response) {
+	}))
+	http.route_get(&router, "/health", http.handler(proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "ok")
-	})
+	}))
 
 	s: http.Server
 	log.infof("proactr empty-ok on :%d", port)

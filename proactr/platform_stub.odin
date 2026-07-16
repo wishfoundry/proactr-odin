@@ -17,6 +17,13 @@ _ring_destroy_platform :: proc(r: ^Ring) {
 	r.impl.active = false
 }
 
+_submit_nop :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
+	_ = r
+	_ = id
+	_ = op
+	return .Unsupported
+}
+
 _submit_accept :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
 	_ = r
 	_ = id

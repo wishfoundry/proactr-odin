@@ -43,7 +43,7 @@ Op :: struct {
 	user:   rawptr,
 	// Result after completion (bytes / fd / -errno style).
 	result: i32,
-	// Buffer for Recv/Send (caller owns memory; valid until complete).
+	// Buffer for Recv/Send (caller owns memory; hard rule: valid until CQE).
 	buf:    []u8,
 	// Accept: listening fd. Recv/Send/Close: connection fd.
 	fd:     i32,
@@ -107,11 +107,19 @@ op_alloc :: proc(r: ^Ring) -> (id: u32, op: ^Op, err: Error) {
 	return id, &r.ops[id], .None
 }
 
+// op_free returns an op slot to the free list.
+// Only Idle / Completed / Cancelled may be freed. Submitted (in-flight) is refused:
+// recycling the id while a CQE can still arrive would corrupt user_data.
 op_free :: proc(r: ^Ring, id: u32) {
 	if int(id) >= len(r.ops) {
 		return
 	}
-	r.ops[id] = {}
+	op := &r.ops[id]
+	if op.status == .Submitted {
+		assert(false, "op_free: refuse free of Submitted op")
+		return
+	}
+	op^ = {}
 	append(&r.free, id)
 }
 
@@ -123,6 +131,26 @@ op_get :: proc(r: ^Ring, id: u32) -> ^Op {
 }
 
 // submit_* enqueue SQEs (may not enter the kernel until ring_submit / ring_wait).
+// On platform error the reserved op is freed and id is zero.
+
+submit_nop :: proc(r: ^Ring, user: rawptr = nil) -> (id: u32, err: Error) {
+	op: ^Op
+	id, op, err = op_alloc(r)
+	if err != .None {
+		return 0, err
+	}
+	op.kind = .Nop
+	op.status = .Submitted
+	op.user = user
+	err = _submit_nop(r, id, op)
+	if err != .None {
+		// Prep failed before any SQE was reserved; not in-flight.
+		op.status = .Idle
+		op_free(r, id)
+		return 0, err
+	}
+	return id, .None
+}
 
 submit_accept :: proc(r: ^Ring, listen_fd: i32, user: rawptr = nil) -> (id: u32, err: Error) {
 	op: ^Op
@@ -134,7 +162,13 @@ submit_accept :: proc(r: ^Ring, listen_fd: i32, user: rawptr = nil) -> (id: u32,
 	op.status = .Submitted
 	op.user = user
 	op.fd = listen_fd
-	return id, _submit_accept(r, id, op)
+	err = _submit_accept(r, id, op)
+	if err != .None {
+		op.status = .Idle
+		op_free(r, id)
+		return 0, err
+	}
+	return id, .None
 }
 
 submit_recv :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u32, err: Error) {
@@ -148,7 +182,13 @@ submit_recv :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u3
 	op.user = user
 	op.fd = fd
 	op.buf = buf
-	return id, _submit_recv(r, id, op)
+	err = _submit_recv(r, id, op)
+	if err != .None {
+		op.status = .Idle
+		op_free(r, id)
+		return 0, err
+	}
+	return id, .None
 }
 
 submit_send :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u32, err: Error) {
@@ -162,7 +202,13 @@ submit_send :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u3
 	op.user = user
 	op.fd = fd
 	op.buf = buf
-	return id, _submit_send(r, id, op)
+	err = _submit_send(r, id, op)
+	if err != .None {
+		op.status = .Idle
+		op_free(r, id)
+		return 0, err
+	}
+	return id, .None
 }
 
 submit_close :: proc(r: ^Ring, fd: i32, user: rawptr = nil) -> (id: u32, err: Error) {
@@ -175,7 +221,13 @@ submit_close :: proc(r: ^Ring, fd: i32, user: rawptr = nil) -> (id: u32, err: Er
 	op.status = .Submitted
 	op.user = user
 	op.fd = fd
-	return id, _submit_close(r, id, op)
+	err = _submit_close(r, id, op)
+	if err != .None {
+		op.status = .Idle
+		op_free(r, id)
+		return 0, err
+	}
+	return id, .None
 }
 
 // ring_submit flushes the SQ (io_uring_enter submit).

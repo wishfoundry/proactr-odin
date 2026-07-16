@@ -15,12 +15,12 @@ main :: proc() {
 	http.router_init(&router)
 	defer http.router_destroy(&router)
 
-	http.route_get(&router, "/", proc(req: ^http.Request, res: ^http.Response) {
+	http.route_get(&router, "/", http.handler(proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "OK")
-	})
-	http.route_get(&router, "/health", proc(req: ^http.Request, res: ^http.Response) {
+	}))
+	http.route_get(&router, "/health", http.handler(proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "ok")
-	})
+	}))
 
 	s: http.Server
 	ep := net.Endpoint {
@@ -28,7 +28,7 @@ main :: proc() {
 		port    = 8080,
 	}
 
-	log.info("proactr empty_ok starting on :8080 (scaffold — host not live yet)")
+	log.info("proactr empty_ok starting on :8080 (proactr io_uring host on Linux)")
 	err := http.listen_and_serve(&s, http.router_handler(&router), ep)
 	fmt.eprintf("server exited: %v\n", err)
 	if err == .Unsupported {
