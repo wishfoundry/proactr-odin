@@ -14,7 +14,7 @@ BENCH_Z="${BENCH_Z:-15s}"
 WARMUP_Z="${WARMUP_Z:-3s}"
 DATABASE_PATH="${DATABASE_PATH:-/tmp/proactr-tfb.sqlite}"
 SERVERS="${SERVERS:-go ntex}"
-TESTS="${TESTS:-json plaintext fortunes db queries}"
+TESTS="${TESTS:-plaintext fortunes}"
 LOGDIR="${LOGDIR:-/tmp/proactr-tfb-logs}"
 mkdir -p "$LOGDIR"
 
@@ -57,11 +57,8 @@ wait_up() {
 
 path_for_test() {
   case "$1" in
-    json) echo /json ;;
     plaintext) echo /plaintext ;;
     fortunes) echo /fortunes ;;
-    db) echo /db ;;
-    queries) echo '/queries?queries=5' ;;
     *) echo "/$1" ;;
   esac
 }
@@ -178,9 +175,8 @@ for srv in $SERVERS; do
     continue
   fi
   for t in $TESTS; do
-    # Skip DB tests for laytan until SQLITE linked
-    if [[ "$srv" == "laytan" && "$t" =~ ^(fortunes|db|queries)$ ]]; then
-      echo "  skip $t (laytan DB not linked; would 501)"
+    if [[ "$srv" == "laytan" && "$t" == "fortunes" ]]; then
+      echo "  skip fortunes (laytan DB not linked; would 501)"
       printf '%-10s %-10s %12s %10s %10s  %s\n' "$srv" "$t" "n/a" "n/a" "n/a" "501-not-implemented" | tee -a "$SUMMARY"
       continue
     fi

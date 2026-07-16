@@ -1,10 +1,5 @@
-// TechEmpower-shaped peer on vendored laytan/odin-http.
-//
-// json + plaintext: full (real JSON encode each request).
-// fortunes/db/queries: 501 until SQLite is linked (fail closed — no RAM fortunes).
-//
-// Build:
-//   odin build . -out:tfb-laytan -o:speed -collection:laytan=../../../vendor/laytan
+// Plain text + HTML peer on vendored laytan/odin-http.
+// /plaintext: live. /fortunes: 501 until SQLite is linked (fail closed).
 package main
 
 import "core:fmt"
@@ -32,13 +27,10 @@ main :: proc() {
 	http.router_init(&router)
 	defer http.router_destroy(&router)
 
-	http.route_get(&router, "/json", http.handler(on_json))
 	http.route_get(&router, "/plaintext", http.handler(on_plaintext))
 	http.route_get(&router, "/fortunes", http.handler(on_fortunes))
-	http.route_get(&router, "/db", http.handler(on_db))
-	http.route_get(&router, "/queries", http.handler(on_queries))
 
-	log.infof("laytan tfb peer on :%d (DB routes=501 until SQLITE linked)", port)
+	log.infof("laytan tfb peer on :%d (fortunes=501 until SQLITE linked)", port)
 	err := http.listen_and_serve(
 		&s,
 		http.router_handler(&router),
@@ -47,32 +39,12 @@ main :: proc() {
 	fmt.assertf(err == nil, "server stopped: %v", err)
 }
 
-on_json :: proc(req: ^http.Request, res: ^http.Response) {
-	Msg :: struct {
-		message: string,
-	}
-	http.headers_set(&res.headers, "server", "Laytan")
-	if err := http.respond_json(res, Msg{"Hello, World!"}); err != nil {
-		log.errorf("json: %v", err)
-	}
-}
-
 on_plaintext :: proc(req: ^http.Request, res: ^http.Response) {
 	http.headers_set(&res.headers, "server", "Laytan")
 	http.respond_plain(res, "Hello, World!")
 }
 
 on_fortunes :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Laytan")
-	http.respond(res, http.Status.Not_Implemented)
-}
-
-on_db :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Laytan")
-	http.respond(res, http.Status.Not_Implemented)
-}
-
-on_queries :: proc(req: ^http.Request, res: ^http.Response) {
 	http.headers_set(&res.headers, "server", "Laytan")
 	http.respond(res, http.Status.Not_Implemented)
 }

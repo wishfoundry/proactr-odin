@@ -16,6 +16,7 @@ Peer · test · RPS · p50 · p99 · errors · workers · host · commit SHAs
 
 - vapor-style gen-HTML bulk RPS
 - `/plaintext` alone
+- JSON codec bake-offs (out of this suite)
 - Fortunes without DB + HTML escape
 
 ## empty-ok

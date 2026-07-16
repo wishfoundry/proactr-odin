@@ -67,13 +67,11 @@ odin build comparisons/empty-ok/proactr -out:comparisons/empty-ok/proactr/server
 
 ## Benchmarks (primary: TFB-style)
 
-**Headline suite:** [`comparisons/tfb/`](comparisons/tfb/) — TechEmpower-shaped
-`/json`, `/plaintext`, `/fortunes`, `/db`, `/queries` with real JSON encode,
-HTML escaping, and SQLite. Reports **RPS + p50/p99 + errors**.
+**Headline suite:** [`comparisons/tfb/`](comparisons/tfb/) — plain **text/html**
+only: `/plaintext` (ceiling) + `/fortunes` (DB + sort + HTML escape). **No JSON**
+(codec variance muddies stack comparison). Reports **RPS + p50/p99 + errors**.
 
-This deliberately replaces vapor-http’s generated-HTML “realistic” matrix, which
-is optimistic (cheap string append, no escape/DB). See
-[`comparisons/tfb/WORKLOAD.md`](comparisons/tfb/WORKLOAD.md) and
+See [`comparisons/tfb/WORKLOAD.md`](comparisons/tfb/WORKLOAD.md) and
 [`docs/BASELINE_METRICS.md`](docs/BASELINE_METRICS.md).
 
 ```bash

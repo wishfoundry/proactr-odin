@@ -1,9 +1,8 @@
-// TechEmpower-shaped Drogon peer (SQLite).
+// Plain text + HTML Drogon peer (SQLite fortunes, no JSON).
 #include <drogon/drogon.h>
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
-#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -43,29 +42,6 @@ static std::string html_escape(const std::string &s) {
   return out;
 }
 
-static int clamp_queries(const HttpRequestPtr &req) {
-  int n = 1;
-  auto &p = req->getParameter("queries");
-  if (!p.empty()) {
-    try {
-      n = std::stoi(p);
-    } catch (...) {
-      n = 1;
-    }
-  }
-  if (n < 1)
-    n = 1;
-  if (n > 500)
-    n = 500;
-  return n;
-}
-
-static int random_id() {
-  static thread_local std::mt19937 rng{std::random_device{}()};
-  std::uniform_int_distribution<int> dist(1, 10000);
-  return dist(rng);
-}
-
 int main() {
   const char *db = std::getenv("DATABASE_PATH");
   std::string dbPath = db ? db : "/tmp/proactr-tfb.sqlite";
@@ -78,18 +54,6 @@ int main() {
 
   app().createDbClient("sqlite3", dbPath, 0, "", "", "",
                        std::max<size_t>(workers * 2, 4));
-
-  app().registerHandler(
-      "/json",
-      [](const HttpRequestPtr &,
-         std::function<void(const HttpResponsePtr &)> &&cb) {
-        Json::Value j;
-        j["message"] = "Hello, World!";
-        auto resp = HttpResponse::newHttpJsonResponse(j);
-        resp->addHeader("Server", "Drogon");
-        cb(resp);
-      },
-      {Get});
 
   app().registerHandler(
       "/plaintext",
@@ -142,84 +106,6 @@ int main() {
               resp->setBody(e.base().what());
               cb(resp);
             };
-      },
-      {Get});
-
-  app().registerHandler(
-      "/db",
-      [](const HttpRequestPtr &,
-         std::function<void(const HttpResponsePtr &)> &&cb) {
-        int id = random_id();
-        auto client = app().getDbClient();
-        *client << "SELECT id, randomNumber FROM world WHERE id = ?" << id >>
-            [cb = std::move(cb)](const Result &r) mutable {
-              if (r.empty()) {
-                auto resp = HttpResponse::newHttpResponse();
-                resp->setStatusCode(k500InternalServerError);
-                cb(resp);
-                return;
-              }
-              Json::Value j;
-              j["id"] = r[0]["id"].as<int>();
-              j["randomNumber"] = r[0]["randomNumber"].as<int>();
-              auto resp = HttpResponse::newHttpJsonResponse(j);
-              resp->addHeader("Server", "Drogon");
-              cb(resp);
-            } >>
-            [cb](const DrogonDbException &e) {
-              auto resp = HttpResponse::newHttpResponse();
-              resp->setStatusCode(k500InternalServerError);
-              resp->setBody(e.base().what());
-              cb(resp);
-            };
-      },
-      {Get});
-
-  // Multi-query: run N sequential async selects (TE shape). Shared state on heap.
-  app().registerHandler(
-      "/queries",
-      [](const HttpRequestPtr &req,
-         std::function<void(const HttpResponsePtr &)> &&cb) {
-        const int n = clamp_queries(req);
-        struct State {
-          int remaining;
-          Json::Value arr;
-          std::function<void(const HttpResponsePtr &)> cb;
-          std::function<void()> step;
-        };
-        auto st = std::make_shared<State>();
-        st->remaining = n;
-        st->arr = Json::Value(Json::arrayValue);
-        st->cb = std::move(cb);
-        auto client = app().getDbClient();
-
-        st->step = [st, client]() {
-          if (st->remaining <= 0) {
-            auto resp = HttpResponse::newHttpJsonResponse(st->arr);
-            resp->addHeader("Server", "Drogon");
-            st->cb(resp);
-            return;
-          }
-          st->remaining--;
-          int id = random_id();
-          *client << "SELECT id, randomNumber FROM world WHERE id = ?" << id >>
-              [st](const Result &r) {
-                if (!r.empty()) {
-                  Json::Value j;
-                  j["id"] = r[0]["id"].as<int>();
-                  j["randomNumber"] = r[0]["randomNumber"].as<int>();
-                  st->arr.append(j);
-                }
-                st->step();
-              } >>
-              [st](const DrogonDbException &e) {
-                auto resp = HttpResponse::newHttpResponse();
-                resp->setStatusCode(k500InternalServerError);
-                resp->setBody(e.base().what());
-                st->cb(resp);
-              };
-        };
-        st->step();
       },
       {Get});
 

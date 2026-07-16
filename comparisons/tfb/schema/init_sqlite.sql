@@ -1,30 +1,13 @@
--- TechEmpower-compatible seed data (SQLite).
--- World: 10_000 rows; Fortune: 12 TE rows.
-
+-- Fortune seed only (TE-compatible). No World/JSON tables in this suite.
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 
-DROP TABLE IF EXISTS world;
 DROP TABLE IF EXISTS fortune;
-
-CREATE TABLE world (
-  id INTEGER PRIMARY KEY NOT NULL,
-  randomNumber INTEGER NOT NULL DEFAULT 0
-);
 
 CREATE TABLE fortune (
   id INTEGER PRIMARY KEY NOT NULL,
   message TEXT NOT NULL
 );
-
--- 10k World rows (TE scale)
-WITH RECURSIVE seq(i) AS (
-  SELECT 1
-  UNION ALL
-  SELECT i + 1 FROM seq WHERE i < 10000
-)
-INSERT INTO world (id, randomNumber)
-SELECT i, abs(random() % 10000) + 1 FROM seq;
 
 INSERT INTO fortune (id, message) VALUES
   (1, 'fortune: No such file or directory'),
