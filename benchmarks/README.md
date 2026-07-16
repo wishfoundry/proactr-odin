@@ -22,3 +22,9 @@ Peer · test · RPS · p50 · p99 · errors · workers · host · commit SHAs
 ## empty-ok
 
 Wiring canary only (`../comparisons/empty-ok/`).
+
+## Published
+
+| Report | Host | Notes |
+|--------|------|-------|
+| [tfb-uring-bastion-2026-07-16.md](tfb-uring-bastion-2026-07-16.md) | ranch-bastion | io_uring plaintext + fortunes |
