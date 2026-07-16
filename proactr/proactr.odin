@@ -3,7 +3,6 @@
 // Model: submit ops → reap CQEs → dispatch. No readiness re-arm on the hot path.
 package proactr
 
-import "base:runtime"
 import "core:mem"
 
 // Ring is the proactor handle. One ring per worker is the intended v1 model.
@@ -126,9 +125,10 @@ op_get :: proc(r: ^Ring, id: u32) -> ^Op {
 // submit_* enqueue SQEs (may not enter the kernel until ring_submit / ring_wait).
 
 submit_accept :: proc(r: ^Ring, listen_fd: i32, user: rawptr = nil) -> (id: u32, err: Error) {
-	id, op, e := op_alloc(r)
-	if e != .None {
-		return 0, e
+	op: ^Op
+	id, op, err = op_alloc(r)
+	if err != .None {
+		return 0, err
 	}
 	op.kind = .Accept
 	op.status = .Submitted
@@ -138,9 +138,10 @@ submit_accept :: proc(r: ^Ring, listen_fd: i32, user: rawptr = nil) -> (id: u32,
 }
 
 submit_recv :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u32, err: Error) {
-	id, op, e := op_alloc(r)
-	if e != .None {
-		return 0, e
+	op: ^Op
+	id, op, err = op_alloc(r)
+	if err != .None {
+		return 0, err
 	}
 	op.kind = .Recv
 	op.status = .Submitted
@@ -151,9 +152,10 @@ submit_recv :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u3
 }
 
 submit_send :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u32, err: Error) {
-	id, op, e := op_alloc(r)
-	if e != .None {
-		return 0, e
+	op: ^Op
+	id, op, err = op_alloc(r)
+	if err != .None {
+		return 0, err
 	}
 	op.kind = .Send
 	op.status = .Submitted
@@ -164,9 +166,10 @@ submit_send :: proc(r: ^Ring, fd: i32, buf: []u8, user: rawptr = nil) -> (id: u3
 }
 
 submit_close :: proc(r: ^Ring, fd: i32, user: rawptr = nil) -> (id: u32, err: Error) {
-	id, op, e := op_alloc(r)
-	if e != .None {
-		return 0, e
+	op: ^Op
+	id, op, err = op_alloc(r)
+	if err != .None {
+		return 0, err
 	}
 	op.kind = .Close
 	op.status = .Submitted
@@ -206,6 +209,3 @@ complete_apply :: proc(r: ^Ring, c: Completion) -> ^Op {
 	op.result = c.result
 	return op
 }
-
-// Ensure runtime is linked for context defaults on callbacks later.
-_ :: runtime.default_context

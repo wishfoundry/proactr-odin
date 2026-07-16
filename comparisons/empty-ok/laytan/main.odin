@@ -7,10 +7,10 @@ import "core:net"
 import "core:os"
 import "core:strconv"
 
-// Build with:
+// Build with (from this directory):
 //   odin build . -out:server.bin -o:speed \
-//     -collection:laytan=../../../vendor/laytan/odin-http
-import http "laytan:."
+//     -collection:laytan=../../../vendor/laytan
+import http "laytan:odin-http"
 
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
