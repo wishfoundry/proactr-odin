@@ -22,6 +22,11 @@
 /comparisons/**/cmake-build-*/
 /comparisons/**/CMakeFiles/
 /comparisons/**/*.o
+/comparisons/tfb/go/tfb-go
+/comparisons/tfb/laytan/tfb-laytan
+/comparisons/tfb/**/Cargo.lock
+*.sqlite
+*.sqlite-*
 
 # Language tooling
 **/node_modules/

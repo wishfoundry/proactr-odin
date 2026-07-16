@@ -1,11 +1,23 @@
 # Published benchmarks
 
-Write methodology + tables here after runs on Linux (io_uring).
+## Primary suite: TFB-style
 
-Suggested first baseline:
+See [`../comparisons/tfb/`](../comparisons/tfb/).
 
-1. `comparisons/empty-ok` — pure framing ceiling across ntex, drogon, asio, laytan.
-2. Record kernel, CPU, governor, commit SHAs of this repo and submodules.
-3. Then realistic HTML gen suite (port from vapor-http workload ideas).
+| Report | Status |
+|--------|--------|
+| `tfb-*.md` | Add after first Linux baselining run |
 
-No numbers yet — scaffold only.
+### Required columns
+
+Peer · test · RPS · p50 · p99 · errors · workers · host · commit SHAs
+
+### Do not publish as product claims
+
+- vapor-style gen-HTML bulk RPS
+- `/plaintext` alone
+- Fortunes without DB + HTML escape
+
+## empty-ok
+
+Wiring canary only (`../comparisons/empty-ok/`).

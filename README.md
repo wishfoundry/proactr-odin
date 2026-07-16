@@ -65,23 +65,37 @@ odin build comparisons/empty-ok/proactr -out:comparisons/empty-ok/proactr/server
 ./comparisons/empty-ok/run_bench.sh
 ```
 
-## Benchmark peers
+## Benchmarks (primary: TFB-style)
 
-| Peer | Repo | Role in suite |
-|------|------|----------------|
-| **laytan** | vendored `vendor/laytan/odin-http` | Upstream nbio / reactor-shaped baseline |
-| **ntex** | `third_party/ntex` | Rust composable services (tokio / neon-uring) |
-| **compio** | `third_party/compio` | Rust completion I/O (io_uring / IOCP) |
-| **drogon** | `third_party/drogon` | C++ high-perf HTTP |
-| **Boost.Asio** | `third_party/asio` | C++ async model (proactor-capable) |
-| **Seastar** | `third_party/seastar` | Shared-nothing, DPDK-class C++ |
-| **Envoy** | `third_party/envoy` | Production L7 proxy baseline |
+**Headline suite:** [`comparisons/tfb/`](comparisons/tfb/) — TechEmpower-shaped
+`/json`, `/plaintext`, `/fortunes`, `/db`, `/queries` with real JSON encode,
+HTML escaping, and SQLite. Reports **RPS + p50/p99 + errors**.
 
-Init / update peers:
+This deliberately replaces vapor-http’s generated-HTML “realistic” matrix, which
+is optimistic (cheap string append, no escape/DB). See
+[`comparisons/tfb/WORKLOAD.md`](comparisons/tfb/WORKLOAD.md) and
+[`docs/BASELINE_METRICS.md`](docs/BASELINE_METRICS.md).
 
 ```bash
-git submodule update --init --depth 1 --recursive third_party
-# Envoy/Seastar pull large recursive trees — prefer:
+./comparisons/tfb/schema/prepare.sh
+SERVERS="go ntex" ./comparisons/tfb/run_bench.sh
+```
+
+`comparisons/empty-ok/` remains a wiring canary only.
+
+### Peer sources
+
+| Peer | Repo | Role |
+|------|------|------|
+| **laytan** | `vendor/laytan/odin-http` | Upstream nbio baseline |
+| **ntex** | `third_party/ntex` | Rust HTTP (tokio / neon-uring) |
+| **compio** | `third_party/compio` | Completion I/O runtime |
+| **drogon** | `third_party/drogon` | C++ HTTP |
+| **Boost.Asio** | `third_party/asio` | C++ async / proactor patterns |
+| **Seastar** | `third_party/seastar` | Shared-nothing C++ |
+| **Envoy** | `third_party/envoy` | L7 proxy overhead baseline |
+
+```bash
 ./scripts/fetch_third_party.sh
 ```
 

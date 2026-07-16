@@ -5,13 +5,14 @@
 1. Establish **baselines** for peer stacks before optimizing proactr.
 2. Keep workloads **equal** across languages (same routes, body sizes, headers).
 3. Prefer **Linux** numbers for publication (io_uring path).
+4. Prefer **TechEmpower-shaped** work (JSON encode, fortunes+escape, DB) over optimistic string-append “gen HTML”.
 
 ## Workloads
 
 | Suite | Purpose |
 |-------|---------|
-| `comparisons/empty-ok` | Minimal `200 OK` / tiny body — pure I/O + framing ceiling |
-| `comparisons/realistic` | Generated HTML sizes + POST echo (equal gen cost) |
+| **`comparisons/tfb`** | **Primary.** TE-style `/json` `/plaintext` `/fortunes` `/db` `/queries` |
+| `comparisons/empty-ok` | Wiring canary only — not a product baseline |
 
 ## Peers
 
