@@ -1,0 +1,43 @@
+# Build artifacts
+*.bin
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+*.dSYM/
+
+# Odin
+*.profraw
+*.profdata
+
+# Benchmarks / local runs
+/tmp/
+*.log
+/results/
+/benchmarks/results/
+/comparisons/**/target/
+/comparisons/**/build/
+/comparisons/**/cmake-build-*/
+/comparisons/**/CMakeFiles/
+/comparisons/**/*.o
+
+# Language tooling
+**/node_modules/
+**/.cargo/
+**/.cache/
+**/__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Generated certs for local TLS benches
+**/*.pem
+!**/*.pem.example
