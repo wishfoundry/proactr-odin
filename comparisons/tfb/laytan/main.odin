@@ -1,5 +1,4 @@
-// Plain text + HTML peer on vendored laytan/odin-http.
-// /plaintext: live. /fortunes: 501 until SQLite is linked (fail closed).
+// Size ladder + fortunes stub on laytan/odin-http (nbio/io_uring on Linux).
 package main
 
 import "core:fmt"
@@ -7,11 +6,18 @@ import "core:log"
 import "core:net"
 import "core:os"
 import "core:strconv"
+import "core:strings"
 
 import http "laytan:odin-http"
 
+P_4K, P_64K, P_1M, P_4M: string
+
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
+	P_4K = make_payload(4 * 1024)
+	P_64K = make_payload(64 * 1024)
+	P_1M = make_payload(1024 * 1024)
+	P_4M = make_payload(4 * 1024 * 1024)
 
 	port := 18080
 	if p, ok := os.lookup_env("PORT", context.allocator); ok {
@@ -28,12 +34,13 @@ main :: proc() {
 	defer http.router_destroy(&router)
 
 	http.route_get(&router, "/plaintext", http.handler(on_plaintext))
+	http.route_get(&router, "/s/4k", http.handler(on_4k))
+	http.route_get(&router, "/s/64k", http.handler(on_64k))
+	http.route_get(&router, "/s/1m", http.handler(on_1m))
+	http.route_get(&router, "/s/4m", http.handler(on_4m))
 	http.route_get(&router, "/fortunes", http.handler(on_fortunes))
 
-	log.infof(
-		"laytan tfb peer on :%d io=nbio/io_uring(Linux) fortunes=501 until SQLITE linked",
-		port,
-	)
+	log.infof("laytan tfb peer on :%d io=nbio/io_uring size-ladder=on fortunes=501", port)
 	err := http.listen_and_serve(
 		&s,
 		http.router_handler(&router),
@@ -42,9 +49,39 @@ main :: proc() {
 	fmt.assertf(err == nil, "server stopped: %v", err)
 }
 
+make_payload :: proc(n: int) -> string {
+	pat := "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF"
+	b := strings.builder_make()
+	for strings.builder_len(b) < n {
+		strings.write_string(&b, pat)
+	}
+	s := strings.to_string(b)
+	return s[:n]
+}
+
 on_plaintext :: proc(req: ^http.Request, res: ^http.Response) {
 	http.headers_set(&res.headers, "server", "Laytan")
 	http.respond_plain(res, "Hello, World!")
+}
+
+on_4k :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, P_4K)
+}
+
+on_64k :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, P_64K)
+}
+
+on_1m :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, P_1M)
+}
+
+on_4m :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, P_4M)
 }
 
 on_fortunes :: proc(req: ^http.Request, res: ^http.Response) {

@@ -1,8 +1,4 @@
-//! Plain text + HTML ntex peer (no JSON).
-//!
-//! I/O backend (see Cargo.toml):
-//! - Linux: ntex `neon-uring` → io_uring
-//! - else: tokio (dev only; not an uring baseline)
+//! Plain text + size ladder + fortunes. Linux: neon-uring (io_uring).
 
 use ntex::web::{self, App, Error, HttpResponse};
 use once_cell::sync::Lazy;
@@ -25,17 +21,62 @@ static DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     Mutex::new(conn)
 });
 
+fn make_payload(n: usize) -> Vec<u8> {
+    const PAT: &[u8] = b"0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF";
+    let mut b = vec![0u8; n];
+    for (i, x) in b.iter_mut().enumerate() {
+        *x = PAT[i % PAT.len()];
+    }
+    b
+}
+
+static P_4K: Lazy<Vec<u8>> = Lazy::new(|| make_payload(4 * 1024));
+static P_64K: Lazy<Vec<u8>> = Lazy::new(|| make_payload(64 * 1024));
+static P_1M: Lazy<Vec<u8>> = Lazy::new(|| make_payload(1024 * 1024));
+static P_4M: Lazy<Vec<u8>> = Lazy::new(|| make_payload(4 * 1024 * 1024));
+
 struct Fortune {
     id: i32,
     message: String,
 }
 
-#[web::get("/plaintext")]
-async fn plaintext() -> HttpResponse {
+fn plain_slice(body: &'static [u8]) -> HttpResponse {
     HttpResponse::Ok()
         .header("Server", "Ntex")
         .header("Content-Type", "text/plain")
-        .body("Hello, World!")
+        .body(body)
+}
+
+fn plain_owned(body: Vec<u8>) -> HttpResponse {
+    HttpResponse::Ok()
+        .header("Server", "Ntex")
+        .header("Content-Type", "text/plain")
+        .body(body)
+}
+
+#[web::get("/plaintext")]
+async fn plaintext() -> HttpResponse {
+    plain_slice(b"Hello, World!")
+}
+
+#[web::get("/s/4k")]
+async fn s4k() -> HttpResponse {
+    plain_owned(P_4K.clone())
+}
+
+#[web::get("/s/64k")]
+async fn s64k() -> HttpResponse {
+    plain_owned(P_64K.clone())
+}
+
+#[web::get("/s/1m")]
+async fn s1m() -> HttpResponse {
+    plain_owned(P_1M.clone())
+}
+
+#[web::get("/s/4m")]
+async fn s4m() -> HttpResponse {
+    plain_owned(P_4M.clone())
 }
 
 #[web::get("/fortunes")]
@@ -105,20 +146,29 @@ async fn main() -> std::io::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(18080);
     let _ = &*DB;
+    let _ = (&*P_4K, &*P_64K, &*P_1M, &*P_4M);
     let backend = if cfg!(target_os = "linux") {
         "neon-uring/io_uring"
     } else {
         "tokio (non-Linux dev)"
     };
     println!("ntex tfb peer on 0.0.0.0:{port} db={} io={backend}", *DB_PATH);
-    web::server(|| App::new().service(plaintext).service(fortunes))
-        .bind(format!("0.0.0.0:{port}"))?
-        .workers(
-            env::var("WORKERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1),
-        )
-        .run()
-        .await
+    web::server(|| {
+        App::new()
+            .service(plaintext)
+            .service(s4k)
+            .service(s64k)
+            .service(s1m)
+            .service(s4m)
+            .service(fortunes)
+    })
+    .bind(format!("0.0.0.0:{port}"))?
+    .workers(
+        env::var("WORKERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1),
+    )
+    .run()
+    .await
 }

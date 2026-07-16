@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TFB plaintext/HTML harness — default peers are io_uring-backed on Linux.
+# Full TFB harness: size ladder + fortunes across uring + epoll peers (+ optional envoy).
 set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${HOME}/.cargo/bin:${HOME}/go/bin:/usr/local/bin:${PATH}"
 
@@ -8,56 +8,53 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
 PORT="${PORT:-18080}"
-WORKERS="${WORKERS:-1}"
-BENCH_C="${BENCH_C:-64}"
+UPSTREAM_PORT="${UPSTREAM_PORT:-18081}"
+WORKERS="${WORKERS:-8}"
+BENCH_C="${BENCH_C:-100}"
 BENCH_Z="${BENCH_Z:-15s}"
 WARMUP_Z="${WARMUP_Z:-3s}"
 DATABASE_PATH="${DATABASE_PATH:-/tmp/proactr-tfb.sqlite}"
-# Default: io_uring class only. go/drogon are epoll-class (opt-in).
+# Full app-server matrix (uring + epoll). Envoy/seastar opt-in.
 if [[ "$(uname -s)" == "Linux" ]]; then
-  SERVERS="${SERVERS:-ntex ntex-compio compio laytan}"
+  SERVERS="${SERVERS:-ntex ntex-compio compio asio laytan go drogon}"
 else
-  SERVERS="${SERVERS:-ntex}" # dev only (tokio on non-Linux)
+  SERVERS="${SERVERS:-ntex go}"
 fi
-TESTS="${TESTS:-plaintext fortunes}"
+TESTS="${TESTS:-plaintext s4k s64k s1m s4m fortunes}"
 LOGDIR="${LOGDIR:-/tmp/proactr-tfb-logs}"
-REQUIRE_URING="${REQUIRE_URING:-}"
+REQUIRE_URING="${REQUIRE_URING:-0}"
 mkdir -p "$LOGDIR"
 
 export DATABASE_PATH PORT WORKERS
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-if [[ "$(uname -s)" == "Linux" ]]; then
-  if [[ "${REQUIRE_URING:-1}" == "1" ]]; then
-    "$ROOT/scripts/check_io_uring.sh" | tee "$LOGDIR/io_uring_check.txt"
-  fi
-  IO_BACKEND=io_uring
-else
-  IO_BACKEND="not-linux (not an uring baseline)"
+if [[ "$(uname -s)" == "Linux" && "${REQUIRE_URING}" == "1" ]]; then
+  "$ROOT/scripts/check_io_uring.sh" | tee "$LOGDIR/io_uring_check.txt" || true
 fi
 
 if [[ ! -f "$DATABASE_PATH" ]]; then
-  echo "Preparing DB at $DATABASE_PATH"
   DATABASE_PATH="$DATABASE_PATH" ./schema/prepare.sh
 fi
 
 if ! have oha && ! have bombardier && ! have wrk; then
-  echo "Need oha (preferred), bombardier, or wrk on PATH" >&2
+  echo "Need oha, bombardier, or wrk" >&2
   exit 1
 fi
 
 kill_port() {
+  local p="${1:-$PORT}"
   if have lsof; then
-    lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null || true
+    lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
   fi
-  sleep 0.3
+  sleep 0.25
 }
 
 wait_up() {
-  local i
-  for i in $(seq 1 100); do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/plaintext" 2>/dev/null || echo 000)
+  local p="${1:-$PORT}"
+  local i code
+  for i in $(seq 1 120); do
+    code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${p}/plaintext" 2>/dev/null || echo 000)
     if [[ "$code" == "200" ]]; then
       return 0
     fi
@@ -69,19 +66,20 @@ wait_up() {
 path_for_test() {
   case "$1" in
     plaintext) echo /plaintext ;;
+    s4k) echo /s/4k ;;
+    s64k) echo /s/64k ;;
+    s1m) echo /s/1m ;;
+    s4m) echo /s/4m ;;
     fortunes) echo /fortunes ;;
     *) echo "/$1" ;;
   esac
 }
 
 run_load() {
-  local name="$1"
-  local test="$2"
+  local name="$1" test="$2"
   local url="http://127.0.0.1:${PORT}$(path_for_test "$test")"
   local out="$LOGDIR/${name}_${test}.txt"
-
-  echo "  load $test → $url (c=$BENCH_C z=$BENCH_Z warmup=$WARMUP_Z)"
-
+  echo "  load $test → $url (c=$BENCH_C z=$BENCH_Z)"
   if have oha; then
     oha -z "$WARMUP_Z" -c "$BENCH_C" --no-tui "$url" >/dev/null 2>&1 || true
     if oha --help 2>&1 | grep -q latency-correction; then
@@ -96,135 +94,174 @@ run_load() {
   fi
 }
 
-summarize_line() {
-  local name="$1" test="$2" file="$3"
-  local rps p50 p99 err
-  rps="?"; p50="?"; p99="?"; err=""
-  if [[ -f "$file" ]]; then
-    rps=$(awk '/Requests\/sec/ {print $2; exit}' "$file" 2>/dev/null || true)
-    [[ -z "$rps" ]] && rps=$(awk '/Reqs\/sec/ {print $2; exit}' "$file" 2>/dev/null || true)
-    p50=$(awk '/50%/ {print $2; exit}' "$file" 2>/dev/null || true)
-    p99=$(awk '/99%/ {print $2; exit}' "$file" 2>/dev/null || true)
-    [[ -z "$p50" ]] && p50=$(awk '/Latency/ {print $2; exit}' "$file" 2>/dev/null || true)
-    err=$(awk '/Non-2xx|5xx|Error/ {print; exit}' "$file" 2>/dev/null | head -c 48 || true)
-  fi
-  printf '%-12s %-10s %12s %10s %10s  %s\n' "$name" "$test" "${rps:-?}" "${p50:-?}" "${p99:-?}" "${err:-}"
+rps_from() {
+  awk '/Requests\/sec/ {print $2; exit} /Reqs\/sec/ {print $2; exit}' "$1" 2>/dev/null || echo "?"
+}
+
+lat_from() {
+  awk '/Latency/ {print $2; exit}' "$1" 2>/dev/null || echo "?"
 }
 
 start_peer() {
   local name="$1"
-  kill_port
+  kill_port "$PORT"
+  kill_port "$UPSTREAM_PORT"
+  ENVOY_UPSTREAM_PID=""
+  ENVOY_CID=""
   case "$name" in
     ntex)
-      if [[ ! -x ntex/target/release/ntex-tfb ]]; then
-        (cd ntex && cargo build --release) || return 1
-      fi
+      [[ -x ntex/target/release/ntex-tfb ]] || (cd ntex && cargo build --release)
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         ./ntex/target/release/ntex-tfb >"$LOGDIR/ntex.server.log" 2>&1 &
       ;;
     ntex-compio)
-      if [[ ! -x ntex-compio/target/release/ntex-compio-tfb ]]; then
-        (cd ntex-compio && cargo build --release) || return 1
-      fi
+      [[ -x ntex-compio/target/release/ntex-compio-tfb ]] || (cd ntex-compio && cargo build --release)
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         ./ntex-compio/target/release/ntex-compio-tfb >"$LOGDIR/ntex-compio.server.log" 2>&1 &
       ;;
     compio)
-      if [[ ! -x compio/target/release/compio-tfb ]]; then
-        (cd compio && cargo build --release) || return 1
-      fi
+      [[ -x compio/target/release/compio-tfb ]] || (cd compio && cargo build --release)
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         ./compio/target/release/compio-tfb >"$LOGDIR/compio.server.log" 2>&1 &
       ;;
     asio)
-      if [[ ! -x asio/asio_tfb ]]; then
-        ./asio/build.sh || return 1
-      fi
-      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+      [[ -x asio/asio_tfb ]] || ./asio/build.sh
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" \
         ./asio/asio_tfb >"$LOGDIR/asio.server.log" 2>&1 &
       ;;
     laytan)
-      if [[ ! -x laytan/tfb-laytan ]]; then
-        (cd laytan && odin build . -out:tfb-laytan -o:speed \
-          -collection:laytan="$ROOT/vendor/laytan") || return 1
-      fi
+      [[ -x laytan/tfb-laytan ]] || (cd laytan && odin build . -out:tfb-laytan -o:speed \
+        -collection:laytan="$ROOT/vendor/laytan")
       env PORT="$PORT" ./laytan/tfb-laytan >"$LOGDIR/laytan.server.log" 2>&1 &
       ;;
-    proactr)
-      echo "skip proactr (host not live)"
-      return 1
-      ;;
     go)
-      echo "WARN: go net/http is epoll/kqueue — not io_uring"
-      if [[ ! -x go/tfb-go ]]; then
-        (cd go && go build -o tfb-go .) || return 1
-      fi
+      [[ -x go/tfb-go ]] || (cd go && go build -o tfb-go .)
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         ./go/tfb-go >"$LOGDIR/go.server.log" 2>&1 &
       ;;
     drogon)
-      echo "WARN: drogon has no io_uring backend"
       if [[ ! -x drogon/build/drogon_tfb ]]; then
-        echo "skip drogon (not built)"
-        return 1
+        ./drogon/build.sh || return 1
       fi
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         ./drogon/build/drogon_tfb >"$LOGDIR/drogon.server.log" 2>&1 &
       ;;
+    envoy)
+      if ! have docker; then
+        echo "envoy needs docker"; return 1
+      fi
+      [[ -x ntex/target/release/ntex-tfb ]] || (cd ntex && cargo build --release)
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$UPSTREAM_PORT" WORKERS="$WORKERS" \
+        ./ntex/target/release/ntex-tfb >"$LOGDIR/envoy-upstream.server.log" 2>&1 &
+      ENVOY_UPSTREAM_PID=$!
+      if ! wait_up "$UPSTREAM_PORT"; then
+        echo "envoy upstream failed"; return 1
+      fi
+      # rewrite yaml port if needed — use stock yaml (18080 + upstream 18081)
+      ENVOY_CID=$(docker run -d --rm --network host \
+        -v "$HERE/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
+        envoyproxy/envoy:v1.31-latest -c /etc/envoy/envoy.yaml 2>"$LOGDIR/envoy.docker.err" || true)
+      if [[ -z "$ENVOY_CID" ]]; then
+        echo "envoy docker failed"; cat "$LOGDIR/envoy.docker.err" || true
+        kill "$ENVOY_UPSTREAM_PID" 2>/dev/null || true
+        return 1
+      fi
+      echo "$ENVOY_CID" >"$LOGDIR/envoy.cid"
+      # wait for proxy
+      if ! wait_up "$PORT"; then
+        docker kill "$ENVOY_CID" 2>/dev/null || true
+        kill "$ENVOY_UPSTREAM_PID" 2>/dev/null || true
+        return 1
+      fi
+      # fake pid for harness — use upstream pid; cleanup special-cased
+      echo "$ENVOY_UPSTREAM_PID"
+      return 0
+      ;;
+    seastar)
+      echo "seastar not automated (see seastar/README.md)"; return 1
+      ;;
+    proactr)
+      echo "proactr host not live"; return 1
+      ;;
     *)
-      echo "unknown peer $name" >&2
-      return 1
+      echo "unknown peer $name" >&2; return 1
       ;;
   esac
   local pid=$!
-  if ! wait_up; then
-    echo "FAIL start $name (see $LOGDIR/${name}.server.log)"
+  if ! wait_up "$PORT"; then
+    echo "FAIL start $name (log $LOGDIR/${name}.server.log)"
     kill "$pid" 2>/dev/null || true
     return 1
   fi
   echo "$pid"
 }
 
-echo "=== proactr-odin TFB baselines (io_uring class) ==="
-echo "host=$(uname -s) $(uname -m)  kernel=$(uname -r 2>/dev/null || true)"
-echo "IO_BACKEND=$IO_BACKEND  db=$DATABASE_PATH  port=$PORT  workers=$WORKERS"
-echo "c=$BENCH_C duration=$BENCH_Z warmup=$WARMUP_Z"
-echo "servers=$SERVERS tests=$TESTS"
+stop_peer() {
+  local name="$1" pid="${2:-}"
+  if [[ "$name" == "envoy" ]]; then
+    if [[ -f "$LOGDIR/envoy.cid" ]]; then
+      docker kill "$(cat "$LOGDIR/envoy.cid")" 2>/dev/null || true
+      rm -f "$LOGDIR/envoy.cid"
+    fi
+    kill_port "$UPSTREAM_PORT"
+  fi
+  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  kill_port "$PORT"
+}
+
+echo "=== proactr-odin TFB (size ladder + fortunes) ==="
+echo "host=$(uname -s) $(uname -m) kernel=$(uname -r 2>/dev/null || true)"
+echo "db=$DATABASE_PATH port=$PORT workers=$WORKERS c=$BENCH_C z=$BENCH_Z"
+echo "servers=$SERVERS"
+echo "tests=$TESTS"
 echo "logs=$LOGDIR"
 echo ""
 
-SUMMARY="$LOGDIR/summary.txt"
+# matrix header
+SUMMARY="$LOGDIR/summary.tsv"
 {
-  echo "IO_BACKEND=$IO_BACKEND"
-  printf '%-12s %-10s %12s %10s %10s  %s\n' PEER TEST RPS p50 p99 notes
-  printf '%-12s %-10s %12s %10s %10s  %s\n' ---- ---- --- --- --- -----
+  printf 'peer'
+  for t in $TESTS; do printf '\t%s' "$t"; done
+  printf '\n'
 } | tee "$SUMMARY"
+
+DETAIL="$LOGDIR/detail.txt"
+: >"$DETAIL"
 
 for srv in $SERVERS; do
   echo "==> peer $srv"
   pid=""
   if ! pid=$(start_peer "$srv"); then
     echo "  (skip $srv)"
+    {
+      printf '%s' "$srv"
+      for t in $TESTS; do printf '\tskip'; done
+      printf '\n'
+    } | tee -a "$SUMMARY"
     continue
   fi
+  row="$srv"
   for t in $TESTS; do
     if [[ "$srv" == "laytan" && "$t" == "fortunes" ]]; then
-      echo "  skip fortunes (laytan DB not linked; would 501)"
-      printf '%-12s %-10s %12s %10s %10s  %s\n' "$srv" "$t" "n/a" "n/a" "n/a" "501-not-implemented" | tee -a "$SUMMARY"
+      echo "  skip fortunes (501)"
+      row+=$'\tn/a'
+      echo "$srv $t n/a" >>"$DETAIL"
       continue
     fi
     run_load "$srv" "$t" || true
-    summarize_line "$srv" "$t" "$LOGDIR/${srv}_${t}.txt" | tee -a "$SUMMARY"
+    rps=$(rps_from "$LOGDIR/${srv}_${t}.txt")
+    lat=$(lat_from "$LOGDIR/${srv}_${t}.txt")
+    row+=$'\t'"$rps"
+    echo "$srv $t rps=$rps lat_avg=$lat" | tee -a "$DETAIL"
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  kill_port
+  printf '%s\n' "$row" | tee -a "$SUMMARY"
+  stop_peer "$srv" "$pid"
 done
 
 echo ""
-echo "=== Summary ==="
-cat "$SUMMARY"
+echo "=== RPS matrix (columns = tests) ==="
+column -t -s $'\t' "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
 echo ""
-echo "Full logs: $LOGDIR"
-echo "Uring peers: ntex(neon-uring) ntex-compio compio asio laytan proactr"
-echo "Not uring (opt-in only): go drogon"
+echo "Detail: $DETAIL"
+echo "Logs: $LOGDIR"

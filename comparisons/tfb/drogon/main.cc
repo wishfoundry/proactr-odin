@@ -1,4 +1,4 @@
-// Plain text + HTML Drogon peer (SQLite fortunes, no JSON).
+// Size ladder + fortunes. Drogon/trantor = epoll (not io_uring).
 #include <drogon/drogon.h>
 #include <algorithm>
 #include <cstdlib>
@@ -8,6 +8,17 @@
 #include <vector>
 
 using namespace drogon;
+
+static std::string make_payload(size_t n) {
+  static const char *pat =
+      "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF";
+  std::string s(n, 'x');
+  for (size_t i = 0; i < n; ++i)
+    s[i] = pat[i % 64];
+  return s;
+}
+
+static std::string P_4K, P_64K, P_1M, P_4M;
 
 struct Fortune {
   int id;
@@ -19,27 +30,24 @@ static std::string html_escape(const std::string &s) {
   out.reserve(s.size());
   for (char c : s) {
     switch (c) {
-    case '&':
-      out += "&amp;";
-      break;
-    case '<':
-      out += "&lt;";
-      break;
-    case '>':
-      out += "&gt;";
-      break;
-    case '"':
-      out += "&quot;";
-      break;
-    case '\'':
-      out += "&#39;";
-      break;
-    default:
-      out += c;
-      break;
+    case '&': out += "&amp;"; break;
+    case '<': out += "&lt;"; break;
+    case '>': out += "&gt;"; break;
+    case '"': out += "&quot;"; break;
+    case '\'': out += "&#39;"; break;
+    default: out += c; break;
     }
   }
   return out;
+}
+
+static void plain(const std::string &body,
+                  std::function<void(const HttpResponsePtr &)> &&cb) {
+  auto resp = HttpResponse::newHttpResponse();
+  resp->setContentTypeCode(CT_TEXT_PLAIN);
+  resp->setBody(body);
+  resp->addHeader("Server", "Drogon");
+  cb(resp);
 }
 
 int main() {
@@ -52,6 +60,11 @@ int main() {
   if (const char *w = std::getenv("WORKERS"))
     workers = static_cast<size_t>(std::stoul(w));
 
+  P_4K = make_payload(4 * 1024);
+  P_64K = make_payload(64 * 1024);
+  P_1M = make_payload(1024 * 1024);
+  P_4M = make_payload(4 * 1024 * 1024);
+
   app().createDbClient("sqlite3", dbPath, 0, "", "", "",
                        std::max<size_t>(workers * 2, 4));
 
@@ -59,11 +72,35 @@ int main() {
       "/plaintext",
       [](const HttpRequestPtr &,
          std::function<void(const HttpResponsePtr &)> &&cb) {
-        auto resp = HttpResponse::newHttpResponse();
-        resp->setContentTypeCode(CT_TEXT_PLAIN);
-        resp->setBody("Hello, World!");
-        resp->addHeader("Server", "Drogon");
-        cb(resp);
+        plain("Hello, World!", std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/s/4k",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain(P_4K, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/s/64k",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain(P_64K, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/s/1m",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain(P_1M, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/s/4m",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain(P_4M, std::move(cb));
       },
       {Get});
 
@@ -110,7 +147,7 @@ int main() {
       {Get});
 
   std::cout << "drogon tfb peer on 0.0.0.0:" << port << " db=" << dbPath
-            << std::endl;
+            << " io=trantor/epoll workers=" << workers << std::endl;
   app()
       .setLogLevel(trantor::Logger::kWarn)
       .addListener("0.0.0.0", port)

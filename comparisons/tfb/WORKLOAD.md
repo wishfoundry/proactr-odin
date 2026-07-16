@@ -1,85 +1,43 @@
-# Plain text / HTML baselines
+# Plain text / HTML baselines (+ payload size ladder)
 
-Compares HTTP stacks on **text/plain** and **text/html** only.
+No JSON. Two goals:
 
-JSON is **out of scope** for now — encoder choice (sonic vs serde vs encoding/json
-vs JsonCpp) dominates RPS and muddies I/O / host comparison.
+1. **App-shaped work:** `/fortunes` (DB + sort + HTML escape)
+2. **Payload size ladder:** fixed `text/plain` bodies so we can track RPS vs size
 
 ## Endpoints
 
-| Path | Content-Type | Work |
-|------|--------------|------|
-| `GET /plaintext` | `text/plain` | Body `Hello, World!` each response — **I/O ceiling** |
-| `GET /fortunes` | `text/html; charset=utf-8` | **Primary.** SQLite fetch all fortunes → append runtime row → **sort by message** → HTML table with **escaped** messages |
+| Path | Content-Type | Body size | Work |
+|------|--------------|----------:|------|
+| `GET /plaintext` | `text/plain` | 13 B | `Hello, World!` — framing ceiling |
+| `GET /s/4k` | `text/plain` | 4 KiB | Fixed body (startup-filled buffer) |
+| `GET /s/64k` | `text/plain` | 64 KiB | ″ |
+| `GET /s/1m` | `text/plain` | 1 MiB | ″ |
+| `GET /s/4m` | `text/plain` | 4 MiB | ″ |
+| `GET /fortunes` | `text/html; charset=utf-8` | ~1–2 KiB | SQLite + sort + **escape** |
 
-No `/json`, `/db`, or `/queries` in this suite.
+Size ladder bodies are **immutable after init** (filled with a printable pattern). That measures **send/copy path** under keep-alive, not app generation cost. Fortunes is the generation/escape test.
 
-## Why fortunes (not vapor gen-HTML)
+Exact sizes (bytes):
 
-| vapor gen-HTML | This `/fortunes` |
-|----------------|------------------|
-| Trusted template-ish append | Untrusted messages must be **escaped** |
-| No data plane | Real **DB read** every request |
-| Large bodies for bandwidth theater | Small TE-sized table (app-shaped) |
-| XSS never appears | Includes `<script>…` probe + UTF-8 Japanese |
+| Name | Bytes |
+|------|------:|
+| plaintext | 13 |
+| s4k | 4096 |
+| s64k | 65536 |
+| s1m | 1048576 |
+| s4m | 4194304 |
 
-## Fortune rules (TE-compatible)
+## Fortune rules
 
-Seed: 12 rows (see `schema/init_sqlite.sql`), including:
+Unchanged: TE 12-row seed, runtime insert, sort by message, escape `& < > " '`.
 
-- `<script>alert("This should not be displayed in a browser alert box.");</script>`
-- `フレームワークのベンチマーク`
+## Peer classes
 
-Per request:
+| Class | Peers | I/O |
+|-------|-------|-----|
+| **io_uring** | ntex (neon-uring), ntex-compio, compio, asio, laytan, proactr | Linux completion path |
+| **epoll / other** | go, drogon | portable stacks (labeled) |
+| **heavy / optional** | seastar, envoy | build or docker; see peer README |
 
-1. `SELECT id, message FROM fortune` (must not hardcode the list as the only path)
-2. Append `{id:0, message:"Additional fortune added at request time."}`
-3. Sort by **message** ascending
-4. Render:
-
-```html
-<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table>
-<tr><th>id</th><th>message</th></tr>
-<tr><td>…</td><td>…escaped…</td></tr>
-…
-</table></body></html>
-```
-
-Escape at least: `& < > " '`.
-
-## Database
-
-```bash
-./schema/prepare.sh
-export DATABASE_PATH=/tmp/proactr-tfb.sqlite
-```
-
-SQLite only for v1. In-memory fortune tables without a SQL read are **not** allowed for published numbers.
-
-## Headers
-
-| Header | Value |
-|--------|--------|
-| `Server` | peer short name |
-| `Content-Type` | as above |
-
-## Load methodology
-
-1. Warmup (default 3s), then steady duration (default 15s)
-2. Prefer **oha** with `--latency-correction`
-3. Report **RPS (2xx)**, **p50**, **p99**, **errors**
-4. Equal `WORKERS` across peers
-
-## Ranking
-
-| Test | Role |
-|------|------|
-| `/fortunes` | **Primary** product comparison |
-| `/plaintext` | Ceiling / sanity only — never the sole claim |
-
-## Anti-cheat
-
-- No immortal prebuilt HTML for `/fortunes`
-- No skipping escape
-- No compile-time-only fortune list without DB
-- No JSON endpoints masquerading as this suite
+Default `SERVERS` on Linux includes both uring and epoll app servers. Envoy/seastar opt-in via env.

@@ -1,15 +1,9 @@
-// Plain text + HTML Asio peer with io_uring (Linux).
-// Build: build.sh (defines BOOST_ASIO_HAS_IO_URING + BOOST_ASIO_DISABLE_EPOLL).
-//
-// Fortunes: SQLite via sqlite3 C API. Network path is Asio io_uring.
-
-// Flags also passed on the compiler command line (build.sh).
+// Size ladder + fortunes. Linux: BOOST_ASIO_HAS_IO_URING + DISABLE_EPOLL.
 #include <boost/asio.hpp>
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -19,12 +13,23 @@
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 
+static std::string g_db_path = "/tmp/proactr-tfb.sqlite";
+static std::string P_4K, P_64K, P_1M, P_4M;
+
+static std::string make_payload(size_t n) {
+  static const char *pat =
+      "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF";
+  std::string s;
+  s.resize(n);
+  for (size_t i = 0; i < n; ++i)
+    s[i] = pat[i % 64];
+  return s;
+}
+
 struct Fortune {
   int id;
   std::string message;
 };
-
-static std::string g_db_path = "/tmp/proactr-tfb.sqlite";
 
 static std::string html_escape(const std::string &s) {
   std::string out;
@@ -45,15 +50,13 @@ static std::string html_escape(const std::string &s) {
 static std::string fortunes_html() {
   sqlite3 *db = nullptr;
   if (sqlite3_open_v2(g_db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
-      SQLITE_OK) {
+      SQLITE_OK)
     return "db open failed";
-  }
   sqlite3_busy_timeout(db, 5000);
   std::vector<Fortune> list;
-  list.reserve(16);
-  const char *sql = "SELECT id, message FROM fortune";
   sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+  if (sqlite3_prepare_v2(db, "SELECT id, message FROM fortune", -1, &stmt,
+                         nullptr) == SQLITE_OK) {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       Fortune f;
       f.id = sqlite3_column_int(stmt, 0);
@@ -64,21 +67,15 @@ static std::string fortunes_html() {
   }
   sqlite3_finalize(stmt);
   sqlite3_close(db);
-
   list.push_back(Fortune{0, "Additional fortune added at request time."});
   std::sort(list.begin(), list.end(),
             [](const Fortune &a, const Fortune &b) { return a.message < b.message; });
-
-  std::string html;
-  html.reserve(2048);
-  html += "<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table>";
-  html += "<tr><th>id</th><th>message</th></tr>";
+  std::string html =
+      "<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table>"
+      "<tr><th>id</th><th>message</th></tr>";
   for (const auto &f : list) {
-    html += "<tr><td>";
-    html += std::to_string(f.id);
-    html += "</td><td>";
-    html += html_escape(f.message);
-    html += "</td></tr>";
+    html += "<tr><td>" + std::to_string(f.id) + "</td><td>" +
+            html_escape(f.message) + "</td></tr>";
   }
   html += "</table></body></html>";
   return html;
@@ -86,23 +83,14 @@ static std::string fortunes_html() {
 
 static std::string http_response(const std::string &status, const std::string &ctype,
                                  const std::string &body) {
-  std::string out;
-  out.reserve(body.size() + 160);
-  out += "HTTP/1.1 ";
-  out += status;
-  out += "\r\nServer: Asio\r\nContent-Type: ";
-  out += ctype;
-  out += "\r\nContent-Length: ";
-  out += std::to_string(body.size());
-  out += "\r\nConnection: keep-alive\r\n\r\n";
-  out += body;
-  return out;
+  return "HTTP/1.1 " + status + "\r\nServer: Asio\r\nContent-Type: " + ctype +
+         "\r\nContent-Length: " + std::to_string(body.size()) +
+         "\r\nConnection: keep-alive\r\n\r\n" + body;
 }
 
 class Session : public std::enable_shared_from_this<Session> {
 public:
   explicit Session(tcp::socket socket) : socket_(std::move(socket)) {}
-
   void start() { do_read(); }
 
 private:
@@ -114,39 +102,42 @@ private:
           if (ec)
             return;
           buf_.append(data_, n);
-          for (;;) {
-            auto pos = buf_.find("\r\n\r\n");
-            if (pos == std::string::npos)
-              break;
-            std::string head = buf_.substr(0, pos);
-            buf_.erase(0, pos + 4);
-            std::string resp;
-            if (head.rfind("GET /fortunes", 0) == 0 ||
-                head.find("GET /fortunes ") != std::string::npos) {
-              resp = http_response("200 OK", "text/html; charset=utf-8",
-                                   fortunes_html());
-            } else if (head.rfind("GET /plaintext", 0) == 0 ||
-                       head.find("GET /plaintext ") != std::string::npos ||
-                       head.rfind("GET / ", 0) == 0 || head.rfind("GET / HTTP", 0) == 0) {
-              resp = http_response("200 OK", "text/plain", "Hello, World!");
-            } else {
-              resp = http_response("404 Not Found", "text/plain", "not found");
-            }
-            auto sr = std::make_shared<std::string>(std::move(resp));
-            asio::async_write(
-                socket_, asio::buffer(*sr),
-                [this, self, sr](boost::system::error_code wec, std::size_t) {
-                  if (!wec)
-                    do_read();
-                });
-            return; // one response then wait for write before more reads
+          auto pos = buf_.find("\r\n\r\n");
+          if (pos == std::string::npos) {
+            do_read();
+            return;
           }
-          do_read();
+          std::string head = buf_.substr(0, pos);
+          buf_.erase(0, pos + 4);
+          std::string resp;
+          if (head.find("GET /fortunes") != std::string::npos)
+            resp = http_response("200 OK", "text/html; charset=utf-8",
+                                 fortunes_html());
+          else if (head.find("GET /s/4k") != std::string::npos)
+            resp = http_response("200 OK", "text/plain", P_4K);
+          else if (head.find("GET /s/64k") != std::string::npos)
+            resp = http_response("200 OK", "text/plain", P_64K);
+          else if (head.find("GET /s/1m") != std::string::npos)
+            resp = http_response("200 OK", "text/plain", P_1M);
+          else if (head.find("GET /s/4m") != std::string::npos)
+            resp = http_response("200 OK", "text/plain", P_4M);
+          else if (head.find("GET /plaintext") != std::string::npos ||
+                   head.find("GET / HTTP") != std::string::npos)
+            resp = http_response("200 OK", "text/plain", "Hello, World!");
+          else
+            resp = http_response("404 Not Found", "text/plain", "not found");
+          auto sr = std::make_shared<std::string>(std::move(resp));
+          asio::async_write(
+              socket_, asio::buffer(*sr),
+              [this, self, sr](boost::system::error_code wec, std::size_t) {
+                if (!wec)
+                  do_read();
+              });
         });
   }
 
   tcp::socket socket_;
-  enum { max_length = 4096 };
+  enum { max_length = 8192 };
   char data_[max_length];
   std::string buf_;
 };
@@ -161,13 +152,11 @@ public:
 private:
   void do_accept() {
     acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket socket) {
-      if (!ec) {
+      if (!ec)
         std::make_shared<Session>(std::move(socket))->start();
-      }
       do_accept();
     });
   }
-
   tcp::acceptor acceptor_;
 };
 
@@ -178,11 +167,14 @@ int main() {
     unsigned short port = 18080;
     if (const char *p = std::getenv("PORT"))
       port = static_cast<unsigned short>(std::stoi(p));
-
+    P_4K = make_payload(4 * 1024);
+    P_64K = make_payload(64 * 1024);
+    P_1M = make_payload(1024 * 1024);
+    P_4M = make_payload(4 * 1024 * 1024);
     asio::io_context io;
     Server s(io, port);
     std::cout << "asio tfb peer on 0.0.0.0:" << port << " db=" << g_db_path
-              << " io=asio/io_uring (HAS_IO_URING+DISABLE_EPOLL)" << std::endl;
+              << " io=asio/io_uring" << std::endl;
     io.run();
   } catch (std::exception &e) {
     std::cerr << "exception: " << e.what() << "\n";

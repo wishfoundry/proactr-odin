@@ -1,4 +1,4 @@
-// Plain text + HTML peer: net/http + SQLite fortunes.
+// Plain text size ladder + fortunes (epoll/net poller — not io_uring).
 package main
 
 import (
@@ -20,10 +20,24 @@ type fortune struct {
 	Message string
 }
 
+func makePayload(n int) []byte {
+	const pat = "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF"
+	b := make([]byte, n)
+	for i := 0; i < n; i++ {
+		b[i] = pat[i%len(pat)]
+	}
+	return b
+}
+
 func main() {
 	dbPath := env("DATABASE_PATH", "/tmp/proactr-tfb.sqlite")
 	port := env("PORT", "18080")
 	workers := envInt("WORKERS", 1)
+
+	p4k := makePayload(4 * 1024)
+	p64k := makePayload(64 * 1024)
+	p1m := makePayload(1024 * 1024)
+	p4m := makePayload(4 * 1024 * 1024)
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -33,36 +47,43 @@ func main() {
 	db.SetMaxOpenConns(max(workers*8, 16))
 	db.SetMaxIdleConns(max(workers*4, 8))
 	if err := db.Ping(); err != nil {
-		log.Fatalf("ping %s: %v (run comparisons/tfb/schema/prepare.sh)", dbPath, err)
+		log.Fatalf("ping %s: %v", dbPath, err)
 	}
-	if _, err := db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`); err != nil {
-		log.Printf("pragma: %v", err)
-	}
+	_, _ = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/plaintext", handlePlaintext)
+	mux.HandleFunc("/plaintext", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("Hello, World!"))
+	})
+	mux.HandleFunc("/s/4k", plainBytes(p4k))
+	mux.HandleFunc("/s/64k", plainBytes(p64k))
+	mux.HandleFunc("/s/1m", plainBytes(p1m))
+	mux.HandleFunc("/s/4m", plainBytes(p4m))
 	mux.HandleFunc("/fortunes", handleFortunes(db))
 
 	addr := ":" + port
-	log.Printf("go tfb peer on %s db=%s workers_hint=%d", addr, dbPath, workers)
+	log.Printf("go tfb peer on %s db=%s io=net/http(epoll) workers_hint=%d", addr, dbPath, workers)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           withServerHeader(mux),
+		Handler:           withServer(mux, "Go"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
 
-func withServerHeader(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Server", "Go")
-		next.ServeHTTP(w, r)
-	})
+func plainBytes(body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(body)
+	}
 }
 
-func handlePlaintext(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte("Hello, World!"))
+func withServer(next http.Handler, name string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", name)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleFortunes(db *sql.DB) http.HandlerFunc {
@@ -73,7 +94,6 @@ func handleFortunes(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-
 		list := make([]fortune, 0, 16)
 		for rows.Next() {
 			var f fortune
