@@ -30,7 +30,10 @@ main :: proc() {
 	http.route_get(&router, "/plaintext", http.handler(on_plaintext))
 	http.route_get(&router, "/fortunes", http.handler(on_fortunes))
 
-	log.infof("laytan tfb peer on :%d (fortunes=501 until SQLITE linked)", port)
+	log.infof(
+		"laytan tfb peer on :%d io=nbio/io_uring(Linux) fortunes=501 until SQLITE linked",
+		port,
+	)
 	err := http.listen_and_serve(
 		&s,
 		http.router_handler(&router),

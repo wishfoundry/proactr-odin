@@ -1,8 +1,8 @@
 //! Plain text + HTML ntex peer (no JSON).
 //!
 //! I/O backend (see Cargo.toml):
-//! - Linux: ntex `neon-uring` → io_uring
-//! - else: tokio (dev only; not an uring baseline)
+//! - Linux: ntex `compio` → io_uring
+//! - else: compio runtime (io_uring on Linux)
 
 use ntex::web::{self, App, Error, HttpResponse};
 use once_cell::sync::Lazy;
@@ -105,12 +105,7 @@ async fn main() -> std::io::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(18080);
     let _ = &*DB;
-    let backend = if cfg!(target_os = "linux") {
-        "neon-uring/io_uring"
-    } else {
-        "tokio (non-Linux dev)"
-    };
-    println!("ntex tfb peer on 0.0.0.0:{port} db={} io={backend}", *DB_PATH);
+    println!("ntex-compio tfb peer on 0.0.0.0:{port} db={} io=compio/io_uring", *DB_PATH);
     web::server(|| App::new().service(plaintext).service(fortunes))
         .bind(format!("0.0.0.0:{port}"))?
         .workers(

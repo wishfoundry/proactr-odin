@@ -75,8 +75,11 @@ See [`comparisons/tfb/WORKLOAD.md`](comparisons/tfb/WORKLOAD.md) and
 [`docs/BASELINE_METRICS.md`](docs/BASELINE_METRICS.md).
 
 ```bash
-./comparisons/tfb/schema/prepare.sh
-SERVERS="go ntex" ./comparisons/tfb/run_bench.sh
+# Linux (ranch-bastion): io_uring peers only by default
+./scripts/check_io_uring.sh
+./comparisons/tfb/build_uring.sh
+./comparisons/tfb/run_bench.sh
+# → ntex(neon-uring), ntex-compio, compio, laytan
 ```
 
 `comparisons/empty-ok/` remains a wiring canary only.

@@ -9,6 +9,20 @@
 
 JSON is intentionally excluded: codec choice varies too much across languages.
 
+## io_uring (Linux / ranch-bastion)
+
+Default peers use **io_uring** for HTTP I/O. See `comparisons/tfb/IO_URING.md`.
+
+| In matrix | Backend |
+|-----------|---------|
+| ntex | neon-uring |
+| ntex-compio | compio |
+| compio | compio-net |
+| asio | Asio io_uring (`DISABLE_EPOLL`) |
+| laytan | core:nbio |
+
+Go / Drogon have **no** net io_uring path — opt-in only, label results `epoll`.
+
 ## Endpoints
 
 | Test | Content-Type | Role |

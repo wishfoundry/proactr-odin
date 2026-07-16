@@ -3,8 +3,16 @@ name = "ntex-tfb"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+# Linux (ranch-bastion): neon-uring → io_uring.
+# Non-Linux: tokio so the crate still typechecks on macOS dev machines;
+# do not publish non-Linux numbers as uring baselines.
+[target.'cfg(target_os = "linux")'.dependencies]
+ntex = { version = "2", default-features = false, features = ["neon-uring"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
 ntex = { version = "2", default-features = false, features = ["tokio"] }
+
+[dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 once_cell = "1"
 

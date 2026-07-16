@@ -1,45 +1,58 @@
-# Plain text / HTML baselines
+# Plain text / HTML baselines (io_uring on Linux)
 
-**No JSON.** Compares stacks on:
+**No JSON.** Routes:
 
 | Path | Role |
 |------|------|
 | `GET /plaintext` | I/O ceiling (`text/plain`) |
-| `GET /fortunes` | **Primary** — DB + sort + HTML escape (`text/html`) |
+| `GET /fortunes` | **Primary** — DB + sort + HTML escape |
 
-See [`WORKLOAD.md`](WORKLOAD.md). Metrics: [`../../docs/BASELINE_METRICS.md`](../../docs/BASELINE_METRICS.md).
+## io_uring (ranch-bastion)
 
-## Quick start
+Default `SERVERS` on Linux are **io_uring-backed only**. See [`IO_URING.md`](IO_URING.md).
+
+| Peer | Backend |
+|------|---------|
+| `ntex` | neon-uring |
+| `ntex-compio` | ntex + compio runtime |
+| `compio` | compio-net (io_uring driver) |
+| `asio` | `BOOST_ASIO_HAS_IO_URING` + `DISABLE_EPOLL` |
+| `laytan` | core:nbio Linux = io_uring |
+| `proactr` | (when live) |
+
+**Not** in default matrix (no net io_uring): `go`, `drogon`.
+
+## ranch-bastion quick start
 
 ```bash
-./schema/prepare.sh
-export DATABASE_PATH=/tmp/proactr-tfb.sqlite
+# from laptop
+rsync -az --exclude '.git' --exclude '**/target' \
+  ./ ranch-bastion.local:Projects/proactr-odin/
 
-(cd go && go build -o tfb-go .)
-(cd ntex && cargo build --release)
-
-SERVERS="go ntex" ./run_bench.sh
+ssh ranch-bastion.local '
+  export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+  cd ~/Projects/proactr-odin
+  ./scripts/check_io_uring.sh
+  ./comparisons/tfb/build_uring.sh
+  SERVERS="ntex ntex-compio compio laytan" \
+    BENCH_Z=15s BENCH_C=64 WORKERS=8 \
+    ./comparisons/tfb/run_bench.sh | tee /tmp/proactr-tfb-uring.log
+'
 ```
 
-## Peers
+Optional Asio (needs `libsqlite3-dev` + `liburing-dev`):
 
-| ID | Routes |
-|----|--------|
-| `go` | plaintext + fortunes |
-| `ntex` | plaintext + fortunes |
-| `drogon` | plaintext + fortunes (build with system Drogon) |
-| `laytan` | plaintext; fortunes 501 until SQLite linked |
-| `proactr` | scaffold |
+```bash
+SERVERS="ntex ntex-compio compio asio laytan" ./comparisons/tfb/run_bench.sh
+```
 
 ## Env
 
-| Var | Default |
-|-----|---------|
-| `DATABASE_PATH` | `/tmp/proactr-tfb.sqlite` |
-| `PORT` | `18080` |
-| `WORKERS` | `1` |
-| `BENCH_C` | `64` |
-| `BENCH_Z` | `15s` |
-| `WARMUP_Z` | `3s` |
-| `SERVERS` | `go ntex` |
+| Var | Default (Linux) |
+|-----|-----------------|
+| `SERVERS` | `ntex ntex-compio compio laytan` |
 | `TESTS` | `plaintext fortunes` |
+| `REQUIRE_URING` | `1` (runs `scripts/check_io_uring.sh`) |
+| `DATABASE_PATH` | `/tmp/proactr-tfb.sqlite` |
+| `WORKERS` | `1` |
+| `BENCH_C` / `BENCH_Z` | `64` / `15s` |

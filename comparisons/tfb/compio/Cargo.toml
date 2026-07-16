@@ -1,0 +1,17 @@
+[package]
+name = "compio-tfb"
+version = "0.1.0"
+edition = "2021"
+
+# Align with ntex's compio stack (io_uring driver on Linux).
+[dependencies]
+compio = { version = "0.16", features = ["macros", "runtime", "io", "time"] }
+compio-net = "0.9"
+bytes = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+once_cell = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

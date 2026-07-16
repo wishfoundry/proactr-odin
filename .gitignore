@@ -46,3 +46,5 @@
 # Generated certs for local TLS benches
 **/*.pem
 !**/*.pem.example
+/comparisons/tfb/asio/asio_tfb
+/comparisons/tfb/go/tfb-go

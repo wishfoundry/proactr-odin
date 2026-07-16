@@ -3,13 +3,8 @@ name = "ntex-empty-ok"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-# Pin path to third_party when building in-tree; crates.io for quick start.
-ntex = { version = "2", default-features = false, features = ["tokio"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+ntex = { version = "2", default-features = false, features = ["neon-uring"] }
 
-[features]
-default = ["tokio-rt"]
-tokio-rt = []
-# Linux: rebuild with third_party features as needed:
-#   cargo build --release --no-default-features
-# and point ntex at neon-uring / compio via path overrides in .cargo/config.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ntex = { version = "2", default-features = false, features = ["tokio"] }
