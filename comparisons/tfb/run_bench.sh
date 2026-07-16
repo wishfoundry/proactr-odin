@@ -178,7 +178,14 @@ start_peer() {
       return 0
       ;;
     seastar)
-      echo "seastar not automated (see seastar/README.md)"; return 1
+      if [[ ! -x seastar/build/seastar_tfb ]]; then
+        ./seastar/build.sh || return 1
+      fi
+      # -c: shard count from WORKERS
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" \
+        ./seastar/build/seastar_tfb -c"$WORKERS" \
+        --port="$PORT" --db="$DATABASE_PATH" \
+        >"$LOGDIR/seastar.server.log" 2>&1 &
       ;;
     proactr)
       echo "proactr host not live"; return 1

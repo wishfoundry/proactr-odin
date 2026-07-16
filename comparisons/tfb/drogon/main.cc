@@ -1,5 +1,8 @@
 // Size ladder + fortunes. Drogon/trantor = epoll (not io_uring).
+// Fortunes uses sqlite3 C API (same DB file as other peers) to avoid DbClient
+// path quirks; network path remains Drogon/trantor.
 #include <drogon/drogon.h>
+#include <sqlite3.h>
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -8,6 +11,8 @@
 #include <vector>
 
 using namespace drogon;
+
+static std::string g_db_path = "/tmp/proactr-tfb.sqlite";
 
 static std::string make_payload(size_t n) {
   static const char *pat =
@@ -50,9 +55,47 @@ static void plain(const std::string &body,
   cb(resp);
 }
 
+static std::string fortunes_html() {
+  sqlite3 *db = nullptr;
+  if (sqlite3_open_v2(g_db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
+      SQLITE_OK) {
+    return "db open failed";
+  }
+  sqlite3_busy_timeout(db, 5000);
+  std::vector<Fortune> list;
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(db, "SELECT id, message FROM fortune", -1, &stmt,
+                         nullptr) == SQLITE_OK) {
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      Fortune f;
+      f.id = sqlite3_column_int(stmt, 0);
+      const unsigned char *m = sqlite3_column_text(stmt, 1);
+      f.message = m ? reinterpret_cast<const char *>(m) : "";
+      list.push_back(std::move(f));
+    }
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  list.push_back(Fortune{0, "Additional fortune added at request time."});
+  std::sort(list.begin(), list.end(),
+            [](const Fortune &a, const Fortune &b) {
+              return a.message < b.message;
+            });
+  std::ostringstream oss;
+  oss << "<!DOCTYPE html><html><head><title>Fortunes</title></head>"
+         "<body><table><tr><th>id</th><th>message</th></tr>";
+  for (const auto &f : list) {
+    oss << "<tr><td>" << f.id << "</td><td>" << html_escape(f.message)
+        << "</td></tr>";
+  }
+  oss << "</table></body></html>";
+  return oss.str();
+}
+
 int main() {
   const char *db = std::getenv("DATABASE_PATH");
-  std::string dbPath = db ? db : "/tmp/proactr-tfb.sqlite";
+  if (db)
+    g_db_path = db;
   uint16_t port = 18080;
   if (const char *p = std::getenv("PORT"))
     port = static_cast<uint16_t>(std::stoi(p));
@@ -64,9 +107,6 @@ int main() {
   P_64K = make_payload(64 * 1024);
   P_1M = make_payload(1024 * 1024);
   P_4M = make_payload(4 * 1024 * 1024);
-
-  app().createDbClient("sqlite3", dbPath, 0, "", "", "",
-                       std::max<size_t>(workers * 2, 4));
 
   app().registerHandler(
       "/plaintext",
@@ -108,45 +148,15 @@ int main() {
       "/fortunes",
       [](const HttpRequestPtr &,
          std::function<void(const HttpResponsePtr &)> &&cb) {
-        auto client = app().getDbClient();
-        *client << "SELECT id, message FROM fortune" >>
-            [cb = std::move(cb)](const Result &r) mutable {
-              std::vector<Fortune> list;
-              list.reserve(r.size() + 1);
-              for (const auto &row : r) {
-                list.push_back(
-                    Fortune{row["id"].as<int>(), row["message"].as<std::string>()});
-              }
-              list.push_back(
-                  Fortune{0, "Additional fortune added at request time."});
-              std::sort(list.begin(), list.end(),
-                        [](const Fortune &a, const Fortune &b) {
-                          return a.message < b.message;
-                        });
-              std::ostringstream oss;
-              oss << "<!DOCTYPE html><html><head><title>Fortunes</title></head>"
-                     "<body><table><tr><th>id</th><th>message</th></tr>";
-              for (const auto &f : list) {
-                oss << "<tr><td>" << f.id << "</td><td>" << html_escape(f.message)
-                    << "</td></tr>";
-              }
-              oss << "</table></body></html>";
-              auto resp = HttpResponse::newHttpResponse();
-              resp->setContentTypeCode(CT_TEXT_HTML);
-              resp->setBody(oss.str());
-              resp->addHeader("Server", "Drogon");
-              cb(resp);
-            } >>
-            [cb](const DrogonDbException &e) {
-              auto resp = HttpResponse::newHttpResponse();
-              resp->setStatusCode(k500InternalServerError);
-              resp->setBody(e.base().what());
-              cb(resp);
-            };
+        auto resp = HttpResponse::newHttpResponse();
+        resp->setContentTypeCode(CT_TEXT_HTML);
+        resp->setBody(fortunes_html());
+        resp->addHeader("Server", "Drogon");
+        cb(resp);
       },
       {Get});
 
-  std::cout << "drogon tfb peer on 0.0.0.0:" << port << " db=" << dbPath
+  std::cout << "drogon tfb peer on 0.0.0.0:" << port << " db=" << g_db_path
             << " io=trantor/epoll workers=" << workers << std::endl;
   app()
       .setLogLevel(trantor::Logger::kWarn)
