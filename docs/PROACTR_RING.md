@@ -68,14 +68,18 @@ When setup kept `DEFER_TASKRUN` (preferred flag set on modern kernels), completi
 
 ## Platforms
 
+See `docs/PROACTR.md` for the full multi-OS matrix. This file documents the **Linux io_uring** engine only.
+
 | OS | File | Behavior |
 |----|------|----------|
-| Linux | `platform_linux.odin` (`#+build linux`) | Full ring |
-| Other | `platform_stub.odin` (`#+build !linux`) | `ring_init` → `.Unsupported` |
+| Linux | `platform_linux.odin` | io_uring (this doc) |
+| Windows | `platform_windows.odin` | IOCP |
+| Darwin/BSD | `platform_kqueue.odin` | kqueue façade |
+| Other | `platform_stub.odin` | `ring_init` → `.Unsupported` |
 
 ## Smoke
 
 ```text
-odin check proactr -no-entry-point          # any host
-odin run examples/ring_smoke                # Linux: NOP round-trip; macOS: Unsupported OK
+odin run examples/ring_smoke
+# OK on linux (io_uring), darwin/bsd (kqueue), windows (iocp)
 ```

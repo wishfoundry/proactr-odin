@@ -18,9 +18,26 @@ Default `SERVERS` on Linux are **io_uring-backed only**. See [`IO_URING.md`](IO_
 | `compio` | compio-net (io_uring driver) |
 | `asio` | `BOOST_ASIO_HAS_IO_URING` + `DISABLE_EPOLL` |
 | `laytan` | core:nbio Linux = io_uring |
-| `proactr` | (when live) |
+| `proactr` / `proactr-sync` | proactr io_uring · **sync** SQLite (shared conn + mutex) |
+| `proactr-async` | proactr io_uring · **async** SQLite (thread pool, one conn per DB worker) |
 
 **Not** in default matrix (no net io_uring): `go`, `drogon`.
+
+## Fortunes: sync vs async (bastion)
+
+```bash
+# ranch-bastion — plaintext + fortunes for ntex + both proactr modes
+./comparisons/tfb/schema/prepare.sh
+./comparisons/tfb/build_uring.sh
+./comparisons/tfb/run_fortunes_bastion.sh | tee /tmp/proactr-fortunes.log
+```
+
+| Mode | Peer ID | Behavior |
+|------|---------|----------|
+| **sync** | `proactr-sync` | Blocking query on I/O worker; **per-worker SQLite conn** (default). `FORTUNES_SYNC_SHARED=1` = ntex-style shared+mutex |
+| **async** | `proactr-async` | Offload query+HTML to `DB_WORKERS` pool; I/O worker responds via tick |
+
+Same binary (`proactr/tfb-proactr.bin`); mode via `FORTUNES_MODE=sync|async`. WAL is set in `schema/prepare.sh` and re-applied on open.
 
 ## ranch-bastion quick start
 
@@ -55,4 +72,6 @@ SERVERS="ntex ntex-compio compio asio laytan" ./comparisons/tfb/run_bench.sh
 | `REQUIRE_URING` | `1` (runs `scripts/check_io_uring.sh`) |
 | `DATABASE_PATH` | `/tmp/proactr-tfb.sqlite` |
 | `WORKERS` | `1` |
+| `DB_WORKERS` | same as `WORKERS` (async only) |
+| `FORTUNES_MODE` | `sync` (peer env; harness sets per peer id) |
 | `BENCH_C` / `BENCH_Z` | `64` / `15s` |

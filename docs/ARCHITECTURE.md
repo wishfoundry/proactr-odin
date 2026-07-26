@@ -12,33 +12,21 @@
 
 **laytan / `core:nbio`:** on Linux uses io_uring under the hood, but the public model is still “queue callback ops + `tick`” shared with readiness-backed OS paths. Useful, portable, not optimized as a pure proactor surface.
 
-**proactr:** expose completion-native APIs first. Stub or secondary backends for non-Linux.
+**proactr:** portable completion-native package (separate from `core:nbio`). See `docs/PROACTR.md`.
 
 ## Package split
 
-**Current (Phase 0):**
-
 ```
-proactr/
-  proactr.odin        # Ring, Op, Error, public submit/reap API surface
-  platform_linux.odin # Linux io_uring path (raw syscalls; see docs/PROACTR_RING.md)
-  platform_stub.odin  # non-Linux compile stubs
+proactr/                    # standalone proactor (compare vs nbio later)
+  proactr.odin              # Ring, Op, Completion, submit_*, ring_wait
+  platform_linux.odin       # io_uring (true proactor)
+  platform_windows.odin     # IOCP (true proactor)
+  platform_kqueue.odin      # kqueue façade (Darwin/BSD)
+  platform_wasi.odin        # WASI host façade (only WASM port; no js_wasm32)
+  timers.odin / registration_stub.odin
 
 http/
-  # Forked from laytan surface: Request/Response/Router/…
-  # Host stubs: listen_and_serve → Unsupported; no nbio
-```
-
-**Target layout (may split later):**
-
-```
-proactr/
-  proactr.odin / ring.odin / ops.odin / buf.odin  # optional file split as surface grows
-  platform_linux.odin # io_uring syscalls / liburing-free path
-  platform_stub.odin  # non-Linux compile stubs
-
-http/
-  # Same protocol surface; host driven only by proactr completions
+  # Protocol + host; driven by proactr completions
 ```
 
 ## Completion loop (target)
@@ -89,18 +77,8 @@ Shared accept via multishot accept on one ring is a later option.
 
 ## Non-goals (near term)
 
-- HTTP/2 / HTTP/3 (vapor-http owns that experiment space)
-- Full Windows IOCP parity on day one
-- DPDK / kernel-bypass (Seastar covers that baseline externally)
-- Drop-in `core:nbio` API compatibility
-
-## Peer learning targets
-
-| Peer | What to steal / measure against |
-|------|----------------------------------|
-| **compio** | Rust completion runtime design, io_uring usage |
-| **ntex** | HTTP framing + neon-uring numbers |
-| **Boost.Asio** | Classic proactor patterns, composed ops |
-| **Seastar** | Shared-nothing, per-core, modern C++ network stack |
-| **Drogon** | Practical C++ HTTP RPS baseline |
-| **Envoy** | Real proxy overhead floor / filter chain cost |
+- HTTP/2 / HTTP/3 (I have a different fork: vapor-http that owns that experiment space)
+- Drop-in `core:nbio` API compatibility (packages stay separate for comparison)
+- Fixed files/buffers on non-Linux backends
+// Non-Linux: fixed files / registered recv pool are unavailable.
+// Real implementations live only in platform_linux.odin.

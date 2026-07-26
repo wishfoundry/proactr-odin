@@ -25,6 +25,14 @@ main :: proc() {
 			port = v
 		}
 	}
+	// Honor WORKERS (default 1). Unset/zero must NOT fall through to all cores —
+	// that made laytan unfair vs peers that pass WORKERS=8.
+	workers := 1
+	if p, ok := os.lookup_env("WORKERS", context.allocator); ok {
+		if v, ok2 := strconv.parse_int(p); ok2 {
+			workers = max(1, v)
+		}
+	}
 
 	s: http.Server
 	http.server_shutdown_on_interrupt(&s)
@@ -40,11 +48,19 @@ main :: proc() {
 	http.route_get(&router, "/s/4m", http.handler(on_4m))
 	http.route_get(&router, "/fortunes", http.handler(on_fortunes))
 
-	log.infof("laytan tfb peer on :%d io=nbio/io_uring size-ladder=on fortunes=501", port)
+	opts := http.Default_Server_Opts
+	opts.thread_count = workers
+
+	log.infof(
+		"laytan tfb peer on :%d workers=%d io=nbio/io_uring size-ladder=on fortunes=501",
+		port,
+		workers,
+	)
 	err := http.listen_and_serve(
 		&s,
 		http.router_handler(&router),
 		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
+		opts,
 	)
 	fmt.assertf(err == nil, "server stopped: %v", err)
 }

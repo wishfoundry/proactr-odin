@@ -40,14 +40,7 @@ struct Fortune {
     message: String,
 }
 
-fn plain_slice(body: &'static [u8]) -> HttpResponse {
-    HttpResponse::Ok()
-        .header("Server", "Ntex")
-        .header("Content-Type", "text/plain")
-        .body(body)
-}
-
-fn plain_owned(body: Vec<u8>) -> HttpResponse {
+fn plain_body(body: impl Into<ntex::http::body::Body>) -> HttpResponse {
     HttpResponse::Ok()
         .header("Server", "Ntex")
         .header("Content-Type", "text/plain")
@@ -56,27 +49,28 @@ fn plain_owned(body: Vec<u8>) -> HttpResponse {
 
 #[web::get("/plaintext")]
 async fn plaintext() -> HttpResponse {
-    plain_slice(b"Hello, World!")
+    plain_body("Hello, World!")
 }
 
+// Size ladder: share Lazy buffers (no per-request Vec clone) — fair vs laytan/proactr.
 #[web::get("/s/4k")]
 async fn s4k() -> HttpResponse {
-    plain_owned(P_4K.clone())
+    plain_body(&P_4K[..])
 }
 
 #[web::get("/s/64k")]
 async fn s64k() -> HttpResponse {
-    plain_owned(P_64K.clone())
+    plain_body(&P_64K[..])
 }
 
 #[web::get("/s/1m")]
 async fn s1m() -> HttpResponse {
-    plain_owned(P_1M.clone())
+    plain_body(&P_1M[..])
 }
 
 #[web::get("/s/4m")]
 async fn s4m() -> HttpResponse {
-    plain_owned(P_4M.clone())
+    plain_body(&P_4M[..])
 }
 
 #[web::get("/fortunes")]

@@ -4,13 +4,41 @@
 #include <drogon/drogon.h>
 #include <sqlite3.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <x86intrin.h>
 
 using namespace drogon;
+
+// PHASE_STATS=1: aggregate cycles for AOP stages (parse≈up to pre-routing not
+// included; we time handle + build + pre-send). Parse is measured via
+// (pre-routing - connection read) is hard; we report:
+//   handle = pre-handling → post-handling (controller)
+//   build  = inside plain() setBody+cb only
+//   full_handler = pre-handling → pre-sending (includes response creation)
+static std::atomic<uint64_t> g_n{0}, g_handle_cyc{0}, g_build_cyc{0},
+    g_presend_gap_cyc{0};
+static thread_local uint64_t tl_pre_handle = 0;
+static thread_local uint64_t tl_post_handle = 0;
+
+static inline uint64_t rdtsc() { return __rdtsc(); }
+
+static void phase_maybe_log() {
+  uint64_t n = g_n.load(std::memory_order_relaxed);
+  if (n == 0 || (n % 50000) != 0)
+    return;
+  uint64_t h = g_handle_cyc.load(std::memory_order_relaxed);
+  uint64_t b = g_build_cyc.load(std::memory_order_relaxed);
+  uint64_t g = g_presend_gap_cyc.load(std::memory_order_relaxed);
+  std::cerr << "PHASE drogon n=" << n << " cyc/req: handle=" << (h / n)
+            << " build=" << (b / n) << " post_handle_to_presend=" << (g / n)
+            << std::endl;
+}
 
 static std::string g_db_path = "/tmp/proactr-tfb.sqlite";
 
@@ -48,10 +76,16 @@ static std::string html_escape(const std::string &s) {
 
 static void plain(const std::string &body,
                   std::function<void(const HttpResponsePtr &)> &&cb) {
+  uint64_t t0 = 0;
+  if (std::getenv("PHASE_STATS"))
+    t0 = rdtsc();
   auto resp = HttpResponse::newHttpResponse();
   resp->setContentTypeCode(CT_TEXT_PLAIN);
   resp->setBody(body);
   resp->addHeader("Server", "Drogon");
+  if (std::getenv("PHASE_STATS") && t0) {
+    g_build_cyc.fetch_add(rdtsc() - t0, std::memory_order_relaxed);
+  }
   cb(resp);
 }
 
@@ -155,6 +189,33 @@ int main() {
         cb(resp);
       },
       {Get});
+
+  if (std::getenv("PHASE_STATS")) {
+    app().registerPreHandlingAdvice([](const HttpRequestPtr &) {
+      tl_pre_handle = rdtsc();
+    });
+    app().registerPostHandlingAdvice(
+        [](const HttpRequestPtr &, const HttpResponsePtr &) {
+          tl_post_handle = rdtsc();
+          if (tl_pre_handle) {
+            g_handle_cyc.fetch_add(tl_post_handle - tl_pre_handle,
+                                   std::memory_order_relaxed);
+          }
+        });
+    app().registerPreSendingAdvice(
+        [](const HttpRequestPtr &, const HttpResponsePtr &) {
+          if (tl_post_handle) {
+            g_presend_gap_cyc.fetch_add(rdtsc() - tl_post_handle,
+                                        std::memory_order_relaxed);
+            g_n.fetch_add(1, std::memory_order_relaxed);
+            phase_maybe_log();
+          }
+          tl_pre_handle = 0;
+          tl_post_handle = 0;
+        });
+    std::cerr << "PHASE_STATS=1 (handle/build/pre-send gap via AOP)"
+              << std::endl;
+  }
 
   std::cout << "drogon tfb peer on 0.0.0.0:" << port << " db=" << g_db_path
             << " io=trantor/epoll workers=" << workers << std::endl;

@@ -11,15 +11,18 @@
 
 | Suite | Purpose |
 |-------|---------|
-| **`comparisons/tfb`** | **Primary.** `/plaintext` + `/fortunes` only (no JSON) |
-| `comparisons/empty-ok` | Wiring canary only — not a product baseline |
+| **`comparisons/tfb`** | **Ceiling.** Size ladder + fortunes; max RPS peer matrix |
+| **`comparisons/load`** | **Product readiness.** Target load + **latency/error SLOs** (pass/fail) |
+| `comparisons/empty-ok` | Wiring / empty-OK canary — **pass `WORKERS`**; not the product baseline |
+
+See `comparisons/load/SCENARIOS.md` for readiness scenarios (`api_steady`, `spike`, `mixed`, `soak`, …).
 
 ## Peers
 
 | ID | Source | Build notes |
 |----|--------|-------------|
 | `laytan` | `vendor/laytan/odin-http` | `odin build` example empty server |
-| `proactr` | this tree `http` + `proactr` | scaffold until host lands |
+| `proactr` | this tree `http` + `proactr` | io_uring host; pass `Server_Opts` as `listen_and_serve` 4th arg |
 | `ntex` | `third_party/ntex` + peer crate in comparisons | `cargo build --release`; Linux: try `neon-uring` / compio feature |
 | `compio` | `third_party/compio` + peer crate | completion I/O Rust baseline |
 | `drogon` | `third_party/drogon` | CMake; needs trantor etc. |
@@ -27,14 +30,27 @@
 | `seastar` | `third_party/seastar` | heavy; optional / SKIP by default |
 | `envoy` | `third_party/envoy` | proxy config in front of static cluster; optional |
 
-## Methodology (default)
+## Methodology
 
-- Tool: `oha` or `wrk` (document which in results)
-- Warmup + timed run
-- Fixed concurrency (`-c`) and duration or request count
-- Single machine, isolate CPU frequency if possible
-- Report RPS, p50/p99 latency, errors
+### Ceiling (`tfb` / `empty-ok`)
+
+- Tool: `bombardier` (preferred), `oha`, or `wrk`
+- Warmup + timed run; fixed concurrency
+- **Same `WORKERS`** for multi-worker peers (default 8)
+- Report RPS, p50/p99, errors
+
+### Readiness (`load`)
+
+- Moderate concurrency (not max RPS chase)
+- **Pass/fail SLOs**: p99 budget, zero errors; optional RPS floor
+- Scenarios: steady API, busy API, medium/bulk payload, spike, ramp, mixed, soak
+- Exit non-zero on hard SLO failure
+
+Never compare 1-worker proactr against multi-core peers. Prefer multi-host loadgen for production claims.
 
 ## Publishing
 
-Write-ups land in `benchmarks/*.md` with date, kernel, CPU, and commit SHAs of this repo + submodules.
+**Product TFB report:** [`benchmarks/TFB.md`](../benchmarks/TFB.md) (single matrix for
+ntex / drogon / laytan / proactr / go · sizes + fortunes · io_uring + kqueue).
+
+Other write-ups (timers, experiments) stay as dated files under `benchmarks/`.

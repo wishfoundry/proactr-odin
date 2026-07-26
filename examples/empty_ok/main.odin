@@ -1,15 +1,36 @@
-// Minimal empty-ok server — will listen once proactr io_uring host lands.
+// Minimal empty-ok server on the proactr io_uring host (Linux).
+//
+// Env:
+//   PORT    listen port (default 8080)
+//   WORKERS worker threads / rings (default 1; pass via listen_and_serve opts)
 package main
 
 import "core:fmt"
 import "core:log"
 import "core:net"
 import "core:os"
+import "core:strconv"
 
 import http "../../http"
 
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
+
+	port := 8080
+	if p := os.get_env_alloc("PORT", context.allocator); p != "" {
+		if v, ok2 := strconv.parse_int(p); ok2 {
+			port = v
+		}
+		delete(p)
+	}
+	// Must pass as listen_and_serve 4th arg — setting s.opts alone is overwritten.
+	workers := 1
+	if p := os.get_env_alloc("WORKERS", context.allocator); p != "" {
+		if v, ok2 := strconv.parse_int(p); ok2 {
+			workers = max(1, v)
+		}
+		delete(p)
+	}
 
 	router: http.Router
 	http.router_init(&router)
@@ -23,13 +44,22 @@ main :: proc() {
 	}))
 
 	s: http.Server
-	ep := net.Endpoint {
-		address = net.IP4_Address{0, 0, 0, 0},
-		port    = 8080,
-	}
+	http.server_shutdown_on_interrupt(&s)
 
-	log.info("proactr empty_ok starting on :8080 (proactr io_uring host on Linux)")
-	err := http.listen_and_serve(&s, http.router_handler(&router), ep)
+	opts := http.Default_Server_Opts
+	opts.thread_count = workers
+
+	log.infof(
+		"proactr empty_ok on :%d workers=%d (io_uring host on Linux)",
+		port,
+		workers,
+	)
+	err := http.listen_and_serve(
+		&s,
+		http.router_handler(&router),
+		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
+		opts,
+	)
 	fmt.eprintf("server exited: %v\n", err)
 	if err == .Unsupported {
 		os.exit(2)

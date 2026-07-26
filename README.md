@@ -58,31 +58,28 @@ docs/                    # Architecture notes
 ## Quick start (once implemented)
 
 ```bash
-# Build empty-ok proactr server (planned)
-odin build comparisons/empty-ok/proactr -out:comparisons/empty-ok/proactr/server.bin -o:speed
-
-# Run baseline matrix (Linux)
-./comparisons/empty-ok/run_bench.sh
+# Fair empty-ok matrix (WORKERS=8 default; peers honor WORKERS)
+./comparisons/empty-ok/proactr/build.sh
+SERVERS="ntex laytan proactr" WORKERS=8 ./comparisons/empty-ok/run_bench.sh
 ```
 
 ## Benchmarks (primary: TFB-style)
 
-**Headline suite:** [`comparisons/tfb/`](comparisons/tfb/) — plain **text/html**
-only: `/plaintext` (ceiling) + `/fortunes` (DB + sort + HTML escape). **No JSON**
-(codec variance muddies stack comparison). Reports **RPS + p50/p99 + errors**.
+**Published numbers:** [`benchmarks/TFB.md`](benchmarks/TFB.md) — ntex · drogon ·
+laytan · proactr · go · size ladder + fortunes · **io_uring + kqueue**.
 
-See [`comparisons/tfb/WORKLOAD.md`](comparisons/tfb/WORKLOAD.md) and
-[`docs/BASELINE_METRICS.md`](docs/BASELINE_METRICS.md).
+**Harness:** [`comparisons/tfb/`](comparisons/tfb/) — plain text/html only
+(`/plaintext` size ladder + `/fortunes`). **No JSON**.
 
 ```bash
-# Linux (ranch-bastion): io_uring peers only by default
-./scripts/check_io_uring.sh
-./comparisons/tfb/build_uring.sh
-./comparisons/tfb/run_bench.sh
-# → ntex(neon-uring), ntex-compio, compio, laytan
+# Full product matrix (Linux bastion / Darwin)
+SERVERS="ntex proactr laytan go drogon" \
+  TESTS="plaintext s4k s64k s1m s4m fortunes" WORKERS=8 \
+  ./comparisons/tfb/run_bench.sh
 ```
 
-`comparisons/empty-ok/` remains a wiring canary only.
+`comparisons/empty-ok/` is a wiring/ceiling canary — always pass the same `WORKERS`
+to multi-worker peers (see `comparisons/empty-ok/README.md`).
 
 ### Peer sources
 

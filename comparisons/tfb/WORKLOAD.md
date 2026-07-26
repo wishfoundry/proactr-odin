@@ -32,6 +32,19 @@ Exact sizes (bytes):
 
 Unchanged: TE 12-row seed, runtime insert, sort by message, escape `& < > " '`.
 
+### proactr SQLite modes
+
+| Mode | Peer | DB access |
+|------|------|-----------|
+| **sync** | `proactr-sync` | Default: **one connection per I/O worker** (no global mutex). Set `FORTUNES_SYNC_SHARED=1` for ntex-style single conn + mutex |
+| **async** | `proactr-async` | Thread pool (`DB_WORKERS`); one SQLite connection per pool thread; I/O worker only responds after the job completes |
+
+Both modes apply the same connection PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `temp_store=MEMORY`, `cache_size=-65536`, `mmap_size=256MiB`, `query_only=ON`, `busy_timeout=5s`, plus a **prepared** `SELECT` reused via `sqlite3_reset`.
+
+Bastion matrix: `./run_fortunes_bastion.sh` (default `SERVERS="ntex proactr-sync proactr-async"`).
+
+**Why async can still beat sync even with per-worker conns:** async runs query+HTML on *extra* pool threads while I/O workers keep accepting/recv/send. Sync does DB+HTML on the same threads that drive the ring — under pure `/fortunes` load that is mostly “same concurrency,” but under mixed traffic or high connection churn async keeps the ring hotter. The old large gap was mostly **one shared mutex**, not missing WAL (WAL was already on from `prepare.sh`).
+
 ## Peer classes
 
 | Class | Peers | I/O |

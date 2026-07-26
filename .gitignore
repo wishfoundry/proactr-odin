@@ -12,6 +12,9 @@
 *.profraw
 *.profdata
 
+# WASM demo build outputs
+examples/**/*.wasm
+
 # Benchmarks / local runs
 /tmp/
 *.log
@@ -24,9 +27,19 @@
 /comparisons/**/*.o
 /comparisons/tfb/go/tfb-go
 /comparisons/tfb/laytan/tfb-laytan
+/comparisons/tfb/proactr/tfb-proactr*
+/comparisons/tfb/tina/tfb-tina
+/comparisons/tfb/asio/asio_tfb
+/comparisons/empty-ok/**/server.bin
+/comparisons/empty-ok/proactr/empty-ok-proactr
 /comparisons/tfb/**/Cargo.lock
 *.sqlite
 *.sqlite-*
+
+# Local peer binaries at repo root
+/datastar_chat
+/empty_ok
+/tcp_echo
 
 # Language tooling
 **/node_modules/
@@ -36,6 +49,7 @@
 *.pyc
 .venv/
 .DS_Store
+.poolside/
 
 # IDE
 .idea/
@@ -46,5 +60,3 @@
 # Generated certs for local TLS benches
 **/*.pem
 !**/*.pem.example
-/comparisons/tfb/asio/asio_tfb
-/comparisons/tfb/go/tfb-go

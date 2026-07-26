@@ -6,6 +6,7 @@ import "core:log"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
+import "core:strings"
 
 Response :: struct {
 	// Add your headers and cookies here directly.
@@ -24,14 +25,43 @@ Response :: struct {
 	// connection (maybe a small buffer in this struct).
 	_buf:             bytes.Buffer,
 	_heading_written: bool,
+	// body_reserve state: body written in place after heading; Content-Length patched on commit.
+	_body_off:        int, // start index of body in _buf.buf; 0 if not reserved
+	_cl_off:          int, // index of first Content-Length digit (fixed width); -1 if none
+	_body_max:        int, // max_body from body_reserve
 }
 
-response_init :: proc(r: ^Response, allocator := context.allocator) {
-	r.status             = .Not_Found
-	r.cookies.allocator  = allocator
-	r._buf.buf.allocator = allocator
-
+// response_init binds r to c.resp_buf (permanent, conn_allocator). Request temp
+// arena is scrap only — never backs the response wire buffer.
+// Capacity is retained across keep-alive requests; len is cleared each request.
+@(private)
+response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocator) {
+	r.status = .Not_Found
+	r.sent = false
+	r._heading_written = false
+	r._body_off = 0
+	r._cl_off = -1
+	r._body_max = 0
+	r._conn = c
+	r.cookies = {}
+	r.cookies.allocator = allocator
 	headers_init(&r.headers, allocator)
+
+	// Ensure permanent buffer has initial capacity; keep any grown capacity.
+	// Size from Server_Opts.resp_buf_initial (resolved at listen; default HOST_RESP_BUF_INITIAL).
+	resp_init := c.server.opts.resp_buf_initial
+	if cap(c.resp_buf) < resp_init {
+		if c.resp_buf != nil {
+			delete(c.resp_buf)
+		}
+		c.resp_buf = make([dynamic]u8, 0, resp_init, c.server.conn_allocator)
+	} else {
+		clear(&c.resp_buf)
+	}
+	r._buf.buf = c.resp_buf
+	r._buf.buf.allocator = c.server.conn_allocator
+	r._buf.off = 0
+	r._buf.last_read = .Invalid
 }
 
 /*
@@ -39,8 +69,15 @@ Prefer the procedure group `body_set`.
 */
 body_set_bytes :: proc(r: ^Response, byts: []byte, loc := #caller_location) {
 	assert(bytes.buffer_length(&r._buf) == 0, "the response body has already been written", loc)
+	t0_build: u64
+	when HTTP_PHASE_STATS {
+		t0_build = phase_now()
+	}
 	_response_write_heading(r, len(byts))
 	bytes.buffer_write(&r._buf, byts)
+	when HTTP_PHASE_STATS {
+		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+	}
 }
 
 /*
@@ -61,6 +98,106 @@ procedure to create a writer.
 body_set :: proc{
 	body_set_str,
 	body_set_bytes,
+}
+
+// Fixed-width Content-Length field for body_reserve (leading zeros; RFC 9110 DIGIT).
+BODY_CL_DIGITS :: 10
+
+/*
+Reserve a writable body region in the response wire buffer.
+
+Writes the HTTP heading first with a fixed-width Content-Length placeholder, then
+returns a slice for the body immediately after the heading. Fill slot[0:n] and call
+body_commit(n) — only the length digits are patched (no body memmove, no scratch copy).
+
+	slot := http.body_reserve(res, 4096)
+	n := fill(slot)
+	http.body_commit(res, n)
+	http.respond(res)
+*/
+body_reserve :: proc(r: ^Response, max_body: int, loc := #caller_location) -> []byte {
+	assert_has_td(loc)
+	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._heading_written, "heading already written; cannot body_reserve", loc)
+	assert(bytes.buffer_length(&r._buf) == 0, "response body already started", loc)
+	assert(max_body >= 0, "max_body must be non-negative", loc)
+	assert(max_body < 1_000_000_000, "max_body exceeds BODY_CL_DIGITS", loc)
+
+	// Heading with placeholder CL; body grows after it.
+	hscratch: [512]byte
+	hlen, cl_off := _response_format_heading_reserved(r, hscratch[:])
+	assert(hlen > 0 && hlen <= len(hscratch), "heading overflow", loc)
+	assert(cl_off >= 0, "content-length placeholder missing", loc)
+
+	need := hlen + max_body
+	if cap(r._buf.buf) < need {
+		reserve(&r._buf.buf, need)
+	}
+	resize(&r._buf.buf, need)
+	copy(r._buf.buf[0:], hscratch[:hlen])
+
+	r._heading_written = true
+	r._body_off = hlen
+	r._cl_off = cl_off
+	r._body_max = max_body
+	return r._buf.buf[hlen:][:max_body]
+}
+
+/*
+Abandon a body_reserve without sending (e.g. generation failed).
+*/
+body_cancel :: proc(r: ^Response, loc := #caller_location) {
+	assert(!r.sent, "response has already been sent", loc)
+	resize(&r._buf.buf, 0)
+	r._heading_written = false
+	r._body_off = 0
+	r._cl_off = -1
+	r._body_max = 0
+}
+
+/*
+Finish a body_reserve write: patch Content-Length and truncate the wire buffer
+to heading + body_len. Body bytes stay in place (no copy).
+*/
+body_commit :: proc(r: ^Response, body_len: int, loc := #caller_location) {
+	assert_has_td(loc)
+	assert(!r.sent, "response has already been sent", loc)
+	assert(r._body_off > 0, "body_commit without body_reserve", loc)
+	assert(body_len >= 0 && body_len <= r._body_max, "body_len out of reserved range", loc)
+	assert(r._cl_off >= 0, "no content-length to patch", loc)
+
+	t0_build: u64
+	when HTTP_PHASE_STATS {
+		t0_build = phase_now()
+	}
+
+	// Patch fixed-width zero-padded Content-Length digits.
+	dig: [BODY_CL_DIGITS]byte
+	for i in 0 ..< BODY_CL_DIGITS {
+		dig[i] = '0'
+	}
+	// Write decimal into dig right-aligned.
+	n := body_len
+	i := BODY_CL_DIGITS - 1
+	if n == 0 {
+		dig[i] = '0'
+	} else {
+		for n > 0 && i >= 0 {
+			dig[i] = byte('0' + n % 10)
+			n /= 10
+			i -= 1
+		}
+	}
+	copy(r._buf.buf[r._cl_off:][:BODY_CL_DIGITS], dig[:])
+
+	resize(&r._buf.buf, r._body_off + body_len)
+	r._body_off = 0
+	r._cl_off = -1
+	r._body_max = 0
+
+	when HTTP_PHASE_STATS {
+		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+	}
 }
 
 /*
@@ -215,14 +352,50 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 	if r._heading_written { return }
 	r._heading_written = true
 
-	ws   :: bytes.buffer_write_string
-	conn := r._conn
-	b    := &r._buf
-
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
 	AVG_HEADER_SIZE :: 20
-	reserve_size    := MIN + content_length + (AVG_HEADER_SIZE * headers_count(r.headers))
+	// Heading only here (body appended by caller); content_length is for the header field, not buffer.
+	reserve_size := MIN + (AVG_HEADER_SIZE * headers_count(r.headers)) + 32
+	if content_length > 0 {
+		// Keep prior growth hint when body follows immediately via body_set.
+		reserve_size += min(content_length, 1 << 20)
+	}
 	bytes.buffer_grow(&r._buf, reserve_size)
+
+	// Format heading on stack, then append to the wire buffer.
+	hscratch: [512]byte
+	hlen := _response_format_heading(r, content_length, hscratch[:])
+	assert(hlen > 0 && hlen <= len(hscratch))
+	bytes.buffer_write(&r._buf, hscratch[:hlen])
+}
+
+// Format status-line + headers into out; returns bytes written (no body).
+@(private)
+_response_format_heading :: proc(r: ^Response, content_length: int, out: []byte) -> int {
+	hlen, _ := _response_format_heading_ex(r, content_length, out, cl_placeholder = false)
+	return hlen
+}
+
+// Like _response_format_heading but with fixed-width zero CL for body_reserve.
+// Returns (bytes written, offset of first CL digit or -1).
+@(private)
+_response_format_heading_reserved :: proc(r: ^Response, out: []byte) -> (hlen: int, cl_off: int) {
+	return _response_format_heading_ex(r, 0, out, cl_placeholder = true)
+}
+
+@(private)
+_response_format_heading_ex :: proc(
+	r: ^Response,
+	content_length: int,
+	out: []byte,
+	cl_placeholder: bool,
+) -> (
+	hlen: int,
+	cl_off: int,
+) {
+	cl_off = -1
+	conn := r._conn
+	b := strings.builder_from_bytes(out)
 
 	// According to RFC 7230 3.1.2 the reason phrase is insignificant,
 	// because not doing so (and the fact that a status code is always length 3), we can change
@@ -234,50 +407,53 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 		status_int_str = status_int_str[0:4]
 	}
 
-	ws(b, "HTTP/1.1 ")
-	ws(b, status_int_str)
-	ws(b, "\r\n")
+	strings.write_string(&b, "HTTP/1.1 ")
+	strings.write_string(&b, status_int_str)
+	strings.write_string(&b, "\r\n")
 
 	// Per RFC 9910 6.6.1 a Date header must be added in 2xx, 3xx, 4xx responses.
 	if r.status >= .OK && r.status <= .Internal_Server_Error && !headers_has_unsafe(r.headers, "date") {
-		ws(b, "date: ")
-		ws(b, server_date(conn.server))
-		ws(b, "\r\n")
+		strings.write_string(&b, "date: ")
+		strings.write_string(&b, server_date(conn.server))
+		strings.write_string(&b, "\r\n")
 	}
 
-	if (
-		content_length > -1                              &&
-		!headers_has_unsafe(r.headers, "content-length") &&
-		response_needs_content_length(r, conn) \
-	) {
-		if content_length == 0 {
-			ws(b, "content-length: 0\r\n")
-		} else {
-			ws(b, "content-length: ")
-
-			assert(content_length < 1000000000000000000 && content_length > -1000000000000000000)
-			buf: [20]byte
-			ws(b, strconv.write_int(buf[:], i64(content_length), 10))
-			ws(b, "\r\n")
+	if !headers_has_unsafe(r.headers, "content-length") && response_needs_content_length(r, conn) {
+		if cl_placeholder {
+			strings.write_string(&b, "content-length: ")
+			cl_off = strings.builder_len(b)
+			for _ in 0 ..< BODY_CL_DIGITS {
+				strings.write_byte(&b, '0')
+			}
+			strings.write_string(&b, "\r\n")
+		} else if content_length > -1 {
+			if content_length == 0 {
+				strings.write_string(&b, "content-length: 0\r\n")
+			} else {
+				strings.write_string(&b, "content-length: ")
+				assert(content_length < 1000000000000000000 && content_length > -1000000000000000000)
+				buf: [20]byte
+				strings.write_string(&b, strconv.write_int(buf[:], i64(content_length), 10))
+				strings.write_string(&b, "\r\n")
+			}
 		}
 	}
 
-	bstream := bytes.buffer_to_stream(b)
-
+	hdr_w := io.to_writer(strings.to_stream(&b))
 	for header, value in r.headers._kv {
-		ws(b, header) // already has newlines escaped.
-		ws(b, ": ")
-		write_escaped_newlines(bstream, value)
-		ws(b, "\r\n")
+		strings.write_string(&b, header) // already sanitized keys
+		strings.write_string(&b, ": ")
+		write_escaped_newlines(hdr_w, value)
+		strings.write_string(&b, "\r\n")
 	}
 
 	for cookie in r.cookies {
-		cookie_write(bstream, cookie)
-		ws(b, "\r\n")
+		cookie_write(hdr_w, cookie)
+		strings.write_string(&b, "\r\n")
 	}
 
-	// Empty line denotes end of headers and start of body.
-	ws(b, "\r\n")
+	strings.write_string(&b, "\r\n")
+	return strings.builder_len(b), cl_off
 }
 
 // Sends the response over the connection.
@@ -332,8 +508,11 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		_response_write_heading(r, 0)
 	}
 
-	// Build the full response buffer, then submit_send. Do NOT free the request
-	// arena until the send CQE(s) fully complete (host_on_send → clean_request_loop).
+	// Build the full response buffer, then submit_send. Do NOT reset scrap arena
+	// or drop resp_buf while pending_send still points at response bytes
+	// (host_on_send clears pending_send before clean_request_loop).
+	// Sync growth: r._buf.buf is a header copy that may reallocate on write.
+	conn.resp_buf = r._buf.buf
 	buf := bytes.buffer_to_bytes(&r._buf)
 	if len(buf) == 0 {
 		clean_request_loop(conn)
@@ -341,33 +520,44 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	}
 
 	conn.pending_send = buf
-	when ODIN_OS != .Linux {
-		// No host: free and continue without I/O (compile-time path for non-Linux).
+	if err := host_submit_send(conn); err != .None {
+		log.errorf("submit_send failed: %v", err)
+		// No CQE will clear this; partial-send fail path already nils pending_send.
+		// Leaving it set would make connection_close defer forever (close_on_io).
 		conn.pending_send = nil
-		clean_request_loop(conn)
-	} else {
-		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send failed: %v", err)
-			connection_close(conn)
-		}
+		connection_close(conn)
 	}
 }
 
 // Response has been sent, clean up and close/handle next.
+// Invariant: pending_send is already nil (host_on_send clears it before clean).
 @(private)
 clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
+	t0_reset: u64
+	when HTTP_PHASE_STATS {
+		t0_reset = phase_now()
+	}
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
-	// blocks, size, used := allocator_free_all(&conn.temp_allocator)
-	// log.debugf("temp_allocator had %d blocks of a total size of %m of which %m was used", blocks, size, used)
-	free_all(context.temp_allocator)
+	// Request scrap only (bump reset). Response lives in conn.resp_buf.
+	conn_temp_reset(conn)
+	when HTTP_PHASE_STATS {
+		phase_add(0, 0, 0, 0, 0, 0, phase_now() - t0_reset)
+	}
 
-	scanner_reset(&conn.scanner)
+	// Pool-aware reset: restore full RECV window (incl. non-pooled opts.recv_buf_size).
+	scanner_prepare(conn)
 
 	client := conn.loop.req.client
 	conn.loop.req = {}
 	conn.loop.req.client = client
 
+	// Keep permanent response capacity; drop only request-scoped Response fields.
+	// Sync any growth that happened after last explicit sync (empty body path, etc.).
+	if conn.loop.res._buf.buf != nil {
+		conn.resp_buf = conn.loop.res._buf.buf
+	}
+	clear(&conn.resp_buf)
 	conn.loop.res = {}
 
 	if c, ok := close.?; (ok && c) || conn.state == .Will_Close {

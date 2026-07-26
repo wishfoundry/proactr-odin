@@ -1,4 +1,4 @@
-// Empty-ok for proactr-hosted http (live once io_uring host lands).
+// Empty-ok for proactr-hosted http (io_uring host on Linux).
 package main
 
 import "core:fmt"
@@ -12,11 +12,21 @@ import http "../../../http"
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
 
-	port: int = 18080
-	if p, ok := os.lookup_env("PORT", context.allocator); ok {
+	port := 18080
+	if p := os.get_env_alloc("PORT", context.allocator); p != "" {
 		if v, ok2 := strconv.parse_int(p); ok2 {
 			port = v
 		}
+		delete(p)
+	}
+	// Honor WORKERS (default 1). Must pass as listen_and_serve 4th arg —
+	// setting s.opts alone is overwritten by Default_Server_Opts.
+	workers := 1
+	if p := os.get_env_alloc("WORKERS", context.allocator); p != "" {
+		if v, ok2 := strconv.parse_int(p); ok2 {
+			workers = max(1, v)
+		}
+		delete(p)
 	}
 
 	router: http.Router
@@ -31,11 +41,17 @@ main :: proc() {
 	}))
 
 	s: http.Server
-	log.infof("proactr empty-ok on :%d", port)
+	http.server_shutdown_on_interrupt(&s)
+
+	opts := http.Default_Server_Opts
+	opts.thread_count = workers
+
+	log.infof("proactr empty-ok on :%d workers=%d io=proactr/io_uring", port, workers)
 	err := http.listen_and_serve(
 		&s,
 		http.router_handler(&router),
 		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
+		opts,
 	)
 	fmt.eprintf("exited: %v\n", err)
 	if err == .Unsupported {

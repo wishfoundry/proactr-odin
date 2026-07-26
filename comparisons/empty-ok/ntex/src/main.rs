@@ -1,4 +1,5 @@
 use ntex::web::{self, App, HttpResponse};
+use std::env;
 
 #[web::get("/")]
 async fn index() -> HttpResponse {
@@ -12,13 +13,20 @@ async fn health() -> HttpResponse {
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    let port: u16 = std::env::var("PORT")
+    let port: u16 = env::var("PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(18080);
-    println!("ntex empty-ok on 0.0.0.0:{port}");
+    // Default 1; harness should pass WORKERS=8 for fair multi-peer runs.
+    let workers: usize = env::var("WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    println!("ntex empty-ok on 0.0.0.0:{port} workers={workers}");
     web::server(|| App::new().service(index).service(health))
         .bind(format!("0.0.0.0:{port}"))?
+        .workers(workers)
         .run()
         .await
 }

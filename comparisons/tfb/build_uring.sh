@@ -36,9 +36,14 @@ echo "==> laytan (core:nbio → io_uring on Linux)"
   -collection:laytan="$ROOT/vendor/laytan")
 test -x laytan/tfb-laytan
 
+echo "==> proactr (io_uring + sqlite fortunes)"
+(cd proactr && odin build . -out:tfb-proactr.bin -o:speed)
+test -x proactr/tfb-proactr.bin
+
 echo "All uring peers built."
 ls -la ntex/target/release/ntex-tfb \
   ntex-compio/target/release/ntex-compio-tfb \
   compio/target/release/compio-tfb \
   laytan/tfb-laytan \
+  proactr/tfb-proactr.bin \
   asio/asio_tfb 2>/dev/null || true

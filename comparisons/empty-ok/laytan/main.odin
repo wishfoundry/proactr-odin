@@ -15,10 +15,18 @@ import http "laytan:odin-http"
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
 
-	port: int = 18080
-	if p, ok := os.lookup_env("PORT"); ok {
+	port := 18080
+	if p, ok := os.lookup_env("PORT", context.allocator); ok {
 		if v, ok2 := strconv.parse_int(p); ok2 {
 			port = v
+		}
+	}
+	// Honor WORKERS (default 1). Unset/zero must NOT fall through to all cores —
+	// laytan's Default_Server_Opts thread_count==0 means get_processor_core_count().
+	workers := 1
+	if p, ok := os.lookup_env("WORKERS", context.allocator); ok {
+		if v, ok2 := strconv.parse_int(p); ok2 {
+			workers = max(1, v)
 		}
 	}
 
@@ -36,11 +44,15 @@ main :: proc() {
 		http.respond_plain(res, "ok")
 	}))
 
-	log.infof("laytan empty-ok on :%d", port)
+	opts := http.Default_Server_Opts
+	opts.thread_count = workers
+
+	log.infof("laytan empty-ok on :%d workers=%d io=nbio/io_uring", port, workers)
 	err := http.listen_and_serve(
 		&s,
 		http.router_handler(&router),
 		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
+		opts,
 	)
 	fmt.assertf(err == nil, "server stopped: %v", err)
 }

@@ -132,7 +132,8 @@ start_peer() {
     laytan)
       [[ -x laytan/tfb-laytan ]] || (cd laytan && odin build . -out:tfb-laytan -o:speed \
         -collection:laytan="$ROOT/vendor/laytan")
-      env PORT="$PORT" ./laytan/tfb-laytan >"$LOGDIR/laytan.server.log" 2>&1 &
+      env PORT="$PORT" WORKERS="$WORKERS" \
+        ./laytan/tfb-laytan >"$LOGDIR/laytan.server.log" 2>&1 &
       ;;
     go)
       [[ -x go/tfb-go ]] || (cd go && go build -o tfb-go .)
@@ -187,11 +188,22 @@ start_peer() {
         --port="$PORT" --db="$DATABASE_PATH" \
         >"$LOGDIR/seastar.server.log" 2>&1 &
       ;;
-    proactr)
+    proactr|proactr-sync)
       if [[ ! -x proactr/tfb-proactr.bin ]]; then
         (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
       fi
-      env PORT="$PORT" ./proactr/tfb-proactr.bin >"$LOGDIR/proactr.server.log" 2>&1 &
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        FORTUNES_MODE=sync \
+        ./proactr/tfb-proactr.bin >"$LOGDIR/${name}.server.log" 2>&1 &
+      ;;
+    proactr-async)
+      if [[ ! -x proactr/tfb-proactr.bin ]]; then
+        (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
+      fi
+      # DB_WORKERS defaults to WORKERS inside the peer; override with DB_WORKERS=N.
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        FORTUNES_MODE=async DB_WORKERS="${DB_WORKERS:-$WORKERS}" \
+        ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-async.server.log" 2>&1 &
       ;;
     *)
       echo "unknown peer $name" >&2; return 1
@@ -253,6 +265,7 @@ for srv in $SERVERS; do
   fi
   row="$srv"
   for t in $TESTS; do
+    # laytan fortunes still 501; proactr-sync / proactr-async implement /fortunes.
     if [[ "$srv" == "laytan" && "$t" == "fortunes" ]]; then
       echo "  skip fortunes (501)"
       row+=$'\tn/a'

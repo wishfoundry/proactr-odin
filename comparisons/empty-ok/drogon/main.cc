@@ -1,5 +1,6 @@
 #include <drogon/drogon.h>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 
 int main() {
@@ -7,6 +8,17 @@ int main() {
   if (const char *p = std::getenv("PORT")) {
     port = static_cast<uint16_t>(std::stoi(p));
   }
+  // Default 1 (was 0 = hardware concurrency — unfair vs WORKERS-aware peers).
+  size_t workers = 1;
+  if (const char *w = std::getenv("WORKERS")) {
+    workers = static_cast<size_t>(std::stoul(w));
+    if (workers < 1) {
+      workers = 1;
+    }
+  }
+
+  std::cout << "drogon empty-ok on 0.0.0.0:" << port << " workers=" << workers
+            << std::endl;
 
   drogon::app()
       .registerHandler(
@@ -29,7 +41,7 @@ int main() {
           {drogon::Get})
       .setLogLevel(trantor::Logger::kWarn)
       .addListener("0.0.0.0", port)
-      .setThreadNum(0) // 0 = hardware concurrency
+      .setThreadNum(workers)
       .run();
   return 0;
 }

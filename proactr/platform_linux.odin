@@ -4,6 +4,8 @@ package proactr
 // Linux io_uring backend: raw syscalls via core:sys/linux only.
 // No liburing. No core:nbio. No core:sys/linux/uring wrapper — we own SQ/CQ mapping.
 
+import "base:intrinsics"
+
 import "core:math"
 import "core:sync"
 import "core:sys/linux"
@@ -18,6 +20,13 @@ _SETUP_FLAG_SETS := [?]linux.IO_Uring_Setup_Flags{
 	{.CLAMP, .SINGLE_ISSUER, .COOP_TASKRUN},
 	{.CLAMP, .COOP_TASKRUN},
 	{.CLAMP},
+}
+
+// Kernel struct for IORING_REGISTER_FILES_UPDATE.
+Files_Update :: struct {
+	offset: u32,
+	resv:   u32,
+	fds:    u64, // pointer to []i32 (s32 fds)
 }
 
 Ring_Impl :: struct {
@@ -46,6 +55,18 @@ Ring_Impl :: struct {
 	// mmap regions (SINGLE_MMAP: rings share one mapping; SQEs are separate).
 	ring_mmap: []u8,
 	sqes_mmap: []u8,
+
+	// Registered files (slot 0 = listen; 1.. = connections). Optional.
+	files:     []i32,
+	files_ok:  bool,
+	file_free: [dynamic]u32, // free slots >= 1
+
+	// Registered recv buffer pool. Optional.
+	recv_pool:      []u8,
+	recv_iovs:      []linux.IO_Vec,
+	recv_buf_size:  u32,
+	buffers_ok:     bool,
+	buf_free:       [dynamic]u32,
 }
 
 _ring_init_platform :: proc(r: ^Ring, entries: u32) -> Error {
@@ -154,12 +175,68 @@ _ring_init_platform :: proc(r: ^Ring, entries: u32) -> Error {
 		cqes        = cqes[:params.cq_entries],
 		ring_mmap   = ring_bytes[:ring_size],
 		sqes_mmap   = sqe_bytes[:sqes_bytes],
+		files_ok    = false,
+		buffers_ok  = false,
 	}
+
+	// Best-effort REGISTER_FILES; non-fatal if the kernel/rlimit rejects it.
+	_try_register_files(r)
 	return .None
+}
+
+_try_register_files :: proc(r: ^Ring) {
+	// REGISTER_FILES is charged against RLIMIT_NOFILE; requesting more than
+	// the soft limit fails entirely (common default soft limit is 1024).
+	count := int(FIXED_FILE_SLOTS)
+	lim: linux.RLimit
+	if linux.getrlimit(.NOFILE, &lim) == .NONE {
+		// Headroom for stdio, ring fd, listen fd, misc opens.
+		headroom: uint = 64
+		avail := lim.cur
+		if avail > headroom {
+			avail -= headroom
+		} else if avail > 2 {
+			avail -= 2
+		}
+		if uint(count) > avail {
+			count = int(avail)
+		}
+	}
+	if count < 2 {
+		// Need at least slot 0 (listen) + one connection slot.
+		r.impl.files = nil
+		r.impl.files_ok = false
+		return
+	}
+
+	fds := make([]i32, count, r.allocator)
+	for i in 0 ..< count {
+		fds[i] = -1
+	}
+	errno := linux.io_uring_register(r.impl.ring_fd, .REGISTER_FILES, raw_data(fds), u32(count))
+	if errno != .NONE {
+		delete(fds)
+		r.impl.files = nil
+		r.impl.files_ok = false
+		return
+	}
+	r.impl.files = fds
+	r.impl.files_ok = true
+	r.impl.file_free = make([dynamic]u32, 0, count - 1, r.allocator)
+	// Slot 0 reserved for listen; free list is 1..count-1
+	for i in 1 ..< count {
+		append(&r.impl.file_free, u32(i))
+	}
 }
 
 _ring_destroy_platform :: proc(r: ^Ring) {
 	if r.impl.active || r.impl.ring_fd >= 0 {
+		if r.impl.buffers_ok {
+			_ = linux.io_uring_register(r.impl.ring_fd, .UNREGISTER_BUFFERS, nil, 0)
+		}
+		if r.impl.files_ok {
+			_ = linux.io_uring_register(r.impl.ring_fd, .UNREGISTER_FILES, nil, 0)
+		}
 		if len(r.impl.ring_mmap) > 0 {
 			linux.munmap(raw_data(r.impl.ring_mmap), uint(len(r.impl.ring_mmap)))
 		}
@@ -170,10 +247,192 @@ _ring_destroy_platform :: proc(r: ^Ring) {
 			linux.close(r.impl.ring_fd)
 		}
 	}
+	if r.impl.files != nil {
+		delete(r.impl.files)
+	}
+	delete(r.impl.file_free)
+	if r.impl.recv_pool != nil {
+		delete(r.impl.recv_pool)
+	}
+	if r.impl.recv_iovs != nil {
+		delete(r.impl.recv_iovs)
+	}
+	delete(r.impl.buf_free)
 	r.impl = {
 		ring_fd = -1,
 		active  = false,
 	}
+}
+
+// --- Registration (Linux public API; sole home for these symbols) -----------
+// REGISTER_FILES / REGISTER_BUFFERS. Non-Linux: registration_stub.odin.
+
+// Max fixed-file table size (clamped to RLIMIT_NOFILE − headroom at init).
+FIXED_FILE_SLOTS :: 4096
+
+ring_has_fixed_files :: proc(r: ^Ring) -> bool {
+	return r.impl.files_ok
+}
+
+ring_set_listen_file :: proc(r: ^Ring, fd: i32) -> Error {
+	if !r.impl.files_ok {
+		return .Unsupported
+	}
+	return _files_update(r, 0, fd)
+}
+
+ring_file_alloc :: proc(r: ^Ring) -> (slot: i32, ok: bool) {
+	if !r.impl.files_ok || len(r.impl.file_free) == 0 {
+		return -1, false
+	}
+	s := pop(&r.impl.file_free)
+	return i32(s), true
+}
+
+ring_file_set :: proc(r: ^Ring, slot: i32, fd: i32) -> Error {
+	if !r.impl.files_ok || slot < 0 || int(slot) >= len(r.impl.files) {
+		return .Invalid_Op
+	}
+	return _files_update(r, u32(slot), fd)
+}
+
+ring_file_clear :: proc(r: ^Ring, slot: i32) -> Error {
+	if !r.impl.files_ok || slot < 1 || int(slot) >= len(r.impl.files) {
+		return .Invalid_Op
+	}
+	// Idempotent: already free → success without free-list append (no duplicates).
+	if r.impl.files[slot] < 0 {
+		return .None
+	}
+	err := _files_update(r, u32(slot), -1)
+	if err != .None {
+		return err
+	}
+	append(&r.impl.file_free, u32(slot))
+	return .None
+}
+
+_files_update :: proc(r: ^Ring, offset: u32, fd: i32) -> Error {
+	if !r.impl.files_ok {
+		return .Unsupported
+	}
+	if int(offset) >= len(r.impl.files) {
+		return .Invalid_Op
+	}
+	// Keep local mirror in sync before/after kernel update.
+	// Note: IORING_REGISTER_FILES_UPDATE returns the number of fds updated
+	// (positive) on success — not 0. core:sys/linux.io_uring_register maps
+	// ret → Errno(-ret), so a successful update of 1 fd looks like an error.
+	// Use the raw syscall and treat ret >= 0 as success.
+	fd_storage := fd
+	upd := Files_Update {
+		offset = offset,
+		resv   = 0,
+		fds    = u64(uintptr(&fd_storage)),
+	}
+	ret := int(
+		intrinsics.syscall(
+			uintptr(linux.SYS_io_uring_register),
+			uintptr(r.impl.ring_fd),
+			uintptr(linux.IO_Uring_Register_Opcode.REGISTER_FILES_UPDATE),
+			uintptr(&upd),
+			uintptr(1),
+		),
+	)
+	if ret < 0 {
+		return .Register_Failed
+	}
+	r.impl.files[offset] = fd
+	return .None
+}
+
+ring_has_fixed_buffers :: proc(r: ^Ring) -> bool {
+	return r.impl.buffers_ok
+}
+
+ring_register_recv_pool :: proc(
+	r: ^Ring,
+	count: u32 = DEFAULT_REG_BUF_COUNT,
+	buf_size: u32 = DEFAULT_RECV_BUF_SIZE,
+) -> Error {
+	if !r.impl.active {
+		return .Unsupported
+	}
+	if count == 0 || buf_size == 0 {
+		return .Invalid_Op
+	}
+	// Replace existing pool if any.
+	if r.impl.buffers_ok {
+		_ = linux.io_uring_register(r.impl.ring_fd, .UNREGISTER_BUFFERS, nil, 0)
+		r.impl.buffers_ok = false
+	}
+	if r.impl.recv_pool != nil {
+		delete(r.impl.recv_pool)
+		r.impl.recv_pool = nil
+	}
+	if r.impl.recv_iovs != nil {
+		delete(r.impl.recv_iovs)
+		r.impl.recv_iovs = nil
+	}
+	clear(&r.impl.buf_free)
+
+	total := int(count) * int(buf_size)
+	pool := make([]u8, total, r.allocator)
+	iovs := make([]linux.IO_Vec, count, r.allocator)
+	for i in 0 ..< int(count) {
+		base := &pool[i * int(buf_size)]
+		iovs[i] = linux.IO_Vec {
+			base = cast([^]byte)base,
+			len  = uint(buf_size),
+		}
+	}
+	errno := linux.io_uring_register(
+		r.impl.ring_fd,
+		.REGISTER_BUFFERS,
+		raw_data(iovs),
+		count,
+	)
+	if errno != .NONE {
+		delete(pool)
+		delete(iovs)
+		return .Register_Failed
+	}
+	r.impl.recv_pool = pool
+	r.impl.recv_iovs = iovs
+	r.impl.recv_buf_size = buf_size
+	r.impl.buffers_ok = true
+	if r.impl.buf_free.allocator.procedure == nil {
+		r.impl.buf_free = make([dynamic]u32, 0, int(count), r.allocator)
+	}
+	// Push in reverse so index 0 is allocated first (stable for debugging).
+	for i := int(count) - 1; i >= 0; i -= 1 {
+		append(&r.impl.buf_free, u32(i))
+	}
+	return .None
+}
+
+ring_recv_buf_alloc :: proc(r: ^Ring) -> (index: i32, slice: []u8, ok: bool) {
+	if !r.impl.buffers_ok || len(r.impl.buf_free) == 0 {
+		return -1, nil, false
+	}
+	idx := pop(&r.impl.buf_free)
+	return i32(idx), ring_recv_buf_slice(r, i32(idx)), true
+}
+
+ring_recv_buf_free :: proc(r: ^Ring, index: i32) {
+	if !r.impl.buffers_ok || index < 0 || int(index) >= len(r.impl.recv_iovs) {
+		return
+	}
+	append(&r.impl.buf_free, u32(index))
+}
+
+ring_recv_buf_slice :: proc(r: ^Ring, index: i32) -> []u8 {
+	if !r.impl.buffers_ok || index < 0 || int(index) >= len(r.impl.recv_iovs) {
+		return nil
+	}
+	bs := int(r.impl.recv_buf_size)
+	off := int(index) * bs
+	return r.impl.recv_pool[off:off + bs]
 }
 
 // --- SQE acquisition / prep -------------------------------------------------
@@ -191,6 +450,15 @@ _get_sqe :: proc(r: ^Ring) -> (sqe: ^linux.IO_Uring_SQE, err: Error) {
 	return sqe, .None
 }
 
+_apply_fixed_file :: proc(sqe: ^linux.IO_Uring_SQE, fixed_idx: i32, raw_fd: i32) {
+	if fixed_idx >= 0 {
+		sqe.flags += {.FIXED_FILE}
+		sqe.fd = linux.Fd(fixed_idx)
+	} else {
+		sqe.fd = linux.Fd(raw_fd)
+	}
+}
+
 _prep_nop :: proc(r: ^Ring, id: u32) -> Error {
 	sqe := _get_sqe(r) or_return
 	sqe.opcode = .NOP
@@ -198,50 +466,57 @@ _prep_nop :: proc(r: ^Ring, id: u32) -> Error {
 	return .None
 }
 
-_prep_accept :: proc(r: ^Ring, id: u32, listen_fd: i32) -> Error {
+_prep_accept :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	sqe := _get_sqe(r) or_return
 	sqe.opcode = .ACCEPT
-	sqe.fd = linux.Fd(listen_fd)
+	_apply_fixed_file(sqe, op.fixed_idx, op.fd)
 	// addr / addr_len nil → kernel still accepts; peer address discarded.
 	sqe.addr = 0
 	sqe.off = 0
 	// Non-blocking accepted sockets with cloexec (server default).
 	sqe.accept_flags = {.CLOEXEC, .NONBLOCK}
+	if op.continuous {
+		sqe.sq_accept_flags = {.MULTISHOT}
+	}
 	sqe.user_data = u64(id)
 	return .None
 }
 
-_prep_recv :: proc(r: ^Ring, id: u32, fd: i32, buf: []u8) -> Error {
+_prep_recv :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	sqe := _get_sqe(r) or_return
 	sqe.opcode = .RECV
-	sqe.fd = linux.Fd(fd)
-	sqe.addr = cast(u64)uintptr(raw_data(buf))
-	sqe.len = u32(len(buf))
+	_apply_fixed_file(sqe, op.fixed_idx, op.fd)
+	// Always pointer-RECV into the provided window. When the window is backed by
+	// ring_register_recv_pool memory this still avoids per-request malloc; the
+	// IORING_RECVSEND_FIXED_BUF path returned -EINVAL on 6.14 in bastion smoke
+	// (investigated separately — pointer RECV into the registered pool is correct).
+	sqe.addr = cast(u64)uintptr(raw_data(op.buf))
+	sqe.len = u32(len(op.buf))
 	sqe.msg_flags = {}
 	sqe.user_data = u64(id)
 	return .None
 }
 
-_prep_send :: proc(r: ^Ring, id: u32, fd: i32, buf: []u8) -> Error {
+_prep_send :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	sqe := _get_sqe(r) or_return
 	sqe.opcode = .SEND
-	sqe.fd = linux.Fd(fd)
-	sqe.addr = cast(u64)uintptr(raw_data(buf))
-	sqe.len = u32(len(buf))
+	_apply_fixed_file(sqe, op.fixed_idx, op.fd)
+	sqe.addr = cast(u64)uintptr(raw_data(op.buf))
+	sqe.len = u32(len(op.buf))
 	sqe.msg_flags = {}
 	sqe.user_data = u64(id)
 	return .None
 }
 
-_prep_close :: proc(r: ^Ring, id: u32, fd: i32) -> Error {
+_prep_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	sqe := _get_sqe(r) or_return
 	sqe.opcode = .CLOSE
-	sqe.fd = linux.Fd(fd)
+	_apply_fixed_file(sqe, op.fixed_idx, op.fd)
 	sqe.user_data = u64(id)
 	return .None
 }
 
-_submit_nop :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
+_submit_nop :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
 		return .Unsupported
 	}
@@ -249,32 +524,32 @@ _submit_nop :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
 	return _prep_nop(r, id)
 }
 
-_submit_accept :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
+_submit_accept :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
 		return .Unsupported
 	}
-	return _prep_accept(r, id, op.fd)
+	return _prep_accept(r, id, op)
 }
 
-_submit_recv :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
+_submit_recv :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
 		return .Unsupported
 	}
-	return _prep_recv(r, id, op.fd, op.buf)
+	return _prep_recv(r, id, op)
 }
 
-_submit_send :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
+_submit_send :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
 		return .Unsupported
 	}
-	return _prep_send(r, id, op.fd, op.buf)
+	return _prep_send(r, id, op)
 }
 
-_submit_close :: proc(r: ^Ring, id: u32, op: ^Op) -> Error {
+_submit_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
 		return .Unsupported
 	}
-	return _prep_close(r, id, op.fd)
+	return _prep_close(r, id, op)
 }
 
 // --- Submit / wait / peek ---------------------------------------------------
@@ -429,6 +704,11 @@ _ring_wait :: proc(
 		enter_flags := flags + {.EXT_ARG}
 		_, errno := linux.io_uring_enter2(r.impl.ring_fd, pending, wait_nr, enter_flags, &arg)
 		if errno != .NONE && errno != .ETIME {
+			// EINTR: soft return so hosts can observe shutdown flags (crash listener).
+			if errno == .EINTR {
+				n2 := _copy_cqes_ready(r, out[n:])
+				return n + n2, .None
+			}
 			return n, .Wait_Failed
 		}
 	} else if pending > 0 || .GETEVENTS in flags {

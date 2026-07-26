@@ -1,10 +1,11 @@
 #+private
 package http
 
-import "core:mem/virtual"
 import "base:intrinsics"
+import "base:runtime"
 
 import "core:bufio"
+import "core:mem/virtual"
 
 Scan_Callback :: #type proc(user_data: rawptr, token: string, err: bufio.Scanner_Error)
 Split_Proc    :: #type proc(split_data: rawptr, data: []byte, at_eof: bool) -> (advance: int, token: []byte, err: bufio.Scanner_Error, final_token: bool)
@@ -81,6 +82,62 @@ scanner_reset :: proc(s: ^Scanner) {
 	s.could_be_too_short           = false
 	s.user_data                    = nil
 	s.callback                     = nil
+}
+
+// scanner_init_pooled installs a fixed slice as scanner.buf without owning it via free.
+// len=cap so the free window is the full RECV size. Recycle via scanner_reset_pooled.
+@(private)
+scanner_init_pooled :: proc(s: ^Scanner, c: ^Connection, window: []u8) {
+	s^ = {}
+	s.connection = c
+	s.split = scan_lines
+	s.max_token_size = bufio.DEFAULT_MAX_SCAN_TOKEN_SIZE
+	raw := runtime.Raw_Dynamic_Array {
+		data      = raw_data(window),
+		len       = len(window),
+		cap       = len(window),
+		allocator = runtime.nil_allocator(),
+	}
+	s.buf = transmute([dynamic]byte)raw
+}
+
+// scanner_reset_pooled clears parse state and restores pooled buf len to capacity.
+@(private)
+scanner_reset_pooled :: proc(s: ^Scanner) {
+	if cap(s.buf) > 0 {
+		raw := cast(^runtime.Raw_Dynamic_Array)&s.buf
+		raw.len = raw.cap
+	}
+	s.start = 0
+	s.end = 0
+	s.split = scan_lines
+	s.split_data = nil
+	s.max_token_size = bufio.DEFAULT_MAX_SCAN_TOKEN_SIZE
+	s.token = nil
+	s._err = nil
+	s.consecutive_empty_reads = 0
+	s.max_consecutive_empty_reads = DEFAULT_MAX_CONSECUTIVE_EMPTY_READS
+	s.successive_empty_token_count = 0
+	s.done = false
+	s.could_be_too_short = false
+	s.user_data = nil
+	s.callback = nil
+}
+
+// scanner_prepare resets parse state for a new request and restores the RECV window.
+// Pooled: len=cap. Dynamic: scanner_reset may shrink len via remove_range — restore to opts.recv_buf_size.
+@(private)
+scanner_prepare :: proc(c: ^Connection) {
+	if c.scanner_pooled {
+		scanner_reset_pooled(&c.scanner)
+	} else {
+		scanner_reset(&c.scanner)
+		recv_n := c.server.opts.recv_buf_size
+		if cap(c.scanner.buf) >= recv_n && len(c.scanner.buf) < recv_n {
+			resize(&c.scanner.buf, recv_n)
+		}
+	}
+	c.scanner.connection = c
 }
 
 scanner_scan :: proc(
@@ -161,7 +218,7 @@ scanner_scan :: proc(
 
 	could_be_too_short := false
 
-	// Resize the buffer if full
+	// Make room for more data if the free window is empty.
 	if s.end == len(s.buf) {
 		if s.max_token_size <= 0 {
 			s.max_token_size = bufio.DEFAULT_MAX_SCAN_TOKEN_SIZE
@@ -173,24 +230,42 @@ scanner_scan :: proc(
 			return
 		}
 
-		// TODO: write over the part of the buffer already used
+		// Compact consumed prefix without shrinking len (preserves free window to cap/len).
+		if s.start > 0 {
+			n := s.end - s.start
+			if n > 0 {
+				copy(s.buf[0:], s.buf[s.start:s.end])
+			}
+			s.end = n
+			s.start = 0
+		}
 
-		// overflow check
-		new_size := INIT_BUF_SIZE
-		if len(s.buf) > 0 {
-			overflowed: bool
-			if new_size, overflowed = intrinsics.overflow_mul(len(s.buf), 2); overflowed {
+		// Still full: grow dynamic buffers; pooled/fixed windows cannot grow.
+		if s.end == len(s.buf) {
+			pooled := s.connection != nil && s.connection.scanner_pooled
+			if pooled {
+				// Fixed RECV window exhausted; treat as too long rather than realloc.
 				set_err(s, .Too_Long)
 				callback(user_data, "", s._err)
 				return
 			}
+
+			// overflow check
+			new_size := INIT_BUF_SIZE
+			if len(s.buf) > 0 {
+				overflowed: bool
+				if new_size, overflowed = intrinsics.overflow_mul(len(s.buf), 2); overflowed {
+					set_err(s, .Too_Long)
+					callback(user_data, "", s._err)
+					return
+				}
+			}
+
+			old_size := len(s.buf)
+			resize(&s.buf, new_size)
+
+			could_be_too_short = old_size >= len(s.buf)
 		}
-
-		old_size := len(s.buf)
-		resize(&s.buf, new_size)
-
-		could_be_too_short = old_size >= len(s.buf)
-
 	}
 
 	// Read data into the buffer
@@ -203,25 +278,19 @@ scanner_scan :: proc(
 	// Submit recv into the free window of the scanner buffer. Buffer must stay
 	// valid until the Recv CQE (host calls scanner_on_bytes from that path).
 	_ = could_be_too_short
-	when ODIN_OS != .Linux {
-		s._err = .EOF
+	buf := s.buf[s.end:len(s.buf)]
+	if len(buf) == 0 {
+		s._err = .No_Progress
 		callback(user_data, "", s._err)
 		return
-	} else {
-		buf := s.buf[s.end:len(s.buf)]
-		if len(buf) == 0 {
-			s._err = .No_Progress
-			callback(user_data, "", s._err)
-			return
-		}
-		err := host_submit_recv(s.connection, buf)
-		if err != .None {
-			s._err = .Unknown
-			callback(user_data, "", s._err)
-			return
-		}
-		// Callback resumes after Recv CQE → scanner_on_bytes → scanner_scan.
 	}
+	err := host_submit_recv(s.connection, buf)
+	if err != .None {
+		s._err = .Unknown
+		callback(user_data, "", s._err)
+		return
+	}
+	// Callback resumes after Recv CQE → scanner_on_bytes → scanner_scan.
 }
 
 // Phase 2 entry: host calls this when a proactr Recv completes into s.buf[s.end:].

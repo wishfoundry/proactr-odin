@@ -1,0 +1,91 @@
+// Minimal crash manager for the proactr HTTP host.
+//
+// Design (happy path cost ≈ zero):
+//   Listener — signal / API only sets `Server.closing` (async-signal-safe).
+//   Reaper   — workers observe the flag after `ring_wait`, close listen once,
+//              drain connections, exit the host loop (existing shutdown path).
+//
+// No per-CQE registration, no locks on the completion path, no buffer
+// checkpointing. Process-level hard crashes still rely on the OS + external
+// supervisor (systemd, etc.).
+package http
+
+import "core:c/libc"
+import "core:log"
+import "core:os"
+
+// server_request_shutdown marks the server for graceful stop.
+// Safe to call from a signal handler: only an atomic store (no closes, no locks).
+// Workers notice on the next ring_wait timeout (Server_Opts.wait_timeout_ms) or CQE.
+server_request_shutdown :: proc(s: ^Server) {
+	if s == nil {
+		return
+	}
+	atomic_store(&s.closing, true)
+}
+
+// server_shutdown requests stop and, from a normal thread context, closes
+// listen sockets so outstanding accept ops complete. Prefer this outside signals.
+// Order: set closing → close listen → workers drain → serve returns.
+server_shutdown :: proc(s: ^Server) {
+	if s == nil {
+		return
+	}
+	server_request_shutdown(s)
+	server_close_listen(s)
+}
+
+// Global target for SIGINT/SIGTERM. Only the atomic `closing` flag is touched
+// from the handler; never call server_close_listen here (not async-signal-safe).
+@(private)
+crash_listener_server: ^Server
+
+// server_shutdown_on_interrupt installs a minimal crash listener:
+// SIGINT and SIGTERM → server_request_shutdown only.
+// Workers reap on the cold path (close listen, drain conns).
+server_shutdown_on_interrupt :: proc(s: ^Server) {
+	crash_listener_server = s
+	_ = libc.signal(libc.SIGINT, _crash_listener_on_signal)
+	_ = libc.signal(libc.SIGTERM, _crash_listener_on_signal)
+}
+
+@(private)
+_crash_listener_on_signal :: proc "cdecl" (_: i32) {
+	// Async-signal-safe: atomic store only. No context=, no net.close, no log.
+	s := crash_listener_server
+	if s != nil {
+		// Inline store: cannot call Odin procs that might not be signal-safe.
+		// atomic_store uses sync.atomic_store which is fine for bool.
+		s.closing.raw = true
+	}
+}
+
+// server_fatal is for unrecoverable host invariants. Best-effort request
+// shutdown, then exit so the OS reclaims FDs/rings; external supervisors restart.
+server_fatal :: proc(msg: string, args: ..any) {
+	log.errorf(msg, ..args)
+	if crash_listener_server != nil {
+		server_request_shutdown(crash_listener_server)
+	}
+	os.exit(1)
+}
+
+// server_reap_if_closing is the cold-path reaper entry for a worker loop.
+// Idempotent: closes listen once (CAS), begins connection drain, returns whether
+// the server is shutting down.
+@(private)
+server_reap_if_closing :: proc(s: ^Server) -> bool {
+	if !atomic_load(&s.closing) {
+		return false
+	}
+	// Close all worker listen fds from normal context (signal only set the flag).
+	server_close_listen(s)
+	_server_thread_begin_shutdown(s)
+	// Multishot accept may not deliver a CQE promptly after close; do not block
+	// worker exit on accept_pending once listen is gone.
+	if atomic_load(&s.listen_closed) {
+		td.accept_pending = false
+		td.needs_accept_rearm = false
+	}
+	return true
+}
