@@ -414,8 +414,19 @@ start_peer() {
       fi
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
-        PLAN_MODE=optimize PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
+        PLAN_MODE=optimize PLAN_WIRE_MODE="${PLAN_WIRE_MODE:-kernel}" \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt.server.log" 2>&1 &
+      ;;
+    proactr-opt-fallback)
+      if [[ ! -x proactr/tfb-proactr.bin ]]; then
+        (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
+      fi
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
+        PLAN_MODE=optimize PLAN_WIRE_MODE=fallback \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
+        ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt-fallback.server.log" 2>&1 &
       ;;
     proactr-async)
       if [[ ! -x proactr/tfb-proactr.bin ]]; then
