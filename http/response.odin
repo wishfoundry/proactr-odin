@@ -1437,12 +1437,20 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 			used_opt := false
 			if _response_wire_use_optimize(r) {
 				plan := plan_body(cmds, plan_context(r))
-				if _plan_is_writev_wire(plan) {
-					// Multi-buffer path submits itself (or clean_request_loop).
+				// Kernel/multi gather only pays off for ≥2 body segments (assembled).
+				// Single Static+heading writev crashed under load on bastion — materialize.
+				n_mem := 0
+				for c in cmds {
+					if c.kind == .Static || c.kind == .Bytes {
+						if len(c.bytes) > 0 {
+							n_mem += 1
+						}
+					}
+				}
+				if _plan_is_writev_wire(plan) && n_mem >= 2 {
 					if _response_send_writev(r, cmds) {
 						used_opt = true
 					}
-					// false → heading not written; fall through to materialize
 				} else if _plan_is_sendfile_wire(plan) {
 					if _response_send_file_region(r, cmds, plan) {
 						used_opt = true
