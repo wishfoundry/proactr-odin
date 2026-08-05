@@ -150,15 +150,17 @@ lat_from() {
   awk '/Latency/ {print $2; exit}' "$1" 2>/dev/null || echo "?"
 }
 
-# oha "Size/request" (bytes). Empty if missing. Critic: do not trust alone for RPS validity.
+# oha "Size/request" (bytes). Unit is often $3 ("KiB"/"MiB") with numeric $2.
 size_from() {
   awk '/Size\/request/ {
-    v=$2
-    if (v ~ /KiB/) { printf "%.0f", v*1024; exit }
-    if (v ~ /MiB/) { printf "%.0f", v*1024*1024; exit }
-    if (v ~ /GiB/) { printf "%.0f", v*1024*1024*1024; exit }
-    if (v ~ /B/) { gsub(/B/,"",v); printf "%.0f", v; exit }
-    print v; exit
+    n=$2; u=$3
+    if (n ~ /KiB$/) { sub(/KiB$/,"",n); printf "%.0f", n*1024; exit }
+    if (n ~ /MiB$/) { sub(/MiB$/,"",n); printf "%.0f", n*1024*1024; exit }
+    if (u == "KiB") { printf "%.0f", n*1024; exit }
+    if (u == "MiB") { printf "%.0f", n*1024*1024; exit }
+    if (u == "GiB") { printf "%.0f", n*1024*1024*1024; exit }
+    if (u == "B" || n ~ /B$/) { gsub(/B/,"",n); printf "%.0f", n; exit }
+    printf "%.0f", n; exit
   }' "$1" 2>/dev/null || true
 }
 

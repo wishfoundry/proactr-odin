@@ -156,27 +156,32 @@ make_payload :: proc(n: int) -> string {
 	return s[:n]
 }
 
+// Prefer headers_set_unsafe: key already lowercase, skip sanitize on TFB hot path.
+set_server :: #force_inline proc(res: ^http.Response) {
+	http.headers_set_unsafe(&res.headers, "server", "Proactr")
+}
+
 on_plaintext :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Proactr")
+	set_server(res)
 	http.respond_plain(res, "Hello, World!")
 }
 
 on_4k :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Proactr")
+	set_server(res)
 	http.respond_plain(res, P_4K)
 }
 
 on_64k :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Proactr")
+	set_server(res)
 	http.respond_plain(res, P_64K)
 }
 
 on_1m :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Proactr")
+	set_server(res)
 	http.respond_plain(res, P_1M)
 }
 
 on_4m :: proc(req: ^http.Request, res: ^http.Response) {
-	http.headers_set(&res.headers, "server", "Proactr")
+	set_server(res)
 	http.respond_plain(res, P_4M)
 }
