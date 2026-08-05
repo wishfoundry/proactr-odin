@@ -13,7 +13,7 @@
 | `file_read_full` | Full file read into userspace then send |
 | `file_chunked` | proactr-opt: chunked pread+send (**not** kernel sendfile) |
 | `materialize_copy` | CL body, single buffer |
-| `sse_oneshot_CL` | 42 B event-stream, Content-Length (peer-fair oneshot) |
+| `sse_oneshot_CL` | 42 B event-stream, Content-Length (peer-fair oneshot; re-measured after CL fix) |
 
 **Drogon:** I/O = **epoll**. oha `Size/request` is often **wrong** on large bodies (e.g. 1362 vs 524288); **post-load body re-check is source of truth**. RPS kept only if body contracts passed.
 
