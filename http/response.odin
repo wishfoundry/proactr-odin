@@ -92,13 +92,14 @@ _response_append_cmd :: proc(r: ^Response, cmd: Response_Cmd, loc := #caller_loc
 }
 
 // Set handler plan bias (prefer materialize / gather / sendfile). Cleared on response_init.
-// Zero profile leaves Plan_Context at server defaults (except prefer_sendfile is opt-in).
+// Zero profile: server copy/iovec defaults; prefer_sendfile remains opt-in (see Handler_Profile).
 response_set_profile :: proc(r: ^Response, p: Handler_Profile) {
 	r._profile = p
 }
 
-// Optional body middleware: rewrite Response_Cmd[] before plan/materialize on send.
-// Pass mw=nil to clear. Cleared on response_init.
+// Optional body middleware: rewrite Response_Cmd[] in place before plan/materialize on send.
+// Must obey Body_Middleware contract (same raw_data as input). Pass mw=nil to clear.
+// Cleared on response_init.
 response_body_middleware :: proc(r: ^Response, mw: Body_Middleware, user: rawptr = nil) {
 	r._body_mw = mw
 	r._body_mw_user = user
@@ -106,6 +107,7 @@ response_body_middleware :: proc(r: ^Response, mw: Body_Middleware, user: rawptr
 
 // Base Plan_Context from connection/server/backend (no handler profile).
 // Safe with nil conn (pure defaults + platform sendfile when POSIX).
+// Safe off worker thread: thread-local td is nil → fixed_files stays false (no ring touch).
 plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
 	ctx := plan_context_default()
 
@@ -127,13 +129,16 @@ plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
 		}
 		// plan_sendfile_ok: Default_Server_Opts true on posix; false disables.
 		// Non-posix remains false from the when above.
+		// Note: prefer_sendfile on the Response is still required for sendfile_ok after profile apply.
 		when ODIN_OS == .Linux || ODIN_OS == .Darwin {
 			ctx.sendfile_ok = opts.plan_sendfile_ok
 		}
 	}
 
 	// fixed_files: registered fd table on this worker's proactr ring.
-	if td != nil && td.state != .Uninitialized {
+	// Field read only (no SQE). Only while the ring is live for handlers (Running/Closing).
+	// Off-worker / tests: td is nil → leave false. Avoids Cleaning/Closed after ring_destroy.
+	if td != nil && (td.state == .Running || td.state == .Closing) {
 		ctx.fixed_files = proactr.ring_has_fixed_files(&td.ring)
 	}
 
@@ -144,6 +149,8 @@ plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
 }
 
 // Live Plan_Context for advanced handlers: server/conn/backend + Response profile bias.
+// Response._profile is request-scoped (cleared in response_init); not atomic — same
+// single-worker-per-conn model as the rest of Response.
 plan_context :: proc(r: ^Response) -> Plan_Context {
 	conn: ^Connection
 	profile: Handler_Profile
@@ -155,34 +162,37 @@ plan_context :: proc(r: ^Response) -> Plan_Context {
 }
 
 // Optimize-policy plan for tests/handlers (does not change the wire path).
-// Uses current body cmds + plan_context(r). Wire send still materialize_only (Phase 1–2).
+// Applies body middleware to a *snapshot* of cmds (does not mutate Response; send applies once).
+// Wire send still plan_body_materialize_only (Phase 1–2).
 response_plan_preview :: proc(r: ^Response) -> Plan_Result {
-	if r == nil || r._cmd_count == 0 {
+	if r == nil {
 		return plan_body({}, plan_context(r))
 	}
-	return plan_body(r._cmds[:r._cmd_count], plan_context(r))
+	ctx := plan_context(r)
+	if r._cmd_count == 0 {
+		return plan_body({}, ctx)
+	}
+	// Snapshot so optional middleware can compact without changing r._cmds / r._cmd_count.
+	tmp: [PLAN_MAX_BODY_CMDS]Response_Cmd
+	n := r._cmd_count
+	for i in 0 ..< n {
+		tmp[i] = r._cmds[i]
+	}
+	n = body_middleware_apply(r._body_mw, r._body_mw_user, tmp[:n])
+	if n == 0 {
+		return plan_body({}, ctx)
+	}
+	return plan_body(tmp[:n], ctx)
 }
 
-// Run body middleware (if set) and update r._cmds / r._cmd_count.
-// Middleware should prefer compacting in place; external slices are copied back.
+// Run body middleware (if set) and update r._cmd_count. In-place only (Body_Middleware contract).
 @(private)
 _response_apply_body_middleware :: proc(r: ^Response) {
 	if r._body_mw == nil || r._cmd_count == 0 {
 		return
 	}
-	out := r._body_mw(r._cmds[:r._cmd_count], r._body_mw_user)
-	if len(out) == 0 {
-		r._cmd_count = 0
-		return
-	}
-	assert(len(out) <= PLAN_MAX_BODY_CMDS, "body middleware returned too many cmds")
-	// Copy if middleware returned a buffer other than our cmd array (in-place compact is fine).
-	if raw_data(out) != raw_data(r._cmds[:]) || (len(out) > 0 && &out[0] != &r._cmds[0]) {
-		for i in 0 ..< len(out) {
-			r._cmds[i] = out[i]
-		}
-	}
-	r._cmd_count = len(out)
+	// Pass r._cmds[:count] so cap remains PLAN_MAX_BODY_CMDS for in-place expand.
+	r._cmd_count = body_middleware_apply(r._body_mw, r._body_mw_user, r._cmds[:r._cmd_count])
 }
 
 // Append a borrowed Static body command (immutable for the response lifetime).

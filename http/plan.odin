@@ -85,18 +85,20 @@ plan_context_default :: proc() -> Plan_Context {
 	}
 }
 
-// Handler-side bias over Plan_Context (POD). Zero value = no bias (server defaults).
+// Handler-side bias over Plan_Context (POD).
+// Zero value: no materialize/gather bias (server copy_budget / max_iovecs stand);
+// prefer_sendfile is always opt-in (zero → sendfile_ok forced false even if platform allows).
 // Applied by plan_context / plan_context_apply_profile (same rules as comparisons/plan plan_ctx_for).
 Handler_Profile :: struct {
 	prefer_materialize: bool, // force huge copy budget → plan_body materializes memory bodies
 	prefer_gather:      bool, // use copy_budget for size gate (0 → disable size-based copy preference)
-	prefer_sendfile:    bool, // AND with platform sendfile_ok for plan_body Sendfile choice
+	prefer_sendfile:    bool, // AND with platform/server sendfile_ok (cannot enable when base is false)
 	copy_budget:        u32,  // with prefer_gather: preferred_copy_budget (0 disables size gate)
 }
 
 // Apply Handler_Profile bias onto a base Plan_Context (filled from server/conn).
 // Order matches comparisons/plan/server: prefer_gather first, prefer_materialize wins if both set.
-// sendfile_ok becomes base.sendfile_ok && profile.prefer_sendfile (opt-in).
+// sendfile_ok becomes base.sendfile_ok && profile.prefer_sendfile (opt-in; never promotes false→true).
 plan_context_apply_profile :: proc(base: Plan_Context, profile: Handler_Profile) -> Plan_Context {
 	ctx := base
 	if profile.prefer_gather {
@@ -110,8 +112,14 @@ plan_context_apply_profile :: proc(base: Plan_Context, profile: Handler_Profile)
 }
 
 // Body middleware: rewrite intent cmds before plan/materialize.
-// Should compact in place into the input slice when possible and return a subslice
-// of cmds (or a new slice the host will copy back into Response._cmds).
+//
+// Contract (lifetime-safe):
+//   - Rewrite in place into the storage behind `cmds` (compact / expand using cap).
+//   - Return a slice with the *same* raw_data as `cmds` (usually cmds[:new_len]).
+//   - Do NOT return a stack-allocated or other external buffer: the host does not copy
+//     and a returned external slice is use-after-return if it was stack memory.
+// len(out) must be ≤ PLAN_MAX_BODY_CMDS; expansion may use cap(cmds) when the host
+// passes Response._cmds[:count] (cap is PLAN_MAX_BODY_CMDS).
 Body_Middleware :: #type proc(cmds: []Response_Cmd, user: rawptr) -> []Response_Cmd
 
 // Identity: leave cmds unchanged.
@@ -120,7 +128,7 @@ body_mw_identity :: proc(cmds: []Response_Cmd, user: rawptr) -> []Response_Cmd {
 	return cmds
 }
 
-// Drop empty Static/Bytes commands (len == 0). Compacts in place.
+// Drop empty Static/Bytes commands (len == 0). Compacts in place (prefix return).
 // Toy transform to prove middleware can rewrite intent without touching the executor.
 body_mw_drop_empty_static :: proc(cmds: []Response_Cmd, user: rawptr) -> []Response_Cmd {
 	_ = user
@@ -133,6 +141,22 @@ body_mw_drop_empty_static :: proc(cmds: []Response_Cmd, user: rawptr) -> []Respo
 		w += 1
 	}
 	return cmds[:w]
+}
+
+// Run Body_Middleware on cmds; return new length. cmds storage is rewritten in place.
+// Empty out → 0. External (non-in-place) returns assert — see Body_Middleware contract.
+body_middleware_apply :: proc(mw: Body_Middleware, user: rawptr, cmds: []Response_Cmd) -> int {
+	if mw == nil || len(cmds) == 0 {
+		return len(cmds)
+	}
+	out := mw(cmds, user)
+	if len(out) == 0 {
+		return 0
+	}
+	assert(len(out) <= PLAN_MAX_BODY_CMDS, "body middleware returned too many cmds")
+	// Same base pointer only: rejects stack/external buffers (would be UAF if we copied after return).
+	assert(raw_data(out) == raw_data(cmds), "body middleware must rewrite cmds in place (same raw_data)")
+	return len(out)
 }
 
 // ---------------------------------------------------------------------------

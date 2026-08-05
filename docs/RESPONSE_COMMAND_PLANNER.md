@@ -413,6 +413,8 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Phase 2: `plan_context` fills from `Server_Opts` + worker ring; wire still `plan_body_materialize_only` | Structure for constraints/middleware without mechanism change |
 | 2026-08-05 | `Handler_Profile.prefer_sendfile` is opt-in (`sendfile_ok &= prefer_sendfile`) | Matches `comparisons/plan` plan_ctx_for; zero profile keeps conservative optimize preview |
 | 2026-08-05 | Body middleware on Response (`_body_mw`), not global Server hook | Per-request; cleared in `response_init`; toy `body_mw_drop_empty_static` only |
+| 2026-08-05 | Body middleware must rewrite in place (same `raw_data`); no post-return host copy | External/stack returns would be UAF; `body_middleware_apply` asserts contract |
+| 2026-08-05 | `response_plan_preview` applies middleware on a cmd snapshot (no Response mutate) | Matches send intent without double-apply at wire |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 

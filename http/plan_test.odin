@@ -349,6 +349,23 @@ test_plan_context_apply_profile_prefer_sendfile :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_plan_context_prefer_sendfile_cannot_promote :: proc(t: ^testing.T) {
+	// Server/platform said no: prefer_sendfile must not force sendfile_ok true.
+	base := plan_context_default()
+	base.sendfile_ok = false
+	base.tls = false
+
+	ctx := plan_context_apply_profile(base, Handler_Profile{prefer_sendfile = true})
+	testing.expect(t, !ctx.sendfile_ok)
+
+	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got := kinds_of(cmds, ctx, buf[:])
+	// No sendfile → Copy_Into + Write_Slice path.
+	expect_kinds(t, got, { .Copy_Into, .Write_Slice })
+}
+
+@(test)
 test_plan_context_zero_profile_is_defaults :: proc(t: ^testing.T) {
 	// Response with zero profile and no conn: server-like base + zero bias.
 	// prefer_sendfile false → sendfile_ok false even if platform base was true.
@@ -412,9 +429,41 @@ test_response_body_middleware_rewrites_cmds :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_response_plan_preview_applies_middleware_snapshot :: proc(t: ^testing.T) {
+	// Preview must see post-middleware cmds without mutating Response (send applies once).
+	r: Response
+	empty: [0]u8
+	_response_append_cmd(&r, cmd_static(empty[:]))
+	_response_append_cmd(&r, cmd_static(_small_a[:]))
+	_response_append_cmd(&r, cmd_static(empty[:]))
+	response_body_middleware(&r, body_mw_drop_empty_static, nil)
+
+	preview := response_plan_preview(&r)
+	testing.expect_value(t, preview.n_mem, 1)
+	testing.expect_value(t, preview.total_body, i64(len(_small_a)))
+	// Response cmds unchanged by preview.
+	testing.expect_value(t, r._cmd_count, 3)
+}
+
+@(test)
 test_body_mw_identity :: proc(t: ^testing.T) {
 	cmds := []Response_Cmd{cmd_static(_small_a[:]), cmd_static(_small_b[:])}
 	out := body_mw_identity(cmds, nil)
 	testing.expect_value(t, len(out), 2)
 	testing.expect(t, raw_data(out) == raw_data(cmds))
+}
+
+@(test)
+test_body_middleware_apply_in_place :: proc(t: ^testing.T) {
+	empty: [0]u8
+	buf: [4]Response_Cmd
+	buf[0] = cmd_static(empty[:])
+	buf[1] = cmd_static(_small_a[:])
+	buf[2] = cmd_static(empty[:])
+	n := body_middleware_apply(body_mw_drop_empty_static, nil, buf[:3])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, len(buf[0].bytes), len(_small_a))
+
+	// nil mw leaves length alone.
+	testing.expect_value(t, body_middleware_apply(nil, nil, buf[:1]), 1)
 }
