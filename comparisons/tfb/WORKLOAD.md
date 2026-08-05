@@ -54,3 +54,38 @@ Bastion matrix: `./run_fortunes_bastion.sh` (default `SERVERS="ntex proactr-sync
 | **heavy / optional** | seastar, envoy | build or docker; see peer README |
 
 Default `SERVERS` on Linux includes both uring and epoll app servers. Envoy/seastar opt-in via env.
+
+## Fairness (CRITIC / peer matrix)
+
+### Size ladder — fair claim OK
+
+Same paths, same immutable body lengths (verified by `run_bench.sh` body-check after each peer starts). Same `WORKERS`, `BENCH_C`, `BENCH_Z`, `WARMUP_Z`, loadgen, host.
+
+| Peer | Wire (size ladder) | I/O label |
+|------|--------------------|-----------|
+| **proactr** | **materialize** into `resp_buf` + one send (`plan_optimize=false`) | io_uring on Linux |
+| **laytan** | odin-http respond_plain | nbio → io_uring on Linux |
+| **ntex** | ntex body + neon-uring | io_uring |
+| **drogon** | `setBody` + trantor | **epoll** (not uring) |
+
+Do **not** report proactr as writev/sendfile unless `plan_optimize` / `prefer_gather` / `prefer_sendfile` is on and counters prove it. The optimize path is multi-buffer **sequential** sends, not kernel `writev`.
+
+### Fortunes — not equal app work
+
+| Peer | DB concurrency | Query / sort | Conn lifecycle |
+|------|----------------|--------------|----------------|
+| **proactr-sync** (default) | **per I/O worker** conn | prepared `ORDER BY message`, stream HTML into `body_reserve` | open once per worker |
+| **proactr-sync** + `FORTUNES_SYNC_SHARED=1` | one conn + mutex | same stream | shared |
+| **proactr-async** | pool (`DB_WORKERS`) | same stream off I/O threads | one conn per pool thread |
+| **ntex** | one conn + `Mutex` | `SELECT *`, **app sort**, prepare every request | process lifetime |
+| **drogon** | none | `SELECT *`, app sort | **open/prepare/close every request** (handicapped) |
+| **laytan** | — | 501 | skipped in harness |
+
+Same schema (12 TE rows + runtime insert). **Do not** treat fortunes RPS as a pure I/O framework comparison. For a fairer DB concurrency match vs ntex, run proactr with `FORTUNES_SYNC_SHARED=1`. Fixing drogon’s per-request open is a peer code change (not done by the matrix harness).
+
+### Harness anti-cheat
+
+- `FORCE_REBUILD=1` (peer matrix default): rebuild all peers `-o:speed` / `--release` / CMake Release
+- Body-check fails the peer if size ladder bytes ≠ expected
+- Warmup applied for oha **and** bombardier/wrk
+- `BENCH_Z < 10s` prints a noise warning

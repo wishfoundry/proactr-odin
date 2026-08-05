@@ -18,10 +18,10 @@ Default `SERVERS` on Linux are **io_uring-backed only**. See [`IO_URING.md`](IO_
 | `compio` | compio-net (io_uring driver) |
 | `asio` | `BOOST_ASIO_HAS_IO_URING` + `DISABLE_EPOLL` |
 | `laytan` | core:nbio Linux = io_uring |
-| `proactr` / `proactr-sync` | proactr io_uring · **sync** SQLite (shared conn + mutex) |
+| `proactr` / `proactr-sync` | proactr io_uring · **sync** SQLite (**per-worker conn** by default; `FORTUNES_SYNC_SHARED=1` = shared+mutex) |
 | `proactr-async` | proactr io_uring · **async** SQLite (thread pool, one conn per DB worker) |
 
-**Not** in default matrix (no net io_uring): `go`, `drogon`.
+**Epoll / portable** (opt-in; labeled): `go`, `drogon` (trantor/epoll). Full mixed matrix: `./run_peer_matrix.sh`.
 
 ## Fortunes: sync vs async (bastion)
 
@@ -36,6 +36,8 @@ Default `SERVERS` on Linux are **io_uring-backed only**. See [`IO_URING.md`](IO_
 |------|---------|----------|
 | **sync** | `proactr-sync` | Blocking query on I/O worker; **per-worker SQLite conn** (default). `FORTUNES_SYNC_SHARED=1` = ntex-style shared+mutex |
 | **async** | `proactr-async` | Offload query+HTML to `DB_WORKERS` pool; I/O worker responds via tick |
+
+Size-ladder wire for proactr is **materialize** (`plan_optimize` off). Fortunes app work is **not** equal across ntex/drogon/proactr — see `WORKLOAD.md` fairness section and `CRITIC.md`.
 
 Same binary (`proactr/tfb-proactr.bin`); mode via `FORTUNES_MODE=sync|async`. WAL is set in `schema/prepare.sh` and re-applied on open.
 

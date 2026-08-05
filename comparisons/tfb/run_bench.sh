@@ -75,11 +75,56 @@ path_for_test() {
   esac
 }
 
+# Exact size-ladder body lengths (bytes). Fortunes is HTML (variable; only 200 + non-empty).
+expected_body_len() {
+  case "$1" in
+    plaintext) echo 13 ;;
+    s4k) echo 4096 ;;
+    s64k) echo 65536 ;;
+    s1m) echo 1048576 ;;
+    s4m) echo 4194304 ;;
+    *) echo "" ;;
+  esac
+}
+
+# Fail closed if a peer returns wrong body size (prevents silent RPS inflation).
+verify_peer_bodies() {
+  local name="$1"
+  local t path exp got code
+  for t in $TESTS; do
+    path="$(path_for_test "$t")"
+    if [[ "$t" == "fortunes" ]]; then
+      if [[ "$name" == "laytan" ]]; then
+        continue
+      fi
+      code=$(curl -s -o /tmp/tfb_body_check.$$ -w "%{http_code}" "http://127.0.0.1:${PORT}${path}" || echo 000)
+      got=$(wc -c </tmp/tfb_body_check.$$ 2>/dev/null | tr -d ' ' || echo 0)
+      rm -f /tmp/tfb_body_check.$$
+      if [[ "$code" != "200" || "${got:-0}" -lt 200 ]]; then
+        echo "FAIL body-check $name $t: http=$code bytes=$got (need 200 and HTML)" >&2
+        return 1
+      fi
+      continue
+    fi
+    exp="$(expected_body_len "$t")"
+    [[ -z "$exp" ]] && continue
+    code=$(curl -s -o /tmp/tfb_body_check.$$ -w "%{http_code}" "http://127.0.0.1:${PORT}${path}" || echo 000)
+    got=$(wc -c </tmp/tfb_body_check.$$ 2>/dev/null | tr -d ' ' || echo 0)
+    rm -f /tmp/tfb_body_check.$$
+    if [[ "$code" != "200" || "$got" != "$exp" ]]; then
+      echo "FAIL body-check $name $t: http=$code bytes=$got expected=$exp" >&2
+      return 1
+    fi
+  done
+  echo "  body-check ok ($name)"
+  return 0
+}
+
 run_load() {
   local name="$1" test="$2"
   local url="http://127.0.0.1:${PORT}$(path_for_test "$test")"
   local out="$LOGDIR/${name}_${test}.txt"
-  echo "  load $test → $url (c=$BENCH_C z=$BENCH_Z)"
+  echo "  load $test → $url (c=$BENCH_C z=$BENCH_Z warmup=$WARMUP_Z)"
   if have oha; then
     oha -z "$WARMUP_Z" -c "$BENCH_C" --no-tui "$url" >/dev/null 2>&1 || true
     if oha --help 2>&1 | grep -q latency-correction; then
@@ -88,8 +133,11 @@ run_load() {
       oha -z "$BENCH_Z" -c "$BENCH_C" --no-tui "$url" | tee "$out"
     fi
   elif have bombardier; then
+    # Same warmup as oha so cold vs hot does not favor first peer only.
+    bombardier -c "$BENCH_C" -d "$WARMUP_Z" "$url" >/dev/null 2>&1 || true
     bombardier -c "$BENCH_C" -d "$BENCH_Z" "$url" | tee "$out"
   else
+    wrk -t2 -c "$BENCH_C" -d "$WARMUP_Z" "$url" >/dev/null 2>&1 || true
     wrk -t4 -c "$BENCH_C" -d "$BENCH_Z" "$url" | tee "$out"
   fi
 }
@@ -192,8 +240,9 @@ start_peer() {
       if [[ ! -x proactr/tfb-proactr.bin ]]; then
         (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
       fi
+      # FORTUNES_SYNC_SHARED=1 → ntex-like one conn+mutex; default = per-worker conn.
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
-        FORTUNES_MODE=sync \
+        FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
         ./proactr/tfb-proactr.bin >"$LOGDIR/${name}.server.log" 2>&1 &
       ;;
     proactr-async)
@@ -232,12 +281,24 @@ stop_peer() {
   kill_port "$PORT"
 }
 
+# Ceiling noise: short runs are not comparable (CRITIC).
+case "$BENCH_Z" in
+  *ms|*s|*m|*h) ;;
+  *) echo "WARN: BENCH_Z=$BENCH_Z unparsed; prefer >=10s" >&2 ;;
+esac
+if [[ "$BENCH_Z" =~ ^([0-9]+)s$ ]] && (( BASH_REMATCH[1] < 10 )); then
+  echo "WARN: BENCH_Z=$BENCH_Z <10s — not a ceiling; noise-dominated" >&2
+fi
+
 echo "=== proactr-odin TFB (size ladder + fortunes) ==="
 echo "host=$(uname -s) $(uname -m) kernel=$(uname -r 2>/dev/null || true)"
-echo "db=$DATABASE_PATH port=$PORT workers=$WORKERS c=$BENCH_C z=$BENCH_Z"
+echo "db=$DATABASE_PATH port=$PORT workers=$WORKERS c=$BENCH_C z=$BENCH_Z warmup=$WARMUP_Z"
 echo "servers=$SERVERS"
 echo "tests=$TESTS"
 echo "logs=$LOGDIR"
+echo "backends: proactr=io_uring(Linux) laytan=nbio/io_uring ntex=neon-uring drogon=epoll(trantor)"
+echo "proactr size-ladder wire: materialize (plan_optimize=false) — not kernel writev/sendfile"
+echo "fortunes app work is NOT equal across peers — see WORKLOAD.md / run_peer_matrix.sh notes"
 echo ""
 
 # matrix header
@@ -261,6 +322,17 @@ for srv in $SERVERS; do
       for t in $TESTS; do printf '\tskip'; done
       printf '\n'
     } | tee -a "$SUMMARY"
+    continue
+  fi
+  # Reject wrong body sizes before burning BENCH_Z (CRITIC: different bodies = fake).
+  if ! verify_peer_bodies "$srv"; then
+    echo "  (skip $srv — body-check failed)"
+    {
+      printf '%s' "$srv"
+      for t in $TESTS; do printf '\tbody-fail'; done
+      printf '\n'
+    } | tee -a "$SUMMARY"
+    stop_peer "$srv" "$pid"
     continue
   fi
   row="$srv"
