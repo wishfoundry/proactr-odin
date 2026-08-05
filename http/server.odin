@@ -1093,15 +1093,15 @@ _conn_clear_file_send :: proc(conn: ^Connection) {
 @(private)
 _conn_file_region_start_or_finish :: proc(conn: ^Connection) -> bool {
 	if conn.file_send_remaining > 0 {
-		if plan_wire_prefer_kernel() {
+		// Opt-in kernel sendfile (PLAN_WIRE_SENDFILE=1); default chunked for stability.
+		if plan_wire_prefer_sendfile() {
 			if err := host_submit_sendfile(conn); err == .None {
 				plan_wire_inc_sendfile()
 				return true
 			}
-			// Unsupported / submit fail → chunked fallback below.
 			conn.kernel_sendfile_active = false
 		}
-		// Chunked pread+send fallback (portable; not kernel sendfile).
+		// Chunked pread+send (default; real sendfile path available via env).
 		plan_wire_inc_copy_into()
 		return _conn_file_send_continue_or_finish(conn)
 	}

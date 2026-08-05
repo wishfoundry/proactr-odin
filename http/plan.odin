@@ -54,10 +54,9 @@ _plan_wire_mode_inited: bool
 @(private)
 _plan_wire_prefer_kernel: bool
 
-// plan_wire_prefer_kernel: true when host should try submit_writev / submit_sendfile.
-// Override with PLAN_WIRE_MODE=fallback (or multi_send) to force portable paths.
-// PLAN_WIRE_MODE=kernel (default on Linux) prefers kernel ops; non-Linux always false
-// after env parse (kernel ops return Unsupported there).
+// plan_wire_prefer_kernel: try IORING_OP_WRITEV for multi-segment gather.
+// Override with PLAN_WIRE_MODE=fallback to force multi_send.
+// PLAN_WIRE_MODE=kernel (default on Linux). Non-Linux always false.
 plan_wire_prefer_kernel :: proc() -> bool {
 	if !_plan_wire_mode_inited {
 		_plan_wire_mode_inited = true
@@ -66,7 +65,6 @@ plan_wire_prefer_kernel :: proc() -> bool {
 		} else {
 			_plan_wire_prefer_kernel = false
 		}
-		// Env always consulted so PLAN_WIRE_MODE=fallback is documented/portable.
 		if v, ok := os.lookup_env("PLAN_WIRE_MODE", context.allocator); ok {
 			defer delete(v, context.allocator)
 			switch v {
@@ -80,6 +78,31 @@ plan_wire_prefer_kernel :: proc() -> bool {
 		}
 	}
 	return _plan_wire_prefer_kernel
+}
+
+// Kernel sendfile(2) is opt-in: PLAN_WIRE_SENDFILE=1|true|on.
+// Default off — soft_post + POLL path was unstable under high concurrency on bastion
+// (process death after file load). Code path exists for fidelity; chunked is default.
+@(private)
+_plan_wire_sendfile_inited: bool
+@(private)
+_plan_wire_prefer_sendfile: bool
+
+plan_wire_prefer_sendfile :: proc() -> bool {
+	if !_plan_wire_sendfile_inited {
+		_plan_wire_sendfile_inited = true
+		_plan_wire_prefer_sendfile = false
+		when ODIN_OS == .Linux {
+			if v, ok := os.lookup_env("PLAN_WIRE_SENDFILE", context.allocator); ok {
+				defer delete(v, context.allocator)
+				switch v {
+				case "1", "true", "on", "kernel":
+					_plan_wire_prefer_sendfile = true
+				}
+			}
+		}
+	}
+	return _plan_wire_prefer_sendfile && plan_wire_prefer_kernel()
 }
 
 // Deprecated alias name — multi_send only (not kernel writev). Prefer plan_wire_load.
