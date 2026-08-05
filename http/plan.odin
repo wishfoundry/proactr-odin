@@ -30,7 +30,10 @@ import "core:sync"
 // Wire-path mechanism counters (Phase 3–4). Atomic; safe across workers.
 // Harness /metrics can load these to prove real wire paths vs materialize.
 // Stream responses use stream_responses_total (Phase 5), not these plan_wire_*.
-plan_wire_writev_total:      u64
+//
+// multi_send = sequential multi-buffer submit_send (NOT kernel writev).
+// copy_into  = chunked pread+send (NOT kernel sendfile).
+plan_wire_multi_send_total:  u64
 plan_wire_materialize_total: u64
 // Phase 4: kernel sendfile path (reserved; 0 until real sendfile lands).
 plan_wire_sendfile_total:    u64
@@ -39,9 +42,17 @@ plan_wire_copy_into_total:   u64
 // Phase 5: response_begin_stream → stream_end completed (not a plan_body path).
 stream_responses_total:      u64
 
-plan_wire_inc_writev :: #force_inline proc() {
-	sync.atomic_add(&plan_wire_writev_total, u64(1))
+// Deprecated alias name — do not use in new code. Same counter as multi_send.
+plan_wire_writev_total :: proc() -> u64 {
+	return sync.atomic_load(&plan_wire_multi_send_total)
 }
+
+plan_wire_inc_writev :: #force_inline proc() {
+	// Name kept for call sites; increments multi_send (honest mechanism).
+	sync.atomic_add(&plan_wire_multi_send_total, u64(1))
+}
+
+plan_wire_inc_multi_send :: plan_wire_inc_writev
 
 plan_wire_inc_materialize :: #force_inline proc() {
 	sync.atomic_add(&plan_wire_materialize_total, u64(1))
@@ -59,8 +70,8 @@ stream_inc_responses :: #force_inline proc() {
 	sync.atomic_add(&stream_responses_total, u64(1))
 }
 
-plan_wire_load :: proc() -> (writev: u64, materialize: u64) {
-	return sync.atomic_load(&plan_wire_writev_total), sync.atomic_load(&plan_wire_materialize_total)
+plan_wire_load :: proc() -> (multi_send: u64, materialize: u64) {
+	return sync.atomic_load(&plan_wire_multi_send_total), sync.atomic_load(&plan_wire_materialize_total)
 }
 
 plan_wire_load_file :: proc() -> (sendfile: u64, copy_into: u64) {

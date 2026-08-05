@@ -293,7 +293,7 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 
 	mode_s := g_mode == .Optimize ? "optimize" : "materialize"
 	fmt.sbprintf(&b, "# proactr plan A/B metrics\n")
-	wire_writev, wire_mat := http.plan_wire_load()
+	wire_multi, wire_mat := http.plan_wire_load()
 	wire_sf, wire_ci := http.plan_wire_load_file()
 
 	fmt.sbprintf(&b, "plan_mode %s\n", mode_s)
@@ -309,7 +309,7 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	fmt.sbprintf(&b, "plan_flush_total %d\n", sync.atomic_load(&g_m.plan_flush))
 	fmt.sbprintf(&b, "plan_other_total %d\n", sync.atomic_load(&g_m.plan_other))
 	// Phase 3–4 real wire executor counters (package http).
-	fmt.sbprintf(&b, "plan_wire_writev_total %d\n", wire_writev)
+	fmt.sbprintf(&b, "plan_wire_multi_send_total %d\n", wire_multi)
 	fmt.sbprintf(&b, "plan_wire_materialize_total %d\n", wire_mat)
 	fmt.sbprintf(&b, "plan_wire_sendfile_total %d\n", wire_sf)
 	fmt.sbprintf(&b, "plan_wire_copy_into_total %d\n", wire_ci)
