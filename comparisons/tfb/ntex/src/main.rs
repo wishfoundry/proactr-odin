@@ -35,6 +35,22 @@ static P_64K: Lazy<Vec<u8>> = Lazy::new(|| make_payload(64 * 1024));
 static P_1M: Lazy<Vec<u8>> = Lazy::new(|| make_payload(1024 * 1024));
 static P_4M: Lazy<Vec<u8>> = Lazy::new(|| make_payload(4 * 1024 * 1024));
 
+// PROFILE_MATRIX: 8×64KiB with first byte 'A'+i (preconcat_blob mechanism).
+static ASSEMBLED: Lazy<Vec<u8>> = Lazy::new(|| {
+    let mut out = Vec::with_capacity(8 * 64 * 1024);
+    for i in 0..8 {
+        let mut s = make_payload(64 * 1024);
+        s[0] = b'A' + i as u8;
+        out.extend_from_slice(&s);
+    }
+    out
+});
+static FILE_PATH: Lazy<String> = Lazy::new(|| {
+    env::var("PLAN_FILE_PATH").unwrap_or_else(|_| "/tmp/proactr-profile-file-1m.bin".into())
+});
+const SSE_BODY: &str = "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n";
+const GEN_BODY: &str = "generated:ok\n";
+
 struct Fortune {
     id: i32,
     message: String,
@@ -50,6 +66,46 @@ fn plain_body(body: impl Into<ntex::http::body::Body>) -> HttpResponse {
 #[web::get("/plaintext")]
 async fn plaintext() -> HttpResponse {
     plain_body("Hello, World!")
+}
+
+#[web::get("/api/tiny")]
+async fn api_tiny() -> HttpResponse {
+    plain_body("Hello, World!")
+}
+
+#[web::get("/gen/ok")]
+async fn gen_ok() -> HttpResponse {
+    // Fair gen profile: fixed string build (no DB). Same bytes as proactr GEN_BODY.
+    plain_body(GEN_BODY)
+}
+
+#[web::get("/static/assembled")]
+async fn static_assembled() -> HttpResponse {
+    // preconcat_blob: ntex serves one buffer (honest label — not multi-iovec).
+    plain_body(&ASSEMBLED[..])
+}
+
+#[web::get("/static/blob/1m")]
+async fn static_blob() -> HttpResponse {
+    plain_body(&P_1M[..])
+}
+
+#[web::get("/file/1m")]
+async fn file_1m() -> HttpResponse {
+    // Serve from disk (file_read_full). Same path as other peers.
+    match std::fs::read(&*FILE_PATH) {
+        Ok(bytes) => plain_body(bytes),
+        Err(_) => HttpResponse::InternalServerError().body("file open failed"),
+    }
+}
+
+#[web::get("/sse")]
+async fn sse() -> HttpResponse {
+    HttpResponse::Ok()
+        .header("Server", "Ntex")
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .body(SSE_BODY)
 }
 
 // Size ladder: share Lazy buffers (no per-request Vec clone) — fair vs laytan/proactr.
@@ -140,16 +196,29 @@ async fn main() -> std::io::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(18080);
     let _ = &*DB;
-    let _ = (&*P_4K, &*P_64K, &*P_1M, &*P_4M);
+    let _ = (&*P_4K, &*P_64K, &*P_1M, &*P_4M, &*ASSEMBLED);
+    // Ensure profile file exists (same bytes as P_1M).
+    if std::fs::metadata(&*FILE_PATH).map(|m| m.len() as usize != P_1M.len()).unwrap_or(true) {
+        let _ = std::fs::write(&*FILE_PATH, &*P_1M);
+    }
     let backend = if cfg!(target_os = "linux") {
         "neon-uring/io_uring"
     } else {
         "tokio (non-Linux dev)"
     };
-    println!("ntex tfb peer on 0.0.0.0:{port} db={} io={backend}", *DB_PATH);
+    println!(
+        "ntex tfb peer on 0.0.0.0:{port} db={} io={backend} file={} mech=assembled:preconcat_blob,file:file_read_full,sse:sse_oneshot",
+        *DB_PATH, *FILE_PATH
+    );
     web::server(|| {
         App::new()
             .service(plaintext)
+            .service(api_tiny)
+            .service(gen_ok)
+            .service(static_assembled)
+            .service(static_blob)
+            .service(file_1m)
+            .service(sse)
             .service(s4k)
             .service(s64k)
             .service(s1m)

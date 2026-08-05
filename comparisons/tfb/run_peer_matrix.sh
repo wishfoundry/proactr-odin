@@ -78,7 +78,7 @@ if [[ "$FORCE_REBUILD" == "1" ]]; then
   echo "==> FORCE_REBUILD=1"
   for s in $SERVERS; do
     case "$s" in
-      proactr|proactr-sync|proactr-async)
+      proactr|proactr-sync|proactr-async|proactr-mat|proactr-opt)
         (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || exit 1
         ;;
       laytan)

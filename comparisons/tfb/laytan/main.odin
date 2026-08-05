@@ -10,7 +10,10 @@ import "core:strings"
 
 import http "laytan:odin-http"
 
-P_4K, P_64K, P_1M, P_4M: string
+P_4K, P_64K, P_1M, P_4M, P_ASSEMBLED: string
+g_file_path: string
+SSE_BODY :: "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n"
+GEN_BODY :: "generated:ok\n"
 
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
@@ -18,6 +21,12 @@ main :: proc() {
 	P_64K = make_payload(64 * 1024)
 	P_1M = make_payload(1024 * 1024)
 	P_4M = make_payload(4 * 1024 * 1024)
+	P_ASSEMBLED = make_assembled()
+	g_file_path = "/tmp/proactr-profile-file-1m.bin"
+	if p, ok := os.lookup_env("PLAN_FILE_PATH", context.allocator); ok {
+		g_file_path = p
+	}
+	ensure_profile_file(g_file_path, P_1M)
 
 	port := 18080
 	if p, ok := os.lookup_env("PORT", context.allocator); ok {
@@ -42,6 +51,12 @@ main :: proc() {
 	defer http.router_destroy(&router)
 
 	http.route_get(&router, "/plaintext", http.handler(on_plaintext))
+	http.route_get(&router, "/api/tiny", http.handler(on_plaintext))
+	http.route_get(&router, "/gen/ok", http.handler(on_gen))
+	http.route_get(&router, "/static/assembled", http.handler(on_assembled))
+	http.route_get(&router, "/static/blob/1m", http.handler(on_blob))
+	http.route_get(&router, "/file/1m", http.handler(on_file))
+	http.route_get(&router, "/sse", http.handler(on_sse))
 	http.route_get(&router, "/s/4k", http.handler(on_4k))
 	http.route_get(&router, "/s/64k", http.handler(on_64k))
 	http.route_get(&router, "/s/1m", http.handler(on_1m))
@@ -52,9 +67,10 @@ main :: proc() {
 	opts.thread_count = workers
 
 	log.infof(
-		"laytan tfb peer on :%d workers=%d io=nbio/io_uring size-ladder=on fortunes=501",
+		"laytan tfb peer on :%d workers=%d io=nbio/io_uring profiles=on fortunes=501 file=%s mech=assembled:preconcat_blob,file:file_read_full,sse:sse_oneshot",
 		port,
 		workers,
+		g_file_path,
 	)
 	err := http.listen_and_serve(
 		&s,
@@ -98,6 +114,58 @@ on_1m :: proc(req: ^http.Request, res: ^http.Response) {
 on_4m :: proc(req: ^http.Request, res: ^http.Response) {
 	http.headers_set(&res.headers, "server", "Laytan")
 	http.respond_plain(res, P_4M)
+}
+
+on_gen :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, GEN_BODY)
+}
+
+on_assembled :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, P_ASSEMBLED)
+}
+
+on_blob :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_plain(res, P_1M)
+}
+
+on_file :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.respond_file(res, g_file_path)
+}
+
+on_sse :: proc(req: ^http.Request, res: ^http.Response) {
+	http.headers_set(&res.headers, "server", "Laytan")
+	http.headers_set(&res.headers, "cache-control", "no-cache")
+	http.headers_set_content_type(&res.headers, "text/event-stream")
+	res.status = .OK
+	http.body_set(res, SSE_BODY)
+	http.respond(res)
+}
+
+make_assembled :: proc() -> string {
+	// 8×64KiB, first byte 'A'+i
+	total := 8 * 64 * 1024
+	b := strings.builder_make()
+	strings.builder_grow(&b, total)
+	for i in 0 ..< 8 {
+		s := make_payload(64 * 1024)
+		// mutate first byte
+		bytes := transmute([]u8)s
+		bytes[0] = u8('A' + i)
+		strings.write_bytes(&b, bytes)
+	}
+	return strings.to_string(b)
+}
+
+ensure_profile_file :: proc(path: string, content: string) {
+	data, err := os.read_entire_file(path, context.temp_allocator)
+	if err == nil && len(data) == len(content) {
+		return
+	}
+	_ = os.write_entire_file(path, transmute([]u8)content)
 }
 
 on_fortunes :: proc(req: ^http.Request, res: ^http.Response) {

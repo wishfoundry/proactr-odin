@@ -26,6 +26,7 @@ REQUIRE_URING="${REQUIRE_URING:-0}"
 mkdir -p "$LOGDIR"
 
 export DATABASE_PATH PORT WORKERS
+export PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -54,7 +55,10 @@ wait_up() {
   local p="${1:-$PORT}"
   local i code
   for i in $(seq 1 120); do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${p}/plaintext" 2>/dev/null || echo 000)
+    code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${p}/api/tiny" 2>/dev/null || echo 000)
+    if [[ "$code" != "200" ]]; then
+      code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${p}/plaintext" 2>/dev/null || echo 000)
+    fi
     if [[ "$code" == "200" ]]; then
       return 0
     fi
@@ -65,41 +69,57 @@ wait_up() {
 
 path_for_test() {
   case "$1" in
-    plaintext) echo /plaintext ;;
+    plaintext|tiny) echo /api/tiny ;;
+    gen) echo /gen/ok ;;
+    assembled) echo /static/assembled ;;
+    blob) echo /static/blob/1m ;;
+    file) echo /file/1m ;;
+    sse) echo /sse ;;
     s4k) echo /s/4k ;;
     s64k) echo /s/64k ;;
     s1m) echo /s/1m ;;
     s4m) echo /s/4m ;;
     fortunes) echo /fortunes ;;
+    # legacy alias still used by older scripts
+    plaintext_legacy) echo /plaintext ;;
     *) echo "/$1" ;;
   esac
 }
 
-# Exact size-ladder body lengths (bytes). Fortunes is HTML (variable; only 200 + non-empty).
+# Exact body lengths (bytes). Fortunes is HTML (variable; only 200 + non-empty).
+# See PROFILE_MATRIX.md for construction rules.
 expected_body_len() {
   case "$1" in
-    plaintext) echo 13 ;;
+    plaintext|tiny) echo 13 ;;
+    gen) echo 13 ;;
+    assembled) echo 524288 ;;
+    blob|s1m) echo 1048576 ;;
+    file) echo 1048576 ;;
+    sse) echo 42 ;;
     s4k) echo 4096 ;;
     s64k) echo 65536 ;;
-    s1m) echo 1048576 ;;
     s4m) echo 4194304 ;;
     *) echo "" ;;
   esac
 }
 
-# Fail closed if a peer returns wrong body size (prevents silent RPS inflation).
+# Fail closed if a peer returns wrong body size OR content (PROFILE_MATRIX.md contracts).
+# Length-only is not enough: tiny and gen are both 13 B; assembled first-byte contract
+# is mandatory; /file/1m must match $PLAN_FILE_PATH on disk (not an in-memory alias).
 verify_peer_bodies() {
   local name="$1"
-  local t path exp got code
+  local t path exp got code body fpath
+  body="/tmp/tfb_body_check.$$"
+  fpath="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}"
   for t in $TESTS; do
     path="$(path_for_test "$t")"
     if [[ "$t" == "fortunes" ]]; then
       if [[ "$name" == "laytan" ]]; then
         continue
       fi
-      code=$(curl -s -o /tmp/tfb_body_check.$$ -w "%{http_code}" "http://127.0.0.1:${PORT}${path}" || echo 000)
-      got=$(wc -c </tmp/tfb_body_check.$$ 2>/dev/null | tr -d ' ' || echo 0)
-      rm -f /tmp/tfb_body_check.$$
+      code=$(curl -s -o "$body" -w "%{http_code}" "http://127.0.0.1:${PORT}${path}" || echo 000)
+      got=$(wc -c <"$body" 2>/dev/null | tr -d ' ' || echo 0)
+      rm -f "$body"
       if [[ "$code" != "200" || "${got:-0}" -lt 200 ]]; then
         echo "FAIL body-check $name $t: http=$code bytes=$got (need 200 and HTML)" >&2
         return 1
@@ -108,15 +128,107 @@ verify_peer_bodies() {
     fi
     exp="$(expected_body_len "$t")"
     [[ -z "$exp" ]] && continue
-    code=$(curl -s -o /tmp/tfb_body_check.$$ -w "%{http_code}" "http://127.0.0.1:${PORT}${path}" || echo 000)
-    got=$(wc -c </tmp/tfb_body_check.$$ 2>/dev/null | tr -d ' ' || echo 0)
-    rm -f /tmp/tfb_body_check.$$
+    code=$(curl -s -o "$body" -w "%{http_code}" "http://127.0.0.1:${PORT}${path}" || echo 000)
+    got=$(wc -c <"$body" 2>/dev/null | tr -d ' ' || echo 0)
     if [[ "$code" != "200" || "$got" != "$exp" ]]; then
       echo "FAIL body-check $name $t: http=$code bytes=$got expected=$exp" >&2
+      rm -f "$body"
       return 1
     fi
+    # Exact content / structural contracts (not just length).
+    case "$t" in
+      plaintext|tiny)
+        if ! cmp -s "$body" <(printf 'Hello, World!'); then
+          echo "FAIL body-check $name $t: body != Hello, World!" >&2
+          rm -f "$body"
+          return 1
+        fi
+        ;;
+      gen)
+        if ! cmp -s "$body" <(printf 'generated:ok\n'); then
+          echo "FAIL body-check $name $t: body != generated:ok\\\\n (gen must not be tiny)" >&2
+          rm -f "$body"
+          return 1
+        fi
+        ;;
+      sse)
+        if ! cmp -s "$body" <(printf 'event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n'); then
+          echo "FAIL body-check $name $t: SSE oneshot body mismatch (need exact 42 B events)" >&2
+          rm -f "$body"
+          return 1
+        fi
+        # Content-Type must be event-stream (PROFILE_MATRIX).
+        ct=$(curl -s -D - -o /dev/null "http://127.0.0.1:${PORT}${path}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type"{print tolower($2); exit}')
+        if [[ "$ct" != *event-stream* ]]; then
+          echo "FAIL body-check $name $t: Content-Type='$ct' (need text/event-stream)" >&2
+          rm -f "$body"
+          return 1
+        fi
+        ;;
+      assembled)
+        # 8×64KiB; slice i first byte must be 'A'+i (PROFILE_MATRIX mandatory).
+        if ! python3 - "$body" <<'PY'
+import sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    data = f.read()
+if len(data) != 524288:
+    print(f"assembled len {len(data)}", file=sys.stderr)
+    sys.exit(1)
+for i in range(8):
+    b = data[i * 65536]
+    want = ord("A") + i
+    if b != want:
+        print(f"assembled slice[{i}] first_byte={b!r} want={want!r} ({chr(want)!r})", file=sys.stderr)
+        sys.exit(1)
+sys.exit(0)
+PY
+        then
+          echo "FAIL body-check $name $t: assembled first-byte contract failed" >&2
+          rm -f "$body"
+          return 1
+        fi
+        ;;
+      file)
+        if [[ ! -f "$fpath" ]]; then
+          echo "FAIL body-check $name $t: PLAN_FILE_PATH missing: $fpath" >&2
+          rm -f "$body"
+          return 1
+        fi
+        if ! cmp -s "$body" "$fpath"; then
+          echo "FAIL body-check $name $t: response body != disk file $fpath (in-memory alias?)" >&2
+          rm -f "$body"
+          return 1
+        fi
+        ;;
+      blob|s1m)
+        # Pattern payload: first 32 B of repeating 64-char hex pattern.
+        if ! python3 - "$body" <<'PY'
+import sys
+pat = b"0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF"
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+if len(data) != 1048576:
+    print(f"blob len {len(data)}", file=sys.stderr)
+    sys.exit(1)
+if data[:64] != pat:
+    print("blob prefix mismatch", file=sys.stderr)
+    sys.exit(1)
+if data[64:128] != pat:
+    print("blob repeat mismatch", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+        then
+          echo "FAIL body-check $name $t: pattern payload mismatch" >&2
+          rm -f "$body"
+          return 1
+        fi
+        ;;
+    esac
+    rm -f "$body"
   done
-  echo "  body-check ok ($name)"
+  echo "  body-check ok ($name) [len+content+assembled-first+file=disk]"
   return 0
 }
 
@@ -195,11 +307,13 @@ start_peer() {
     ntex)
       [[ -x ntex/target/release/ntex-tfb ]] || (cd ntex && cargo build --release)
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./ntex/target/release/ntex-tfb >"$LOGDIR/ntex.server.log" 2>&1 &
       ;;
     ntex-compio)
       [[ -x ntex-compio/target/release/ntex-compio-tfb ]] || (cd ntex-compio && cargo build --release)
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./ntex-compio/target/release/ntex-compio-tfb >"$LOGDIR/ntex-compio.server.log" 2>&1 &
       ;;
     compio)
@@ -216,6 +330,7 @@ start_peer() {
       [[ -x laytan/tfb-laytan ]] || (cd laytan && odin build . -out:tfb-laytan -o:speed \
         -collection:laytan="$ROOT/vendor/laytan")
       env PORT="$PORT" WORKERS="$WORKERS" \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./laytan/tfb-laytan >"$LOGDIR/laytan.server.log" 2>&1 &
       ;;
     go)
@@ -228,6 +343,7 @@ start_peer() {
         ./drogon/build.sh || return 1
       fi
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./drogon/build/drogon_tfb >"$LOGDIR/drogon.server.log" 2>&1 &
       ;;
     envoy)
@@ -271,14 +387,24 @@ start_peer() {
         --port="$PORT" --db="$DATABASE_PATH" \
         >"$LOGDIR/seastar.server.log" 2>&1 &
       ;;
-    proactr|proactr-sync)
+    proactr|proactr-sync|proactr-mat)
       if [[ ! -x proactr/tfb-proactr.bin ]]; then
         (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
       fi
       # FORTUNES_SYNC_SHARED=1 → ntex-like one conn+mutex; default = per-worker conn.
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
+        PLAN_MODE=materialize PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./proactr/tfb-proactr.bin >"$LOGDIR/${name}.server.log" 2>&1 &
+      ;;
+    proactr-opt)
+      if [[ ! -x proactr/tfb-proactr.bin ]]; then
+        (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
+      fi
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
+        PLAN_MODE=optimize PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
+        ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt.server.log" 2>&1 &
       ;;
     proactr-async)
       if [[ ! -x proactr/tfb-proactr.bin ]]; then
@@ -287,6 +413,7 @@ start_peer() {
       # DB_WORKERS defaults to WORKERS inside the peer; override with DB_WORKERS=N.
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         FORTUNES_MODE=async DB_WORKERS="${DB_WORKERS:-$WORKERS}" \
+        PLAN_MODE=materialize PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-async.server.log" 2>&1 &
       ;;
     *)
@@ -333,6 +460,9 @@ echo "tests=$TESTS"
 echo "logs=$LOGDIR"
 echo "backends: proactr=io_uring(Linux) laytan=nbio/io_uring ntex=neon-uring drogon=epoll(trantor)"
 echo "proactr size-ladder wire: materialize (plan_optimize=false) — not kernel writev/sendfile"
+echo "proactr-opt assembled=multi_send (NOT writev); file=file_chunked (NOT kernel_sendfile)"
+echo "peers assembled=preconcat_blob (ntex/drogon/laytan/proactr-mat)"
+echo "PLAN_FILE_PATH=$PLAN_FILE_PATH"
 echo "fortunes app work is NOT equal across peers — see WORKLOAD.md / run_peer_matrix.sh notes"
 echo ""
 

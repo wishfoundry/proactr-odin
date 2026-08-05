@@ -7,7 +7,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -51,7 +53,23 @@ static std::string make_payload(size_t n) {
   return s;
 }
 
-static std::string P_4K, P_64K, P_1M, P_4M;
+static std::string P_4K, P_64K, P_1M, P_4M, P_ASSEMBLED;
+static std::string g_file_path = "/tmp/proactr-profile-file-1m.bin";
+static const char *SSE_BODY =
+    "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n";
+static const char *GEN_BODY = "generated:ok\n";
+
+static std::string make_assembled() {
+  // PROFILE_MATRIX: 8×64KiB, first byte 'A'+i
+  std::string out;
+  out.reserve(8 * 64 * 1024);
+  for (int i = 0; i < 8; ++i) {
+    std::string s = make_payload(64 * 1024);
+    s[0] = static_cast<char>('A' + i);
+    out += s;
+  }
+  return out;
+}
 
 struct Fortune {
   int id;
@@ -141,12 +159,82 @@ int main() {
   P_64K = make_payload(64 * 1024);
   P_1M = make_payload(1024 * 1024);
   P_4M = make_payload(4 * 1024 * 1024);
+  P_ASSEMBLED = make_assembled();
+  if (const char *fp = std::getenv("PLAN_FILE_PATH"))
+    g_file_path = fp;
+  {
+    std::ifstream in(g_file_path, std::ios::binary | std::ios::ate);
+    bool ok = in.good() && static_cast<size_t>(in.tellg()) == P_1M.size();
+    if (!ok) {
+      std::ofstream out(g_file_path, std::ios::binary);
+      out.write(P_1M.data(), static_cast<std::streamsize>(P_1M.size()));
+    }
+  }
 
   app().registerHandler(
       "/plaintext",
       [](const HttpRequestPtr &,
          std::function<void(const HttpResponsePtr &)> &&cb) {
         plain("Hello, World!", std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/api/tiny",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain("Hello, World!", std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/gen/ok",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain(GEN_BODY, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/static/assembled",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        // preconcat_blob — not multi-iovec
+        plain(P_ASSEMBLED, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/static/blob/1m",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        plain(P_1M, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/file/1m",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        // file_read_full from same disk path
+        std::ifstream in(g_file_path, std::ios::binary);
+        std::string body((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+        if (body.empty()) {
+          auto resp = HttpResponse::newHttpResponse();
+          resp->setStatusCode(k500InternalServerError);
+          resp->setBody("file open failed");
+          cb(resp);
+          return;
+        }
+        plain(body, std::move(cb));
+      },
+      {Get});
+  app().registerHandler(
+      "/sse",
+      [](const HttpRequestPtr &,
+         std::function<void(const HttpResponsePtr &)> &&cb) {
+        auto resp = HttpResponse::newHttpResponse();
+        resp->setContentTypeString("text/event-stream");
+        resp->addHeader("Cache-Control", "no-cache");
+        resp->setBody(SSE_BODY);
+        resp->addHeader("Server", "Drogon");
+        cb(resp);
       },
       {Get});
   app().registerHandler(
@@ -218,7 +306,10 @@ int main() {
   }
 
   std::cout << "drogon tfb peer on 0.0.0.0:" << port << " db=" << g_db_path
-            << " io=trantor/epoll workers=" << workers << std::endl;
+            << " io=trantor/epoll workers=" << workers
+            << " file=" << g_file_path
+            << " mech=assembled:preconcat_blob,file:file_read_full,sse:sse_oneshot"
+            << std::endl;
   app()
       .setLogLevel(trantor::Logger::kWarn)
       .addListener("0.0.0.0", port)

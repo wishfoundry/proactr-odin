@@ -17,6 +17,17 @@ import "core:strings"
 import http "../../../http"
 
 P_4K, P_64K, P_1M, P_4M: string
+// PROFILE_MATRIX.md: 8×64KiB with first byte 'A'+i, concat = 524288.
+SLICE_N :: 8
+SLICE_SIZE :: 64 * 1024
+g_slices: [SLICE_N][]u8
+g_assembled: []u8
+g_file_path: string
+g_file_fd: i32 = -1
+g_file_len: i64
+g_plan_optimize: bool
+SSE_BODY :: "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n"
+GEN_BODY :: "generated:ok\n"
 
 main :: proc() {
 	context.logger = log.create_console_logger(.Info)
@@ -24,6 +35,7 @@ main :: proc() {
 	P_64K = make_payload(64 * 1024)
 	P_1M = make_payload(1024 * 1024)
 	P_4M = make_payload(4 * 1024 * 1024)
+	init_profile_payloads()
 
 	db_path := "/tmp/proactr-tfb.sqlite"
 	if p := os.get_env_alloc("DATABASE_PATH", context.allocator); p != "" {
@@ -62,6 +74,12 @@ main :: proc() {
 		if v, ok2 := strconv.parse_int(p); ok2 {
 			workers = max(1, v)
 		}
+		delete(p)
+	}
+	g_plan_optimize = false
+	if p := os.get_env_alloc("PLAN_MODE", context.allocator); p != "" {
+		low := strings.to_lower(p, context.temp_allocator)
+		g_plan_optimize = low == "optimize" || low == "opt" || low == "1" || low == "on"
 		delete(p)
 	}
 	db_workers := workers
@@ -106,6 +124,12 @@ main :: proc() {
 	defer http.router_destroy(&router)
 
 	http.route_get(&router, "/plaintext", http.handler(on_plaintext))
+	http.route_get(&router, "/api/tiny", http.handler(on_plaintext))
+	http.route_get(&router, "/gen/ok", http.handler(on_gen))
+	http.route_get(&router, "/static/assembled", http.handler(on_assembled))
+	http.route_get(&router, "/static/blob/1m", http.handler(on_blob))
+	http.route_get(&router, "/file/1m", http.handler(on_file))
+	http.route_get(&router, "/sse", http.handler(on_sse))
 	http.route_get(&router, "/s/4k", http.handler(on_4k))
 	http.route_get(&router, "/s/64k", http.handler(on_64k))
 	http.route_get(&router, "/s/1m", http.handler(on_1m))
@@ -114,6 +138,8 @@ main :: proc() {
 
 	opts := http.Default_Server_Opts
 	opts.thread_count = workers
+	opts.plan_optimize = g_plan_optimize
+	opts.plan_sendfile_ok = true
 	if mode == .Async {
 		// Poll deferred job queues promptly (pool posts results without ring wake).
 		opts.wait_timeout_ms = 1
@@ -127,12 +153,15 @@ main :: proc() {
 	} else if sync_shared {
 		mode_s = "sqlite-sync-shared-mutex"
 	}
+	plan_s := g_plan_optimize ? "optimize" : "materialize"
 	log.infof(
-		"proactr tfb peer on :%d workers=%d db=%s io=proactr fortunes=%s",
+		"proactr tfb peer on :%d workers=%d db=%s io=proactr fortunes=%s plan=%s file=%s",
 		port,
 		workers,
 		db_path,
 		mode_s,
+		plan_s,
+		g_file_path,
 	)
 	err := http.listen_and_serve(
 		&s,
@@ -184,4 +213,104 @@ on_1m :: proc(req: ^http.Request, res: ^http.Response) {
 on_4m :: proc(req: ^http.Request, res: ^http.Response) {
 	set_server(res)
 	http.respond_plain(res, P_4M)
+}
+
+on_gen :: proc(req: ^http.Request, res: ^http.Response) {
+	set_server(res)
+	res.status = .OK
+	http.headers_set_content_type(&res.headers, "text/plain")
+	// Fair gen profile: body_reserve + fill (not fortunes DB).
+	slot := http.body_reserve(res, 64)
+	n := copy(slot, transmute([]u8)string(GEN_BODY))
+	http.body_commit(res, n)
+	http.respond(res)
+}
+
+on_assembled :: proc(req: ^http.Request, res: ^http.Response) {
+	set_server(res)
+	res.status = .OK
+	http.headers_set_content_type(&res.headers, "text/plain")
+	if g_plan_optimize {
+		// Multi-cmd intent → multi_send when plan_optimize (NOT kernel writev).
+		http.response_set_profile(res, http.Handler_Profile{prefer_gather = true, copy_budget = 0})
+		for i in 0 ..< SLICE_N {
+			http.body_static(res, g_slices[i])
+		}
+		http.respond(res)
+		return
+	}
+	// Materialize mode: preconcat blob (same bytes as multi-static).
+	http.respond_plain(res, transmute(string)g_assembled)
+}
+
+on_blob :: proc(req: ^http.Request, res: ^http.Response) {
+	set_server(res)
+	http.respond_plain(res, P_1M)
+}
+
+on_file :: proc(req: ^http.Request, res: ^http.Response) {
+	set_server(res)
+	// Never fall back to in-memory P_1M — PROFILE_MATRIX: /file/1m must be disk.
+	if g_plan_optimize && g_file_fd >= 0 {
+		res.status = .OK
+		http.headers_set_content_type(&res.headers, "text/plain")
+		http.response_set_profile(res, http.Handler_Profile{prefer_sendfile = true, copy_budget = 0})
+		http.body_file(res, g_file_fd, 0, g_file_len)
+		http.respond(res)
+		return
+	}
+	if g_file_path != "" {
+		// Materialize: full file read from path (file_read_full). 404/500 if missing.
+		http.respond_file(res, g_file_path)
+		return
+	}
+	res.status = .Internal_Server_Error
+	http.headers_set_content_type(&res.headers, "text/plain")
+	http.body_set(res, "file path not configured")
+	http.respond(res)
+}
+
+on_sse :: proc(req: ^http.Request, res: ^http.Response) {
+	set_server(res)
+	res.status = .OK
+	// PROFILE_MATRIX: Content-Type text/event-stream required (set before begin_stream freezes headers).
+	http.headers_set_content_type(&res.headers, "text/event-stream")
+	http.headers_set(&res.headers, "cache-control", "no-cache")
+	// sse_oneshot via stream API → chunked TE (NOT long-lived hold; NOT peer CL body).
+	stream := http.response_begin_stream(res)
+	http.stream_write(&stream, transmute([]u8)string(SSE_BODY))
+	http.stream_end(&stream)
+}
+
+init_profile_payloads :: proc() {
+	for i in 0 ..< SLICE_N {
+		g_slices[i] = transmute([]u8)make_payload(SLICE_SIZE)
+		// Distinct first byte per PROFILE_MATRIX.md
+		g_slices[i][0] = u8('A' + i)
+	}
+	g_assembled = make([]u8, SLICE_N * SLICE_SIZE)
+	for i in 0 ..< SLICE_N {
+		copy(g_assembled[i * SLICE_SIZE:][:SLICE_SIZE], g_slices[i])
+	}
+	g_file_path = "/tmp/proactr-profile-file-1m.bin"
+	if p := os.get_env_alloc("PLAN_FILE_PATH", context.allocator); p != "" {
+		g_file_path = p
+	}
+	// Write file if missing/wrong size so /file/1m is real disk I/O for all peers.
+	need_write := true
+	if data, err := os.read_entire_file(g_file_path, context.temp_allocator); err == nil {
+		if len(data) == len(P_1M) {
+			need_write = false
+		}
+	}
+	if need_write {
+		_ = os.write_entire_file(g_file_path, transmute([]u8)P_1M)
+	}
+	g_file_len = i64(len(P_1M))
+	when ODIN_OS != .Windows {
+		if f, err := os.open(g_file_path); err == nil {
+			// Keep process-lifetime fd for body_file optimize path.
+			g_file_fd = i32(os.fd(f))
+		}
+	}
 }
