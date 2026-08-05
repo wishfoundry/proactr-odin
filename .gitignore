@@ -60,3 +60,6 @@ examples/**/*.wasm
 # Generated certs for local TLS benches
 **/*.pem
 !**/*.pem.example
+
+# plan A/B bench binary
+comparisons/plan/server/plan-bench.bin

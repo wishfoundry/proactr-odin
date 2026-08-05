@@ -2,7 +2,17 @@
 
 **Branch:** `exp/response-command-planner`  
 **Status:** design / experiment — not production path yet  
-**Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`
+**Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
+
+### Benchmark harness
+
+Differential policy A/B (materialize vs optimize) with per-route shadow plan counters:
+
+```bash
+./comparisons/plan/run_plan_ab.sh
+```
+
+See [`comparisons/plan/README.md`](../comparisons/plan/README.md). Use this when changing `plan_body` or wiring profiles so mechanism counters stay honest.
 
 This document is the north star for the experiment. Implementation will adapt as we learn; when choices diverge, update this doc and note *why* so the goals stay explicit.
 
@@ -392,6 +402,8 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Body cmds only (no Status/Header cmds yet) | Headers stay on `Response.headers` for lookup; open question §9.1 deferred |
 | 2026-08-05 | Small bodies (≤ `preferred_copy_budget`) always materialize | Avoid gather for tiny responses; matches “simple path first” |
 | 2026-08-05 | File without sendfile → `Copy_Into` + `Write_Slice` | Makes the copy stage explicit for later async file read |
+| 2026-08-05 | Added `comparisons/plan/` A/B harness with shadow plan counters | Prove per-route Writev/Sendfile policy before wire; RPS informational until Phase 3–4 |
+| 2026-08-05 | `/file/1m` wire uses preloaded bytes; shadow plan still `File` | Avoid per-request 1 MiB temp-arena reads under load (crashed workers) |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 
