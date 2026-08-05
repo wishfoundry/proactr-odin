@@ -444,6 +444,8 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Pragmatic stream wire: chunk into `resp_buf`, flush no-op, end single `submit_send` | Continuous mid-body CQE flush needs conn streaming state — follow-up |
 | 2026-08-05 | `stream_responses_total` separate from `plan_wire_*` | Honest counters; streams are not materialize/writev/sendfile |
 | 2026-08-05 | Shared `_http_write_chunk` for Stream + Response_Writer | One framing implementation; Writer remains for JSON buffer path |
+| 2026-08-05 | Phase 5 review: force TE=chunked + drop Content-Length on begin_stream / response_writer_init | Prior TE other than chunked would mislabel body; dual CL+TE risks keep-alive desync (RFC 9112 §6.1) |
+| 2026-08-05 | Phase 5 review: harness `/metrics` route_hits labels use `{{`/`}}` escape | Bare `{route=…}` was eaten by core:fmt (`MISSING CLOSE BRACE`) |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 

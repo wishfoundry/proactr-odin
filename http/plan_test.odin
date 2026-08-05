@@ -741,6 +741,9 @@ test_response_stream_chunked_body :: proc(t: ^testing.T) {
 	// Pre-set Date so heading format does not need thread-local server_date / td.
 	headers_set_unsafe(&r.headers, "date", "Fri, 05 Feb 2023 09:01:10 GMT")
 	headers_set_unsafe(&r.headers, "content-type", "text/event-stream")
+	// Poison: wrong TE + CL must not appear on the wire after begin_stream.
+	headers_set_unsafe(&r.headers, "transfer-encoding", "identity")
+	headers_set_unsafe(&r.headers, "content-length", "999")
 
 	conn: Connection
 	r._conn = &conn
@@ -757,8 +760,11 @@ test_response_stream_chunked_body :: proc(t: ^testing.T) {
 	te, has_te := headers_get_unsafe(r.headers, "transfer-encoding")
 	testing.expect(t, has_te)
 	testing.expect_value(t, te, "chunked")
+	// CL must be stripped so keep-alive parsers cannot prefer it over TE.
+	testing.expect(t, !headers_has_unsafe(r.headers, "content-length"))
 
 	stream_write(&s, transmute([]u8)string("hello"))
+	stream_write(&s, nil) // empty write is no-op (must not emit mid-stream 0-chunk terminator)
 	stream_write(&s, transmute([]u8)string("world"))
 	stream_flush(&s) // Phase 5 no-op
 	_http_write_chunk_end(&r._buf)
@@ -770,7 +776,38 @@ test_response_stream_chunked_body :: proc(t: ^testing.T) {
 	headers := full[:sep]
 	body := full[sep + 4:]
 	testing.expect(t, strings.contains(headers, "transfer-encoding: chunked"))
+	testing.expect(t, !strings.contains(headers, "content-length"))
+	testing.expect(t, !strings.contains(headers, "identity"))
 	testing.expect_value(t, body, "5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n")
+}
+
+@(test)
+test_response_stream_head_strip_keeps_heading :: proc(t: ^testing.T) {
+	// HEAD uses the same stream build path; strip drops chunked body, keeps TE heading.
+	r: Response
+	headers_init(&r.headers, context.allocator)
+	defer delete(r.headers._kv)
+	r.status = .OK
+	headers_set_unsafe(&r.headers, "date", "Fri, 05 Feb 2023 09:01:10 GMT")
+	conn: Connection
+	r._conn = &conn
+	wire := make([dynamic]u8, 0, 512, context.allocator)
+	defer delete(wire)
+	r._buf.buf = wire
+	r._buf.buf.allocator = context.allocator
+
+	s := response_begin_stream(&r)
+	stream_write(&s, transmute([]u8)string("event: x\n\n"))
+	_http_write_chunk_end(&r._buf)
+	// Simulate response_send_got_body HEAD branch.
+	_response_strip_body_keep_heading(&r)
+	got := string(r._buf.buf[:])
+	testing.expect(t, strings.has_suffix(got, "\r\n\r\n"))
+	testing.expect(t, strings.contains(got, "transfer-encoding: chunked"))
+	// No chunk framing after header block.
+	sep := strings.index(got, "\r\n\r\n")
+	testing.expect(t, sep >= 0)
+	testing.expect_value(t, len(got), sep + 4)
 }
 
 @(test)

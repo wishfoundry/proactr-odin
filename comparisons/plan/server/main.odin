@@ -316,12 +316,13 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	// Harness-local + package stream counter (Phase 5 stream_end).
 	fmt.sbprintf(&b, "stream_responses_total %d\n", sync.atomic_load(&g_m.stream_responses))
 	fmt.sbprintf(&b, "http_stream_responses_total %d\n", http.stream_responses_load())
-	fmt.sbprintf(&b, "route_hits{route=\"tiny\"} %d\n", sync.atomic_load(&g_m.hit_tiny))
-	fmt.sbprintf(&b, "route_hits{route=\"gen\"} %d\n", sync.atomic_load(&g_m.hit_gen))
-	fmt.sbprintf(&b, "route_hits{route=\"assembled\"} %d\n", sync.atomic_load(&g_m.hit_assembled))
-	fmt.sbprintf(&b, "route_hits{route=\"blob\"} %d\n", sync.atomic_load(&g_m.hit_blob))
-	fmt.sbprintf(&b, "route_hits{route=\"file\"} %d\n", sync.atomic_load(&g_m.hit_file))
-	fmt.sbprintf(&b, "route_hits{route=\"sse\"} %d\n", sync.atomic_load(&g_m.hit_sse))
+	// Escape {{ }} — core:fmt treats bare { as a format verb.
+	fmt.sbprintf(&b, "route_hits{{route=\"tiny\"}} %d\n", sync.atomic_load(&g_m.hit_tiny))
+	fmt.sbprintf(&b, "route_hits{{route=\"gen\"}} %d\n", sync.atomic_load(&g_m.hit_gen))
+	fmt.sbprintf(&b, "route_hits{{route=\"assembled\"}} %d\n", sync.atomic_load(&g_m.hit_assembled))
+	fmt.sbprintf(&b, "route_hits{{route=\"blob\"}} %d\n", sync.atomic_load(&g_m.hit_blob))
+	fmt.sbprintf(&b, "route_hits{{route=\"file\"}} %d\n", sync.atomic_load(&g_m.hit_file))
+	fmt.sbprintf(&b, "route_hits{{route=\"sse\"}} %d\n", sync.atomic_load(&g_m.hit_sse))
 
 	http.headers_set(&res.headers, "server", "proactr-plan")
 	http.headers_set_content_type(&res.headers, "text/plain; version=0.0.4")

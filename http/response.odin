@@ -460,7 +460,7 @@ response_writer.
 Body middleware is not applied to stream bytes — set headers before calling.
 
 Call stream_write / stream_flush as needed, then stream_end (sends the response).
-Do not call body_set or respond separately after begin_stream.
+Do not call body_set after begin_stream. stream_end calls respond — do not respond again.
 */
 response_begin_stream :: proc(r: ^Response, loc := #caller_location) -> Response_Stream {
 	assert(!r.sent, "response has already been sent", loc)
@@ -470,8 +470,12 @@ response_begin_stream :: proc(r: ^Response, loc := #caller_location) -> Response
 	assert(r._body_off == 0, "body_reserve in progress; cannot begin_stream", loc)
 	assert(bytes.buffer_length(&r._buf) == 0, "response body already started", loc)
 
-	if !headers_has_unsafe(r.headers, "transfer-encoding") {
-		headers_set_unsafe(&r.headers, "transfer-encoding", "chunked")
+	// Wire is always HTTP chunked framing. Force TE and drop Content-Length:
+	// dual CL+TE can desync keep-alive parsers (RFC 9112 §6.1); a pre-set TE
+	// other than chunked would mislabel the body. Match response_writer_init.
+	headers_set_unsafe(&r.headers, "transfer-encoding", "chunked")
+	if headers_has_unsafe(r.headers, "content-length") {
+		headers_delete_unsafe(&r.headers, "content-length")
 	}
 
 	_response_write_heading(r, -1)
@@ -516,10 +520,13 @@ stream_flush :: proc(s: ^Response_Stream, loc := #caller_location) {
 /*
 Finish the stream: final 0-chunk, then respond (single-buffer send).
 
+stream_end *is* the send — do not call respond again (second respond asserts).
+A second stream_end asserts on s.ended / r._stream_ended.
+
 HEAD: body bytes may already be in the buffer; response_send strips them and
 keeps the heading (same as Response_Writer / body_reserve).
 
-Increments stream_responses_total (not plan_wire_*).
+Increments stream_responses_total (not plan_wire_*) once per successful end.
 */
 stream_end :: proc(s: ^Response_Stream, loc := #caller_location) {
 	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
@@ -528,6 +535,8 @@ stream_end :: proc(s: ^Response_Stream, loc := #caller_location) {
 	assert(!s.r.sent, "response has already been sent", loc)
 
 	_http_write_chunk_end(&s.r._buf)
+	// Mark ended before respond so a re-entrant / mistaken second end fails
+	// closed, and so response_send_got_body sees _stream_ended.
 	s.ended = true
 	s.r._stream_ended = true
 	stream_inc_responses()
@@ -563,7 +572,11 @@ response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte)
 	assert(!r._streaming, "response stream started; cannot response_writer_init")
 	assert(!r._heading_written, "heading already written; cannot response_writer_init")
 	assert(r._body_off == 0, "body_reserve in progress; cannot response_writer_init")
+	// Same TE/CL rules as response_begin_stream (chunked framing; no dual headers).
 	headers_set_unsafe(&r.headers, "transfer-encoding", "chunked")
+	if headers_has_unsafe(r.headers, "content-length") {
+		headers_delete_unsafe(&r.headers, "content-length")
+	}
 	_response_write_heading(r, -1)
 
 	rw.buf = slice.into_dynamic(buffer)
