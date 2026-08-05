@@ -527,6 +527,32 @@ test_exec_queue_single_buffer_finish :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_exec_queue_skip_empty_and_zero_progress :: proc(t: ^testing.T) {
+	// Empty mid-queue slots must be skipped (empty pending + unfinished → CQE hang).
+	a := [2]u8{1, 2}
+	empty: [0]u8
+	c := [1]u8{9}
+	bufs := [][]u8{a[:], empty[:], c[:]}
+
+	p, i, f := exec_queue_after_send(bufs, 0, 3, bufs[0], len(bufs[0]))
+	testing.expect(t, !f)
+	testing.expect_value(t, i, 2)
+	testing.expect_value(t, len(p), 1)
+	testing.expect_value(t, p[0], u8(9))
+
+	// Trailing empties → finished.
+	bufs2 := [][]u8{a[:], empty[:], empty[:]}
+	_, _, f2 := exec_queue_after_send(bufs2, 0, 3, bufs2[0], len(bufs2[0]))
+	testing.expect(t, f2)
+
+	// Zero progress → finished (caller must not resubmit spin).
+	_, _, f0 := exec_queue_after_send(bufs, 0, 3, bufs[0], 0)
+	testing.expect(t, f0)
+	_, _, fneg := exec_queue_after_send(bufs, 0, 3, bufs[0], -1)
+	testing.expect(t, fneg)
+}
+
+@(test)
 test_plan_is_writev_wire_gate :: proc(t: ^testing.T) {
 	// Multi large static → Writev and wire-eligible.
 	ctx := plan_context_default()

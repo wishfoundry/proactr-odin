@@ -880,9 +880,12 @@ host_on_recv :: proc(conn: ^Connection, result: i32) {
 
 // exec_queue_after_send advances multi-buffer send state after a successful CQE.
 // Pure helper for host_on_send and unit tests.
-//   - partial (n_sent < len(pending)): stay on exec_i, pending shrinks
-//   - full buffer: exec_i+1; if more buffers, next pending; else finished
+//   - partial (0 < n_sent < len(pending)): stay on exec_i, pending shrinks
+//   - full buffer: exec_i+1, skip empty slots; if more non-empty, next pending; else finished
+//   - n_sent <= 0 or n_sent > len(pending): finished (caller treats as error / clamp complete)
 // Does not touch Connection; caller applies the result.
+// CRITICAL: never return a zero-length pending with finished=false — host_submit_send
+// returns .None for empty slices without posting a CQE (connection would hang).
 @(private)
 exec_queue_after_send :: proc(
 	exec_bufs: [][]u8,
@@ -895,18 +898,22 @@ exec_queue_after_send :: proc(
 	new_i: int,
 	finished: bool,
 ) {
-	if n_sent < 0 {
+	if n_sent <= 0 {
+		// No progress (or error signal from caller): do not spin on the same buffer.
 		return nil, exec_i, true
 	}
 	if n_sent < len(pending) {
 		return pending[n_sent:], exec_i, false
 	}
-	// Current buffer fully sent.
+	// Current buffer fully sent (n_sent >= len(pending)); advance, skipping empties.
 	next := exec_i + 1
-	if next >= exec_n || exec_n <= 0 {
-		return nil, next, true
+	for next < exec_n && next >= 0 {
+		if len(exec_bufs[next]) > 0 {
+			return exec_bufs[next], next, false
+		}
+		next += 1
 	}
-	return exec_bufs[next], next, false
+	return nil, next, true
 }
 
 @(private)
@@ -914,6 +921,10 @@ _conn_clear_exec :: proc(conn: ^Connection) {
 	conn.exec_i = 0
 	conn.exec_n = 0
 	conn.pending_send = nil
+	// Drop dangling body/heading slice refs (temp may be reset / slab recycled).
+	for i in 0 ..< len(conn.exec_bufs) {
+		conn.exec_bufs[i] = nil
+	}
 }
 
 @(private)
@@ -921,6 +932,7 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Deferred close while a send SQE was outstanding: account for this CQE first.
+	// Mid multi-buffer: abort remaining queue (partial response already on the wire).
 	if conn.close_on_io {
 		_conn_clear_exec(conn)
 		conn.close_on_io = false
@@ -932,6 +944,15 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 
 	if result < 0 {
 		log.errorf("send error fd=%v res=%d", conn.socket, result)
+		_conn_clear_exec(conn)
+		connection_close(conn)
+		return
+	}
+
+	// Zero-byte completion with a non-empty pending buffer: do not resubmit forever.
+	// (Normal TCP send of N>0 bytes returns >0, EAGAIN-as-error, or short count.)
+	if result == 0 && len(conn.pending_send) > 0 {
+		log.errorf("send zero-length fd=%v pending=%d exec_n=%d", conn.socket, len(conn.pending_send), conn.exec_n)
 		_conn_clear_exec(conn)
 		connection_close(conn)
 		return
@@ -951,7 +972,15 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 		if finished {
 			_conn_clear_exec(conn)
 			// Full multi-buffer response delivered; free request state only now.
+			// (Zero-progress / error completions are closed above before this path.)
 			clean_request_loop(conn)
+			return
+		}
+		// Defense: never arm a zero-length pending (no CQE → hang).
+		if len(new_pending) == 0 {
+			log.errorf("multi-op empty pending after advance fd=%v i=%d n=%d", conn.socket, new_i, conn.exec_n)
+			_conn_clear_exec(conn)
+			connection_close(conn)
 			return
 		}
 		conn.exec_i = new_i
@@ -960,14 +989,23 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 			log.errorf("submit_send (multi-op) failed: %v", err)
 			_conn_clear_exec(conn)
 			connection_close(conn)
+			return
 		}
+		// host_submit_send(.None) with empty pending is a hang; guarded above.
 		return
 	}
 
-	// Single-buffer path (materialize / body_reserve / chunked).
+	// Single-buffer path (materialize / body_reserve / chunked / HEAD-via-writev).
 	if n < len(conn.pending_send) {
 		// Partial send — advance and resubmit. Buffer still owned until full send.
+		// n==0 already closed above; n>0 here.
 		conn.pending_send = conn.pending_send[n:]
+		if len(conn.pending_send) == 0 {
+			// Should not happen (n < len implies remainder > 0); fail closed.
+			conn.pending_send = nil
+			connection_close(conn)
+			return
+		}
 		if err := host_submit_send(conn); err != .None {
 			log.errorf("submit_send (partial) failed: %v", err)
 			conn.pending_send = nil

@@ -228,9 +228,13 @@ connection_destroy :: proc(c: ^Connection) {
 		delete_key(&td.conns, c.socket)
 	}
 	c.socket = {}
+	// Drop multi-buffer queue + pending (same as _conn_clear_exec; keep free-list clean).
 	c.pending_send = nil
 	c.exec_i = 0
 	c.exec_n = 0
+	for i in 0 ..< len(c.exec_bufs) {
+		c.exec_bufs[i] = nil
+	}
 	c.close_pending = false
 	c.close_on_io = false
 	// Capture any growth from the last Response binding; keep capacity on free list.

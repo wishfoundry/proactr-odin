@@ -684,7 +684,9 @@ _response_strip_body_keep_heading :: proc(r: ^Response) {
 }
 
 // True when wire send may use plan_body (Writev multi-buffer) instead of materialize-only.
-// Safe default false: Server_Opts.plan_optimize opt-in, or per-request prefer_gather.
+// Safe default false: Server_Opts.plan_optimize opt-in (Default_Server_Opts = false).
+// Also true per-request when Handler_Profile.prefer_gather is set — that alone enables
+// multi-buffer even if the server left plan_optimize off (intentional; not a global default).
 @(private)
 _response_wire_use_optimize :: proc(r: ^Response) -> bool {
 	if r == nil {
@@ -739,6 +741,12 @@ _cmds_mem_body_len :: proc(cmds: []Response_Cmd) -> (body_len: int, ok: bool) {
 // Builds conn.exec_bufs = [heading, body1, …] and submits the first send.
 // Returns true if the send was submitted (or cleaned for empty). Caller must not
 // also materialize. On false, heading was not written — caller may materialize.
+//
+// LIFETIME: body slices are NOT copied. Data behind Static/Bytes must remain valid
+// until the final send CQE (after respond returns). Safe: string literals, #load,
+// request temp_allocator (reset only in clean_request_loop after send completes).
+// UNSAFE: stack buffers, heap freed by the handler after respond — use materialize
+// (plan_optimize off) or copy into resp_buf / temp before body_*.
 @(private)
 _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 	assert(!r._heading_written)
@@ -771,42 +779,57 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 	_response_write_heading(r, body_len)
 
 	// HEAD: headers + Content-Length only; do not queue body slices (RFC 9110 §9.3.2).
+	// Mechanism is single-buffer (exec_n=0) — count materialize, not writev.
 	if _response_is_head(conn) {
 		when HTTP_PHASE_STATS {
 			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
 		}
-		// Fall through to single-buffer send of heading only (exec_n stays 0).
 		conn.resp_buf = r._buf.buf
 		buf := bytes.buffer_to_bytes(&r._buf)
 		if len(buf) == 0 {
-			plan_wire_inc_writev()
+			plan_wire_inc_materialize()
 			clean_request_loop(conn)
 			return true
 		}
 		conn.exec_n = 0
+		conn.exec_i = 0
 		conn.pending_send = buf
-		plan_wire_inc_writev()
 		if err := host_submit_send(conn); err != .None {
 			log.errorf("submit_send failed: %v", err)
 			conn.pending_send = nil
 			connection_close(conn)
+			return true
 		}
+		plan_wire_inc_materialize()
 		return true
 	}
 
 	conn.resp_buf = r._buf.buf
 	heading := bytes.buffer_to_bytes(&r._buf)
+	if len(heading) == 0 && n_body == 0 {
+		// Degenerate: nothing to send.
+		_conn_clear_exec(conn)
+		plan_wire_inc_writev()
+		clean_request_loop(conn)
+		when HTTP_PHASE_STATS {
+			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+		}
+		return true
+	}
 
-	// Build multi-buffer queue: [heading, body…]
-	conn.exec_bufs[0] = heading
-	bi := 1
+	// Build multi-buffer queue: [heading, body…] (skip empty heading only if bodies remain).
+	bi := 0
+	if len(heading) > 0 {
+		conn.exec_bufs[0] = heading
+		bi = 1
+	}
 	for c in cmds {
 		#partial switch c.kind {
 		case .Static, .Bytes:
 			if len(c.bytes) == 0 {
 				continue
 			}
-			// Borrowed for response lifetime; valid until final send CQE.
+			// Borrowed until final send CQE; see LIFETIME comment above.
 			conn.exec_bufs[bi] = c.bytes
 			bi += 1
 		}
@@ -814,7 +837,7 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 	conn.exec_n = bi
 	conn.exec_i = 0
 
-	// Skip leading empty buffers (heading should never be empty after write).
+	// Skip leading empty buffers.
 	for conn.exec_i < conn.exec_n && len(conn.exec_bufs[conn.exec_i]) == 0 {
 		conn.exec_i += 1
 	}
@@ -829,7 +852,12 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 	}
 
 	conn.pending_send = conn.exec_bufs[conn.exec_i]
-	plan_wire_inc_writev()
+	if len(conn.pending_send) == 0 {
+		// Should be unreachable after skip; fail closed (no CQE hang).
+		_conn_clear_exec(conn)
+		connection_close(conn)
+		return true
+	}
 
 	when HTTP_PHASE_STATS {
 		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
@@ -839,7 +867,10 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 		log.errorf("submit_send (writev queue) failed: %v", err)
 		_conn_clear_exec(conn)
 		connection_close(conn)
+		return true
 	}
+	// Count only after a real SQE is posted (or empty complete above).
+	plan_wire_inc_writev()
 	return true
 }
 
@@ -1008,8 +1039,8 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	// Do NOT reset scrap arena or drop resp_buf while pending_send still points
 	// at response bytes (host_on_send clears pending_send before clean_request_loop).
 	// Sync growth: r._buf.buf is a header copy that may reallocate on write.
-	conn.exec_n = 0
-	conn.exec_i = 0
+	// Explicitly inactive multi-op queue so a prior writev path cannot leak exec_n.
+	_conn_clear_exec(conn)
 	conn.resp_buf = r._buf.buf
 	buf := bytes.buffer_to_bytes(&r._buf)
 	if len(buf) == 0 {
