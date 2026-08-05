@@ -1262,16 +1262,18 @@ _response_materialize_cmds :: proc(r: ^Response) {
 
 	cmds := r._cmds[:r._cmd_count]
 
-	// Fast path: one in-memory body region (respond_plain / body_set).
+	// Fast path: single Static/Bytes body, small/medium only.
+	// Large bodies (e.g. 1MiB) keep the classic grow+buffer_write path — bastion
+	// measured a s1m RPS regression with exact-size resize+copy under multi-worker load.
+	MATERIALIZE_FAST_MAX :: 256 * 1024
 	if r._cmd_count == 1 {
 		c := cmds[0]
-		if c.kind == .Static || c.kind == .Bytes {
+		if (c.kind == .Static || c.kind == .Bytes) && len(c.bytes) <= MATERIALIZE_FAST_MAX {
 			body_len := len(c.bytes)
 			t0_build: u64
 			when HTTP_PHASE_STATS {
 				t0_build = phase_now()
 			}
-			// Exact capacity: heading ≤ 512 scratch + body (no 1MiB growth hint).
 			hscratch: [512]byte
 			hlen := _response_format_heading(r, body_len, hscratch[:])
 			assert(hlen > 0 && hlen <= len(hscratch))
@@ -1279,14 +1281,12 @@ _response_materialize_cmds :: proc(r: ^Response) {
 			if cap(r._buf.buf) < need {
 				reserve(&r._buf.buf, need)
 			}
-			// Write heading then body without intermediate buffer_write growth.
 			resize(&r._buf.buf, need)
 			copy(r._buf.buf[0:hlen], hscratch[:hlen])
 			r._heading_written = true
 			if !_response_is_head(r._conn) && body_len > 0 {
 				copy(r._buf.buf[hlen:][:body_len], c.bytes)
 			} else if _response_is_head(r._conn) {
-				// HEAD: CL set in heading, no body bytes.
 				resize(&r._buf.buf, hlen)
 			}
 			when HTTP_PHASE_STATS {
