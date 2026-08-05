@@ -40,7 +40,7 @@ So A/B shows:
 | `GET /static/assembled` | assembled | 8× Static 64 KiB | **Writev** |
 | `GET /static/blob/1m` | blob | 1× Static 1 MiB | Write_Slice (single; not multi-iov) or materialize policy |
 | `GET /file/1m` | file | File 1 MiB | **Sendfile** (+ headers Write_Slice) |
-| `GET /sse` | stream | *(no plan_body)* | stream_responses only |
+| `GET /sse` | stream | `response_begin_stream` (not plan_body) | stream_responses only |
 | `GET /metrics` | — | counters | — |
 | `GET /health` | — | liveness | — |
 

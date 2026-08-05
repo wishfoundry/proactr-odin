@@ -1,8 +1,9 @@
 // Planner A/B demo server — body-archetype routes + plan counters.
 //
-// Phase 3–4: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
+// Phase 3–5: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
 // the real wire path can multi-buffer send (Writev-style) for multi-static routes
 // and stream File regions via chunked pread+send for /file/1m (prefer_sendfile).
+// /sse uses response_begin_stream (Phase 5) — not plan_body.
 //
 // Shadow plan_body counters remain for policy checks; http.plan_wire_* counters
 // show what the executor actually chose on the wire.
@@ -271,14 +272,18 @@ on_file :: proc(req: ^http.Request, res: ^http.Response) {
 on_sse :: proc(req: ^http.Request, res: ^http.Response) {
 	inc(&g_m.hit_sse)
 	inc(&g_m.stream_responses)
-	// Stream archetype: do NOT run plan_body.
+	// Phase 5: Response_Stream API — not plan_body / Response_Cmd.
+	// One-shot events (bombardier-friendly); stream_flush is no-op; end sends once.
 	res.status = .OK
 	http.headers_set(&res.headers, "server", "proactr-plan")
 	http.headers_set(&res.headers, "x-plan-profile", "sse")
 	http.headers_set(&res.headers, "cache-control", "no-cache")
 	http.headers_set_content_type(&res.headers, "text/event-stream")
-	http.body_set(res, "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n")
-	http.respond(res)
+	stream := http.response_begin_stream(res)
+	http.stream_write(&stream, transmute([]u8)string("event: ping\ndata: 1\n\n"))
+	http.stream_write(&stream, transmute([]u8)string("event: ping\ndata: 2\n\n"))
+	http.stream_flush(&stream)
+	http.stream_end(&stream) // final 0-chunk + respond; increments http.stream_responses_total
 }
 
 on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
@@ -308,7 +313,9 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	fmt.sbprintf(&b, "plan_wire_materialize_total %d\n", wire_mat)
 	fmt.sbprintf(&b, "plan_wire_sendfile_total %d\n", wire_sf)
 	fmt.sbprintf(&b, "plan_wire_copy_into_total %d\n", wire_ci)
+	// Harness-local + package stream counter (Phase 5 stream_end).
 	fmt.sbprintf(&b, "stream_responses_total %d\n", sync.atomic_load(&g_m.stream_responses))
+	fmt.sbprintf(&b, "http_stream_responses_total %d\n", http.stream_responses_load())
 	fmt.sbprintf(&b, "route_hits{route=\"tiny\"} %d\n", sync.atomic_load(&g_m.hit_tiny))
 	fmt.sbprintf(&b, "route_hits{route=\"gen\"} %d\n", sync.atomic_load(&g_m.hit_gen))
 	fmt.sbprintf(&b, "route_hits{route=\"assembled\"} %d\n", sync.atomic_load(&g_m.hit_assembled))

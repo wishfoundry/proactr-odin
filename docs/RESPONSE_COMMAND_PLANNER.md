@@ -1,7 +1,7 @@
 # Experiment: Response as Command Buffer + Transport Planner
 
 **Branch:** `exp/response-command-planner`  
-**Status:** Phase 4 wired (file region chunked stream); Phase 5 open  
+**Status:** Phase 5 wired (Response_Stream API; pragmatic one-shot chunked send)  
 
 **Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
 
@@ -243,7 +243,8 @@ Executor maps these to `proactr` submits and existing CQE handling (`host_on_sen
 | `Response._buf` / `conn.resp_buf` | Staging for heading and for planner-chosen `Copy_Into` / single `Write_Slice` |
 | `body_set` | Emit `Static` or `Bytes` + plan materialize (v0: same as today) |
 | `body_reserve` / `body_commit` | Fast path that is already a micro-plan: heading + in-place body + CL patch → keep as helper or as `Patch_CL` exec op |
-| `response_writer_init` (chunked) | Near-term stays; long-term may feed streaming path, not static cmd list |
+| `response_writer_init` (chunked) | Kept for JSON / small buffered writes; shares `_http_write_chunk` with Stream |
+| `response_begin_stream` / `stream_*` | Phase 5 first-class stream API (not a `Response_Cmd`) |
 | `respond` → `response_send` → `pending_send` → `host_submit_send` | `respond` → middleware hooks → `plan_response` → `execute_plan` → submit |
 | Single send CQE path | Executor state machine: `exec_i` over `[]Exec_Op`, partials stay on current op |
 | `proactr.submit_send` | `Write_Slice`; later `sendv` / `sendfile` submit helpers |
@@ -308,11 +309,18 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 ### Phase 5 — Streaming split (only when needed)
 
-- [ ] `begin_stream` / write / flush / end API separate from cmd buffer
-- [ ] Document that middleware for streams runs **before** stream starts
-- [ ] Do not overload `Response_Cmd.Stream` as a fake static body
+- [x] `response_begin_stream` / `stream_write` / `stream_flush` / `stream_end` API separate from cmd buffer
+- [x] Document that middleware for streams runs **before** stream starts (body middleware never sees stream data)
+- [x] Do not overload `Response_Cmd.Stream` as a fake static body
+- [x] Mutual exclusion with body cmds / body_reserve / response_writer
+- [x] Chunked TE framing into `resp_buf`; `stream_end` single-shot send (pragmatic)
+- [x] `stream_responses_total` atomic (plan_wire_* does not count streams)
+- [x] Harness `/sse` uses begin_stream API
+- [x] Unit tests: chunk framing + stream body after heading; no Stream cmd kind
 
-**Exit:** SSE-style sketch without poisoning the static planner.
+**Exit:** SSE-style sketch without poisoning the static planner. ✅
+
+**Phase 5 limitation (documented):** `stream_flush` is a no-op coalesce point; there is no mid-body CQE / continuous flush-to-wire yet. Chunks accumulate in `resp_buf` and `stream_end` submits once (same family as `Response_Writer` / body_reserve). True multi-CQE streaming is a follow-up.
 
 ---
 
@@ -350,7 +358,7 @@ Use this when reviewing experimental PRs/commits:
 - [x] Clear types for intent (`Response_Cmd`) vs execution (`Exec_Op`)
 - [x] Planner is the only place that chooses copy vs gather vs sendfile *(wire executes Writev multi-buffer + Sendfile region stream)*
 - [x] At least one middleware-shaped transform exists as cmd rewrite
-- [x] Streaming is either out of scope with a written reason, or a separate API
+- [x] Streaming is a separate API (`Response_Stream`), not a body cmd kind
 
 ### Behavioral success
 
@@ -389,7 +397,7 @@ Track answers here as the experiment proceeds.
    Fixed small array vs dynamic; prefer fixed + overflow “merge/copy” policy.
 
 5. **Chunked `Response_Writer`?**  
-   Keep as-is until Phase 5; do not pretend it is a static cmd list.
+   Phase 5: keep for buffered JSON writes; new SSE path is `response_begin_stream`. Shared framing helpers; neither is a static cmd list.
 
 6. **Multi-op executor vs single fused buffer?**  
    v0 fused; multi-op only when Writev/Sendfile land.
@@ -430,6 +438,12 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Count chunked file stream as `plan_wire_copy_into_total`; reserve `plan_wire_sendfile_total` for kernel path | Honest mechanism counters; kernel sendfile can land later without renumbering |
 | 2026-08-05 | `Connection.file_send_{fd,off,remaining,buf}`; host never closes fd | Handler owns fd for full send lifetime; clear cursor on error/complete |
 | 2026-08-05 | `prefer_sendfile` alone enables optimize wire gate (like `prefer_gather`) | File routes can stream without global `plan_optimize` |
+| 2026-08-05 | Phase 5: `Response_Stream` API (`begin_stream` / write / flush / end), not `Response_Cmd` | G5: different lifetime; do not poison plan_body |
+| 2026-08-05 | Mutual exclusion: stream vs body cmds / body_reserve / response_writer | Single body path per response; heading freezes at begin_stream |
+| 2026-08-05 | Body middleware does not run on stream data | Middleware rewrites cmds; stream has none — set headers before begin |
+| 2026-08-05 | Pragmatic stream wire: chunk into `resp_buf`, flush no-op, end single `submit_send` | Continuous mid-body CQE flush needs conn streaming state — follow-up |
+| 2026-08-05 | `stream_responses_total` separate from `plan_wire_*` | Honest counters; streams are not materialize/writev/sendfile |
+| 2026-08-05 | Shared `_http_write_chunk` for Stream + Response_Writer | One framing implementation; Writer remains for JSON buffer path |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 
@@ -442,7 +456,7 @@ Track answers here as the experiment proceeds.
 | `docs/RESPONSE_COMMAND_PLANNER.md` | This plan |
 | `http/plan.odin` | Types + pure `plan_body` (optimize policy) + `plan_body_materialize_only` + wire counters |
 | `http/plan_test.odin` | Table tests: cmds + context → exec op sequence; multi-op advance; file remaining math |
-| `http/response.odin` | Emit cmds; plan+execute (materialize, Writev multi-buffer, file-region stream) |
+| `http/response.odin` | Emit cmds; plan+execute (materialize, Writev, file-region); Phase 5 `Response_Stream` |
 | `http/server.odin` | Multi-buffer + file_send executor in `host_on_send`; `plan_optimize` opt |
 | `proactr/*` | Future: kernel sendfile / true writev submit if needed |
 

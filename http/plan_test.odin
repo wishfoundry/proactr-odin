@@ -8,6 +8,8 @@ Run: odin test http/ -all-packages  (from repo root), or:
      odin test http/
 */
 
+import "core:bytes"
+import "core:strings"
 import "core:testing"
 
 @(private = "file")
@@ -710,4 +712,109 @@ test_cmds_mem_body_len :: proc(t: ^testing.T) {
 		cmd_file(1, 0, 10),
 	})
 	testing.expect(t, !ok2)
+}
+
+// --- Phase 5: Response_Stream (not Response_Cmd / plan_body) -----------------
+
+@(test)
+test_http_chunk_framing :: proc(t: ^testing.T) {
+	// Pure chunk framing used by stream_write / stream_end.
+	b: bytes.Buffer
+	_http_write_chunk(&b, transmute([]u8)string("ab"))
+	_http_write_chunk(&b, transmute([]u8)string("xyz"))
+	_http_write_chunk(&b, nil) // empty → no-op
+	_http_write_chunk_end(&b)
+	got := string(bytes.buffer_to_bytes(&b))
+	testing.expect_value(t, got, "2\r\nab\r\n3\r\nxyz\r\n0\r\n\r\n")
+	delete(b.buf)
+}
+
+@(test)
+test_response_stream_chunked_body :: proc(t: ^testing.T) {
+	// begin_stream + stream_write produce valid chunked framing after the heading.
+	// Does not call stream_end (needs host worker); finishes with _http_write_chunk_end.
+	r: Response
+	headers_init(&r.headers, context.allocator)
+	defer delete(r.headers._kv)
+
+	r.status = .OK
+	// Pre-set Date so heading format does not need thread-local server_date / td.
+	headers_set_unsafe(&r.headers, "date", "Fri, 05 Feb 2023 09:01:10 GMT")
+	headers_set_unsafe(&r.headers, "content-type", "text/event-stream")
+
+	conn: Connection
+	r._conn = &conn
+	wire := make([dynamic]u8, 0, 1024, context.allocator)
+	defer delete(wire)
+	r._buf.buf = wire
+	r._buf.buf.allocator = context.allocator
+
+	s := response_begin_stream(&r)
+	testing.expect(t, r._streaming)
+	testing.expect(t, r._heading_written)
+	testing.expect_value(t, r._cmd_count, 0)
+
+	te, has_te := headers_get_unsafe(r.headers, "transfer-encoding")
+	testing.expect(t, has_te)
+	testing.expect_value(t, te, "chunked")
+
+	stream_write(&s, transmute([]u8)string("hello"))
+	stream_write(&s, transmute([]u8)string("world"))
+	stream_flush(&s) // Phase 5 no-op
+	_http_write_chunk_end(&r._buf)
+
+	full := string(r._buf.buf[:])
+	// Header block ends with \r\n\r\n; body is chunked.
+	sep := strings.index(full, "\r\n\r\n")
+	testing.expect(t, sep >= 0)
+	headers := full[:sep]
+	body := full[sep + 4:]
+	testing.expect(t, strings.contains(headers, "transfer-encoding: chunked"))
+	testing.expect_value(t, body, "5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n")
+}
+
+@(test)
+test_response_stream_mutual_exclusion_flags :: proc(t: ^testing.T) {
+	// Stream path sets flags that body cmd / reserve paths assert against.
+	// (Assert-failure paths are not exercised here — would abort the process.)
+	r: Response
+	headers_init(&r.headers, context.allocator)
+	defer delete(r.headers._kv)
+	r.status = .OK
+	headers_set_unsafe(&r.headers, "date", "Fri, 05 Feb 2023 09:01:10 GMT")
+	conn: Connection
+	r._conn = &conn
+	wire := make([dynamic]u8, 0, 512, context.allocator)
+	defer delete(wire)
+	r._buf.buf = wire
+	r._buf.buf.allocator = context.allocator
+
+	// Before stream: cmds allowed.
+	testing.expect(t, !r._streaming)
+	_response_append_cmd(&r, cmd_static(_small_a[:]))
+	testing.expect_value(t, r._cmd_count, 1)
+
+	// Reset as if a new request, then begin stream.
+	r._cmd_count = 0
+	clear(&r._buf.buf)
+	r._heading_written = false
+	s := begin_stream(&r)
+	testing.expect(t, r._streaming)
+	testing.expect(t, r._heading_written)
+	testing.expect(t, !r._stream_ended)
+	testing.expect_value(t, r._cmd_count, 0)
+	// stream_end would send; mark ended without host for flag check.
+	_ = s
+	r._stream_ended = true
+	testing.expect(t, r._stream_ended)
+}
+
+@(test)
+test_stream_not_counted_as_plan_body :: proc(t: ^testing.T) {
+	// Empty cmds → plan_body is empty Write_Slice; stream is not a cmd kind.
+	r := plan_body({}, plan_context_default())
+	testing.expect(t, r.materialized)
+	testing.expect_value(t, r.op_count, 1)
+	// Response_Cmd_Kind has only Static/Bytes/File — no Stream kind (G5).
+	testing.expect_value(t, int(max(Response_Cmd_Kind)), int(Response_Cmd_Kind.File))
 }

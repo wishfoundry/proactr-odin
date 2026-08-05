@@ -14,23 +14,30 @@ Phase 4 wire: plan Write_Slice/Writev + Sendfile streams the file region via
 chunked pread + sequential submit_send (portable; not kernel sendfile yet).
 Copy_Into plans and plan_optimize off still full-materialize File into resp_buf.
 
+Phase 5: SSE / long-lived streams use Response_Stream (begin/write/flush/end),
+NOT Response_Cmd / plan_body. plan_wire_* does not count stream bodies.
+
 See docs/RESPONSE_COMMAND_PLANNER.md.
 
 Intent (handlers / middleware)  →  Response_Cmd[]
 Policy (this file)              →  Plan_Result / Exec_Op[]
 Mechanism (executor / proactr)  →  multi-buffer send / file-region stream / Write_Slice
+Stream (Phase 5)                →  Response_Stream (chunked TE; separate lifetime)
 */
 
 import "core:sync"
 
 // Wire-path mechanism counters (Phase 3–4). Atomic; safe across workers.
 // Harness /metrics can load these to prove real wire paths vs materialize.
+// Stream responses use stream_responses_total (Phase 5), not these plan_wire_*.
 plan_wire_writev_total:      u64
 plan_wire_materialize_total: u64
 // Phase 4: kernel sendfile path (reserved; 0 until real sendfile lands).
 plan_wire_sendfile_total:    u64
 // Phase 4: chunked pread+send of a Sendfile plan (no full-file resp_buf load).
 plan_wire_copy_into_total:   u64
+// Phase 5: response_begin_stream → stream_end completed (not a plan_body path).
+stream_responses_total:      u64
 
 plan_wire_inc_writev :: #force_inline proc() {
 	sync.atomic_add(&plan_wire_writev_total, u64(1))
@@ -48,12 +55,20 @@ plan_wire_inc_copy_into :: #force_inline proc() {
 	sync.atomic_add(&plan_wire_copy_into_total, u64(1))
 }
 
+stream_inc_responses :: #force_inline proc() {
+	sync.atomic_add(&stream_responses_total, u64(1))
+}
+
 plan_wire_load :: proc() -> (writev: u64, materialize: u64) {
 	return sync.atomic_load(&plan_wire_writev_total), sync.atomic_load(&plan_wire_materialize_total)
 }
 
 plan_wire_load_file :: proc() -> (sendfile: u64, copy_into: u64) {
 	return sync.atomic_load(&plan_wire_sendfile_total), sync.atomic_load(&plan_wire_copy_into_total)
+}
+
+stream_responses_load :: proc() -> u64 {
+	return sync.atomic_load(&stream_responses_total)
 }
 
 // ---------------------------------------------------------------------------

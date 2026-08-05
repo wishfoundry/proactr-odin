@@ -34,13 +34,18 @@ Response :: struct {
 	_cl_off:          int, // index of first Content-Length digit (fixed width); -1 if none
 	_body_max:        int, // max_body from body_reserve
 	// Phase 1: body intent as POD commands. Heading is deferred until plan/send unless
-	// body_reserve / response_writer already wrote it. Headers may still be set after body_*.
+	// body_reserve / response_writer / stream already wrote it. Headers may still be set
+	// after body_* (not after stream begin — heading is frozen then).
 	_cmds:            [PLAN_MAX_BODY_CMDS]Response_Cmd,
 	_cmd_count:       int,
 	// Phase 2: handler plan bias (zero = server defaults) and optional body middleware.
 	_profile:         Handler_Profile,
 	_body_mw:         Body_Middleware,
 	_body_mw_user:    rawptr,
+	// Phase 5: Response_Stream path (mutually exclusive with body cmds / body_reserve).
+	// Body middleware does NOT run on stream data; rewrite headers before begin_stream.
+	_streaming:       bool,
+	_stream_ended:    bool,
 }
 
 // response_init binds r to c.resp_buf (permanent, conn_allocator). Request temp
@@ -58,6 +63,8 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 	r._profile = {}
 	r._body_mw = nil
 	r._body_mw_user = nil
+	r._streaming = false
+	r._stream_ended = false
 	r._conn = c
 	r.cookies = {}
 	r.cookies.allocator = allocator
@@ -84,6 +91,7 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 @(private)
 _response_append_cmd :: proc(r: ^Response, cmd: Response_Cmd, loc := #caller_location) {
 	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._streaming, "response stream started; cannot append body cmd", loc)
 	assert(!r._heading_written, "heading already written; cannot append body cmd", loc)
 	assert(r._body_off == 0, "body_reserve in progress; cannot append body cmd", loc)
 	assert(r._cmd_count < PLAN_MAX_BODY_CMDS, "too many body commands (PLAN_MAX_BODY_CMDS)", loc)
@@ -253,6 +261,7 @@ by default; with plan_optimize / prefer_gather a pure Writev plan may multi-buff
 Multi-part bodies: body_static / body_bytes / body_file (append).
 For in-place fixed-CL bodies use body_reserve / body_commit.
 For unknown size / io.Writer use response_writer_init (chunked; heading written early).
+For SSE / long-lived chunked streams use response_begin_stream (not body cmds).
 */
 body_set :: proc{
 	body_set_str,
@@ -277,6 +286,7 @@ body_commit(n) — only the length digits are patched (no body memmove, no scrat
 body_reserve :: proc(r: ^Response, max_body: int, loc := #caller_location) -> []byte {
 	assert_has_td(loc)
 	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._streaming, "response stream started; cannot body_reserve", loc)
 	assert(!r._heading_written, "heading already written; cannot body_reserve", loc)
 	assert(r._cmd_count == 0, "body cmds already set; cannot body_reserve", loc)
 	assert(bytes.buffer_length(&r._buf) == 0, "response body already started", loc)
@@ -308,6 +318,7 @@ Abandon a body_reserve without sending (e.g. generation failed).
 */
 body_cancel :: proc(r: ^Response, loc := #caller_location) {
 	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._streaming, "response stream started; cannot body_cancel", loc)
 	resize(&r._buf.buf, 0)
 	r._heading_written = false
 	r._body_off = 0
@@ -389,6 +400,143 @@ response_status :: proc(r: ^Response, status: Status) {
 	}
 }
 
+// HTTP/1.1 chunked transfer framing (RFC 9112). Empty chunk is a no-op (final
+// terminator is _http_write_chunk_end only). Used by Response_Stream and Response_Writer.
+@(private)
+_http_write_chunk :: proc(b: ^bytes.Buffer, chunk: []byte) {
+	plen := i64(len(chunk))
+	if plen == 0 {
+		return
+	}
+
+	// size hex + \r\n + data + \r\n
+	bytes.buffer_grow(b, 16 + len(chunk) + 4)
+	size_buf := _dynamic_unwritten(b.buf)
+	size := strconv.write_int(size_buf, plen, 16)
+	_dynamic_add_len(&b.buf, len(size))
+
+	bytes.buffer_write_string(b, "\r\n")
+	bytes.buffer_write(b, chunk)
+	bytes.buffer_write_string(b, "\r\n")
+}
+
+@(private)
+_http_write_chunk_end :: proc(b: ^bytes.Buffer) {
+	bytes.buffer_write_string(b, "0\r\n\r\n")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: Response_Stream — SSE / long-lived chunked bodies (NOT Response_Cmd)
+// ---------------------------------------------------------------------------
+//
+// Streaming is a different lifetime from the body command planner (G5):
+//
+//   headers / status (mutable) → response_begin_stream → stream_write* → stream_end
+//
+// Body middleware does NOT run on stream data. Any rewrite of body intent must
+// happen before begin_stream (headers only after that are frozen with the heading).
+//
+// Mutual exclusion with body_set / body_* cmds / body_reserve / response_writer.
+//
+// Pragmatic Phase 5 wire model:
+//   - Transfer-Encoding: chunked; heading written once at begin
+//   - stream_write appends framed chunks into resp_buf
+//   - stream_flush is a no-op coalesce point (no mid-body CQE submit yet)
+//   - stream_end writes the final 0-chunk and submit_send once (same single-shot
+//     path as body_reserve / Response_Writer)
+// True continuous flush-to-wire / multi-CQE mid-body is a follow-up.
+// plan_wire_* counters are not incremented; stream_responses_total is.
+
+Response_Stream :: struct {
+	r:     ^Response,
+	ended: bool,
+}
+
+/*
+Begin a chunked response stream. Writes the HTTP heading immediately (headers
+and status freeze). Mutually exclusive with body cmds, body_reserve, and
+response_writer.
+
+Body middleware is not applied to stream bytes — set headers before calling.
+
+Call stream_write / stream_flush as needed, then stream_end (sends the response).
+Do not call body_set or respond separately after begin_stream.
+*/
+response_begin_stream :: proc(r: ^Response, loc := #caller_location) -> Response_Stream {
+	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._streaming, "response stream already started", loc)
+	assert(!r._heading_written, "heading already written; cannot begin_stream", loc)
+	assert(r._cmd_count == 0, "body cmds already set; cannot begin_stream", loc)
+	assert(r._body_off == 0, "body_reserve in progress; cannot begin_stream", loc)
+	assert(bytes.buffer_length(&r._buf) == 0, "response body already started", loc)
+
+	if !headers_has_unsafe(r.headers, "transfer-encoding") {
+		headers_set_unsafe(&r.headers, "transfer-encoding", "chunked")
+	}
+
+	_response_write_heading(r, -1)
+	r._streaming = true
+	r._stream_ended = false
+
+	return Response_Stream {
+		r     = r,
+		ended = false,
+	}
+}
+
+// Alias for response_begin_stream (G5 sketch name).
+begin_stream :: response_begin_stream
+
+// Append data as one HTTP chunk into the response wire buffer. Empty data is a no-op.
+stream_write :: proc(s: ^Response_Stream, data: []byte, loc := #caller_location) {
+	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
+	assert(!s.ended && !s.r._stream_ended, "stream already ended", loc)
+	assert(s.r._streaming, "stream not started", loc)
+	assert(!s.r.sent, "response has already been sent", loc)
+	if len(data) == 0 {
+		return
+	}
+	_http_write_chunk(&s.r._buf, data)
+}
+
+/*
+Flush checkpoint for streaming.
+
+Phase 5 pragmatic: no-op. Chunks already live in resp_buf; stream_end submits
+once. Future: may submit pending_send of current buffer when nothing in-flight.
+*/
+stream_flush :: proc(s: ^Response_Stream, loc := #caller_location) {
+	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
+	assert(!s.ended && !s.r._stream_ended, "stream already ended", loc)
+	assert(s.r._streaming, "stream not started", loc)
+	assert(!s.r.sent, "response has already been sent", loc)
+	// Coalesce only — no mid-body CQE submit in Phase 5.
+}
+
+/*
+Finish the stream: final 0-chunk, then respond (single-buffer send).
+
+HEAD: body bytes may already be in the buffer; response_send strips them and
+keeps the heading (same as Response_Writer / body_reserve).
+
+Increments stream_responses_total (not plan_wire_*).
+*/
+stream_end :: proc(s: ^Response_Stream, loc := #caller_location) {
+	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
+	assert(!s.ended && !s.r._stream_ended, "stream already ended", loc)
+	assert(s.r._streaming, "stream not started", loc)
+	assert(!s.r.sent, "response has already been sent", loc)
+
+	_http_write_chunk_end(&s.r._buf)
+	s.ended = true
+	s.r._stream_ended = true
+	stream_inc_responses()
+	respond(s.r, loc)
+}
+
+// stream_close is an alias for stream_end.
+stream_close :: stream_end
+
 Response_Writer :: struct {
 	r:     ^Response,
 	// The writer you can write to.
@@ -401,16 +549,20 @@ Response_Writer :: struct {
 
 /*
 Initialize a writer you can use to write responses. Use the `body_set` procedure group if you have
-a string or byte slice.
+a string or byte slice. For SSE / explicit chunked streaming prefer response_begin_stream.
 
 The buffer can be used to avoid very small writes, like the ones when you use the json package
 (each write in the json package is only a few bytes). You are allowed to pass nil which will disable
 buffering.
 
 NOTE: You need to call io.destroy to signal the end of the body, OR io.close to send the response.
+Mutually exclusive with body cmds, body_reserve, and Response_Stream.
 */
 response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte) -> io.Writer {
 	assert(r._cmd_count == 0, "body cmds already set; cannot response_writer_init")
+	assert(!r._streaming, "response stream started; cannot response_writer_init")
+	assert(!r._heading_written, "heading already written; cannot response_writer_init")
+	assert(r._body_off == 0, "body_reserve in progress; cannot response_writer_init")
 	headers_set_unsafe(&r.headers, "transfer-encoding", "chunked")
 	_response_write_heading(r, -1)
 
@@ -419,23 +571,6 @@ response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte)
 
 	rw.w = io.Stream{
 		procedure = proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
-			ws :: bytes.buffer_write_string
-			write_chunk :: proc(b: ^bytes.Buffer, chunk: []byte) {
-				plen := i64(len(chunk))
-				if plen == 0 { return }
-
-				log.debugf("response_writer chunk of size: %i", plen)
-
-				bytes.buffer_grow(b, 16)
-				size_buf := _dynamic_unwritten(b.buf)
-				size := strconv.write_int(size_buf, plen, 16)
-				_dynamic_add_len(&b.buf, len(size))
-
-				ws(b, "\r\n")
-				bytes.buffer_write(b, chunk)
-				ws(b, "\r\n")
-			}
-
 			rw := (^Response_Writer)(stream_data)
 			b := &rw.r._buf
 
@@ -443,7 +578,7 @@ response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte)
 			case .Flush:
 				assert(!rw.ended)
 
-				write_chunk(b, rw.buf[:])
+				_http_write_chunk(b, rw.buf[:])
 				clear(&rw.buf)
 				return 0, nil
 
@@ -451,21 +586,18 @@ response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte)
 				assert(!rw.ended)
 
 				// Write what is left.
-				write_chunk(b, rw.buf[:])
-
-				// Signals the end of the body.
-				ws(b, "0\r\n\r\n")
+				_http_write_chunk(b, rw.buf[:])
+				_http_write_chunk_end(b)
 
 				rw.ended = true
 				return 0, nil
 
 			case .Close:
 				// Write what is left.
-				write_chunk(b, rw.buf[:])
+				_http_write_chunk(b, rw.buf[:])
 
 				if !rw.ended {
-					// Signals the end of the body.
-					ws(b, "0\r\n\r\n")
+					_http_write_chunk_end(b)
 					rw.ended = true
 				}
 
@@ -479,11 +611,11 @@ response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte)
 				// No space, first write rw.buf, then check again for space, if still no space,
 				// fully write the given p.
 				if len(rw.buf) + len(p) > cap(rw.buf) {
-					write_chunk(b, rw.buf[:])
+					_http_write_chunk(b, rw.buf[:])
 					clear(&rw.buf)
 
 					if len(p) > cap(rw.buf) {
-						write_chunk(b, p)
+						_http_write_chunk(b, p)
 					} else {
 						append(&rw.buf, ..p)
 					}
@@ -1231,14 +1363,19 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if !connection_set_state(r._conn, .Will_Close) { return }
 	}
 
-	// Wire assembly (Phase 3–4):
-	//  1) Heading already written (body_reserve / chunked) → single-buffer send as-is.
+	// Wire assembly (Phase 3–5):
+	//  1) Heading already written (body_reserve / Response_Writer / Response_Stream)
+	//     → single-buffer send as-is (stream path does not use plan_body).
 	//  2) Body cmds → middleware → plan (optimize when plan_optimize|prefer_gather|prefer_sendfile):
 	//       pure Writev          → multi-buffer sequential sends (heading + borrowed slices)
 	//       Write_Slice+Sendfile → heading then chunked file stream (no full-file materialize)
 	//       else                 → materialize into resp_buf + one Write_Slice
 	//  3) Empty buffer, no cmds → heading with Content-Length 0.
 	// HEAD: headers only (no file/body stream).
+	// Stream: begin_stream freezes heading; stream_end must finish before respond.
+	if r._streaming {
+		assert(r._stream_ended, "stream_end required before respond when streaming")
+	}
 	if !r._heading_written {
 		if r._cmd_count > 0 {
 			_response_apply_body_middleware(r)
