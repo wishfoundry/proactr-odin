@@ -3,12 +3,16 @@ package http
 /*
 Response command buffer + transport planner (experiment).
 
-Phase 0: types and pure policy only. Does not change the wire send path.
+Phase 1 wire: handlers emit Response_Cmd via body_* helpers; response_send
+calls plan_body_materialize_only and copies heading+body into resp_buf for a
+single Write_Slice (pending_send). Optimize policy (Writev/Sendfile) is tested
+in plan_body but not yet on the wire — see Phase 3–4.
+
 See docs/RESPONSE_COMMAND_PLANNER.md.
 
 Intent (handlers / middleware)  →  Response_Cmd[]
 Policy (this file)              →  Plan_Result / Exec_Op[]
-Mechanism (executor / proactr)  →  syscalls  (not wired yet)
+Mechanism (executor / proactr)  →  syscalls  (Phase 1: materialize only)
 */
 
 // ---------------------------------------------------------------------------
@@ -109,6 +113,9 @@ Exec_Op :: struct {
 }
 
 PLAN_MAX_OPS :: 8
+
+// Fixed body-command budget on Response (Phase 1). Overflow asserts; no unbounded growth.
+PLAN_MAX_BODY_CMDS :: 32
 
 Plan_Result :: struct {
 	ops:           [PLAN_MAX_OPS]Exec_Op,
@@ -431,7 +438,8 @@ plan_exec_kinds :: proc(cmds: []Response_Cmd, ctx: Plan_Context, out: []Exec_Op_
 	return n
 }
 
-// Force materialize-only plan (Phase 1 wire default). Same as always-Write_Slice.
+// Force materialize-only plan (Phase 1 wire default used by response_send).
+// Always one Write_Slice; ignores Writev/Sendfile optimize policy.
 plan_body_materialize_only :: proc(cmds: []Response_Cmd) -> Plan_Result {
 	r: Plan_Result
 	r.materialized = true

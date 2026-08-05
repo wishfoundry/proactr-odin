@@ -1,7 +1,8 @@
 # Experiment: Response as Command Buffer + Transport Planner
 
 **Branch:** `exp/response-command-planner`  
-**Status:** design / experiment — not production path yet  
+**Status:** Phase 1 wired (cmd emit + materialize-only plan); Phase 2–5 open  
+
 **Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
 
 ### Benchmark harness
@@ -266,12 +267,12 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 ### Phase 1 — Emit commands, plan = materialize (behavior-identical)
 
-- [ ] `body_static` / `body_bytes` / `body_file` append cmds (file may still materialize via read for now)
-- [ ] `body_set` becomes wrapper → cmds
-- [ ] On `respond`, `plan_response` always builds heading + body into `resp_buf` and one `Write_Slice`
-- [ ] Keep `body_reserve` path working (either still special-cased or expressed as cmds + `Patch_CL`)
+- [x] `body_static` / `body_bytes` / `body_file` append cmds (file may still materialize via read for now)
+- [x] `body_set` becomes wrapper → cmds
+- [x] On `respond`, `plan_response` always builds heading + body into `resp_buf` and one `Write_Slice`
+- [x] Keep `body_reserve` path working (either still special-cased or expressed as cmds + `Patch_CL`)
 
-**Exit:** existing empty-ok / TFB / examples pass with no intentional perf regression; single-buffer send unchanged in spirit.
+**Exit:** existing empty-ok / TFB / examples pass with no intentional perf regression; single-buffer send unchanged in spirit. ✅
 
 ### Phase 2 — Plan_Context + capability queries
 
@@ -404,6 +405,9 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | File without sendfile → `Copy_Into` + `Write_Slice` | Makes the copy stage explicit for later async file read |
 | 2026-08-05 | Added `comparisons/plan/` A/B harness with shadow plan counters | Prove per-route Writev/Sendfile policy before wire; RPS informational until Phase 3–4 |
 | 2026-08-05 | `/file/1m` wire uses preloaded bytes; shadow plan still `File` | Avoid per-request 1 MiB temp-arena reads under load (crashed workers) |
+| 2026-08-05 | Phase 1: `body_set` / `body_*` append `Response_Cmd`; wire uses `plan_body_materialize_only` | Structure first; heading deferred until send so headers stay mutable after body_set |
+| 2026-08-05 | Fixed `PLAN_MAX_BODY_CMDS` (32) on Response with assert overflow | Prefer fixed POD over unbounded growth (open question §9.4) |
+| 2026-08-05 | `body_reserve` / chunked `response_writer` stay special-cased (heading early) | Not rewritten as cmds yet; avoid breaking Fortunes / JSON writer paths |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 

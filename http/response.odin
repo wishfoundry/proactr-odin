@@ -1,12 +1,14 @@
 package http
 
 import "core:bytes"
+import "core:c"
 import "core:io"
 import "core:log"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import "core:sys/posix"
 
 Response :: struct {
 	// Add your headers and cookies here directly.
@@ -29,6 +31,10 @@ Response :: struct {
 	_body_off:        int, // start index of body in _buf.buf; 0 if not reserved
 	_cl_off:          int, // index of first Content-Length digit (fixed width); -1 if none
 	_body_max:        int, // max_body from body_reserve
+	// Phase 1: body intent as POD commands. Heading is deferred until plan/send unless
+	// body_reserve / response_writer already wrote it. Headers may still be set after body_*.
+	_cmds:            [PLAN_MAX_BODY_CMDS]Response_Cmd,
+	_cmd_count:       int,
 }
 
 // response_init binds r to c.resp_buf (permanent, conn_allocator). Request temp
@@ -42,6 +48,7 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 	r._body_off = 0
 	r._cl_off = -1
 	r._body_max = 0
+	r._cmd_count = 0
 	r._conn = c
 	r.cookies = {}
 	r.cookies.allocator = allocator
@@ -64,36 +71,63 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 	r._buf.last_read = .Invalid
 }
 
+// Append one body command. Heading is not written yet (headers remain mutable until send).
+@(private)
+_response_append_cmd :: proc(r: ^Response, cmd: Response_Cmd, loc := #caller_location) {
+	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._heading_written, "heading already written; cannot append body cmd", loc)
+	assert(r._body_off == 0, "body_reserve in progress; cannot append body cmd", loc)
+	assert(r._cmd_count < PLAN_MAX_BODY_CMDS, "too many body commands (PLAN_MAX_BODY_CMDS)", loc)
+	r._cmds[r._cmd_count] = cmd
+	r._cmd_count += 1
+}
+
+// Append a borrowed Static body command (immutable for the response lifetime).
+body_static :: proc(r: ^Response, data: []u8, loc := #caller_location) {
+	_response_append_cmd(r, cmd_static(data), loc)
+}
+
+// Append a Bytes body command. owned=true means free-after-send semantics for later phases;
+// Phase 1 only materializes into resp_buf (does not free).
+body_bytes :: proc(r: ^Response, data: []u8, owned := true, loc := #caller_location) {
+	_response_append_cmd(r, cmd_bytes(data, owned), loc)
+}
+
+// Append a File body command (fd region). Does not read the file here; Phase 1 materialize
+// may sync-read into resp_buf at send time (Phase 4 may use sendfile on the wire).
+body_file :: proc(r: ^Response, fd: i32, offset: i64, length: i64, loc := #caller_location) {
+	_response_append_cmd(r, cmd_file(fd, offset, length), loc)
+}
+
 /*
 Prefer the procedure group `body_set`.
+
+Appends a Static body command. Does not write the HTTP heading yet — headers and status
+remain mutable until respond / plan / send. (body_reserve and response_writer still write
+the heading immediately.)
 */
 body_set_bytes :: proc(r: ^Response, byts: []byte, loc := #caller_location) {
-	assert(bytes.buffer_length(&r._buf) == 0, "the response body has already been written", loc)
-	t0_build: u64
-	when HTTP_PHASE_STATS {
-		t0_build = phase_now()
-	}
-	_response_write_heading(r, len(byts))
-	bytes.buffer_write(&r._buf, byts)
-	when HTTP_PHASE_STATS {
-		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
-	}
+	// Borrowed for response lifetime; materialize copies into resp_buf at send.
+	body_static(r, byts, loc)
 }
 
 /*
 Prefer the procedure group `body_set`.
 */
 body_set_str :: proc(r: ^Response, str: string, loc := #caller_location) {
-	// This is safe because we don't write to the bytes.
+	// Safe: materialize copies; we do not mutate the string bytes.
 	body_set_bytes(r, transmute([]byte)str, loc)
 }
 
 /*
-Sets the response body. After calling this you can no longer add headers to the response.
-If, after calling, you want to change the status code, use the `response_status` procedure.
+Sets the response body by appending body command(s).
 
-For bodies where you do not know the size or want an `io.Writer`, use the `response_writer_init`
-procedure to create a writer.
+Unlike the pre-Phase-1 path, this does **not** freeze headers: you may still add headers
+or change status until respond. Heading + body are materialised at send time into the
+single-buffer Write_Slice path (plan_body_materialize_only).
+
+For in-place fixed-CL bodies use body_reserve / body_commit.
+For unknown size / io.Writer use response_writer_init (chunked; heading written early).
 */
 body_set :: proc{
 	body_set_str,
@@ -119,6 +153,7 @@ body_reserve :: proc(r: ^Response, max_body: int, loc := #caller_location) -> []
 	assert_has_td(loc)
 	assert(!r.sent, "response has already been sent", loc)
 	assert(!r._heading_written, "heading already written; cannot body_reserve", loc)
+	assert(r._cmd_count == 0, "body cmds already set; cannot body_reserve", loc)
 	assert(bytes.buffer_length(&r._buf) == 0, "response body already started", loc)
 	assert(max_body >= 0, "max_body must be non-negative", loc)
 	assert(max_body < 1_000_000_000, "max_body exceeds BODY_CL_DIGITS", loc)
@@ -153,6 +188,7 @@ body_cancel :: proc(r: ^Response, loc := #caller_location) {
 	r._body_off = 0
 	r._cl_off = -1
 	r._body_max = 0
+	r._cmd_count = 0
 }
 
 /*
@@ -202,16 +238,19 @@ body_commit :: proc(r: ^Response, body_len: int, loc := #caller_location) {
 
 /*
 Sets the status code with the safety of being able to do this after writing (part of) the body.
+
+If the heading is not yet written (cmd-based body_set path), only the status field is updated
+and will be formatted at materialize/send time. If the heading is already in the buffer
+(body_reserve / response_writer), the three status digits are patched in place.
 */
 response_status :: proc(r: ^Response, status: Status) {
 	if r.status == status { return }
 
 	r.status = status
 
-	// If we have already written the heading, we can address the bytes directly to overwrite,
-	// this is because of the fact that every status code is of length 3, and because we omit
-	// the "optional" reason phrase out of the response.
-	if bytes.buffer_length(&r._buf) > 0 {
+	// Heading already on the wire buffer (reserve / chunked writer): patch status digits.
+	// Cmd-only path: buffer empty, field update is enough until materialize.
+	if r._heading_written && bytes.buffer_length(&r._buf) > 0 {
 		OFFSET :: len("HTTP/1.1 ")
 
 		status_int_str := status_string(r.status)
@@ -246,6 +285,7 @@ buffering.
 NOTE: You need to call io.destroy to signal the end of the body, OR io.close to send the response.
 */
 response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte) -> io.Writer {
+	assert(r._cmd_count == 0, "body cmds already set; cannot response_writer_init")
 	headers_set_unsafe(&r.headers, "transfer-encoding", "chunked")
 	_response_write_heading(r, -1)
 
@@ -496,6 +536,89 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 	}
 }
 
+// Phase 1: plan_body_materialize_only + copy cmds into _buf as one Write_Slice payload.
+// Not used when body_reserve / response_writer already wrote the heading into _buf.
+@(private)
+_response_materialize_cmds :: proc(r: ^Response) {
+	assert(!r._heading_written)
+	assert(r._cmd_count > 0)
+
+	cmds := r._cmds[:r._cmd_count]
+	plan := plan_body_materialize_only(cmds)
+	assert(plan.materialized && plan.op_count == 1 && plan.ops[0].kind == .Write_Slice)
+
+	// Content-Length: sum of known lengths. Phase 1 requires known body size.
+	body_len: int
+	if plan.total_body >= 0 {
+		body_len = int(plan.total_body)
+	} else {
+		// Unknown file length — still require known size for CL materialize path.
+		for c in cmds {
+			n, ok := cmd_known_length(c)
+			assert(ok, "Phase 1 materialize requires known body length (set File.length)")
+			body_len += int(n)
+		}
+	}
+
+	t0_build: u64
+	when HTTP_PHASE_STATS {
+		t0_build = phase_now()
+	}
+
+	_response_write_heading(r, body_len)
+
+	for c in cmds {
+		switch c.kind {
+		case .Static, .Bytes:
+			bytes.buffer_write(&r._buf, c.bytes)
+		case .File:
+			_response_materialize_file(r, c)
+		}
+	}
+
+	when HTTP_PHASE_STATS {
+		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+	}
+}
+
+// Sync pread of a File cmd region into the response wire buffer (Phase 1 only).
+@(private)
+_response_materialize_file :: proc(r: ^Response, cmd: Response_Cmd) {
+	assert(cmd.kind == .File)
+	assert(cmd.length >= 0, "Phase 1 file materialize needs known length")
+	n := int(cmd.length)
+	if n == 0 {
+		return
+	}
+
+	bytes.buffer_grow(&r._buf, n)
+	dst := _dynamic_unwritten(r._buf.buf)
+	assert(len(dst) >= n)
+
+	total := 0
+	off := cmd.offset
+	for total < n {
+		got := posix.pread(
+			posix.FD(cmd.fd),
+			raw_data(dst[total:n]),
+			c.size_t(n - total),
+			posix.off_t(off),
+		)
+		if got < 0 {
+			log.errorf("body_file materialize pread failed: %v", posix.errno())
+			assert(false, "file body pread failed during materialize")
+			return
+		}
+		if got == 0 {
+			assert(false, "file body short/EOF during materialize")
+			return
+		}
+		total += int(got)
+		off += i64(got)
+	}
+	_dynamic_add_len(&r._buf.buf, n)
+}
+
 @(private)
 response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	conn := r._conn
@@ -504,8 +627,17 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if !connection_set_state(r._conn, .Will_Close) { return }
 	}
 
-	if bytes.buffer_length(&r._buf) == 0 {
-		_response_write_heading(r, 0)
+	// Wire assembly (Phase 1):
+	//  1) Heading already written (body_reserve after commit, or chunked writer) → send buffer as-is.
+	//  2) Body cmds present → materialize-only plan into heading + body, one Write_Slice.
+	//  3) Empty buffer, no cmds → heading with Content-Length 0.
+	//  4) Buffer has content without heading_written is unexpected; treat as ready-to-send.
+	if !r._heading_written {
+		if r._cmd_count > 0 {
+			_response_materialize_cmds(r)
+		} else if bytes.buffer_length(&r._buf) == 0 {
+			_response_write_heading(r, 0)
+		}
 	}
 
 	// Build the full response buffer, then submit_send. Do NOT reset scrap arena
