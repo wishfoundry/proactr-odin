@@ -216,14 +216,10 @@ on_4m :: proc(req: ^http.Request, res: ^http.Response) {
 }
 
 on_gen :: proc(req: ^http.Request, res: ^http.Response) {
+	// Fair peer gen: same static bytes as ntex/drogon/laytan (no DB).
+	// body_reserve microbench stays in comparisons/plan /gen/ok if needed.
 	set_server(res)
-	res.status = .OK
-	http.headers_set_content_type(&res.headers, "text/plain")
-	// Fair gen profile: body_reserve + fill (not fortunes DB).
-	slot := http.body_reserve(res, 64)
-	n := copy(slot, transmute([]u8)string(GEN_BODY))
-	http.body_commit(res, n)
-	http.respond(res)
+	http.respond_plain(res, GEN_BODY)
 }
 
 on_assembled :: proc(req: ^http.Request, res: ^http.Response) {
@@ -271,15 +267,14 @@ on_file :: proc(req: ^http.Request, res: ^http.Response) {
 }
 
 on_sse :: proc(req: ^http.Request, res: ^http.Response) {
+	// Peer-fair oneshot: Content-Length body (same 42 bytes as ntex/drogon/laytan).
+	// Chunked begin_stream is covered by comparisons/plan, not this peer matrix.
 	set_server(res)
 	res.status = .OK
-	// PROFILE_MATRIX: Content-Type text/event-stream required (set before begin_stream freezes headers).
 	http.headers_set_content_type(&res.headers, "text/event-stream")
 	http.headers_set(&res.headers, "cache-control", "no-cache")
-	// sse_oneshot via stream API → chunked TE (NOT long-lived hold; NOT peer CL body).
-	stream := http.response_begin_stream(res)
-	http.stream_write(&stream, transmute([]u8)string(SSE_BODY))
-	http.stream_end(&stream)
+	http.body_set(res, SSE_BODY)
+	http.respond(res)
 }
 
 init_profile_payloads :: proc() {

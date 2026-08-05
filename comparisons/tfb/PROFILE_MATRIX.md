@@ -9,7 +9,7 @@
 | assembled | `GET /static/assembled` | exactly **512 KiB** = 8×64 KiB slices with first byte `'A'+i` | multi-fragment intent |
 | blob | `GET /static/blob/1m` | exactly 1 MiB pattern payload | single large static |
 | file | `GET /file/1m` | exactly 1 MiB from **same file** `$PLAN_FILE_PATH` | file/send path |
-| sse | `GET /sse` | exact bytes below (oneshot events) | stream API / event framing |
+| sse | `GET /sse` | exact bytes below (oneshot events), **Content-Length** (not chunked) | event-stream oneshot framing (peer-fair) |
 
 ### Assembled body construction (mandatory)
 

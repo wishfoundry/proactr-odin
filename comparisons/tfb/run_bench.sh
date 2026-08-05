@@ -232,6 +232,17 @@ PY
   return 0
 }
 
+# Single-route body contract (post-load). Fail closed.
+verify_one_body() {
+  local name="$1" test="$2"
+  local saved="$TESTS"
+  TESTS="$test"
+  verify_peer_bodies "$name"
+  local st=$?
+  TESTS="$saved"
+  return $st
+}
+
 run_load() {
   local name="$1" test="$2"
   local url="http://127.0.0.1:${PORT}$(path_for_test "$test")"
@@ -513,8 +524,14 @@ for srv in $SERVERS; do
     rps=$(rps_from "$LOGDIR/${srv}_${t}.txt")
     lat=$(lat_from "$LOGDIR/${srv}_${t}.txt")
     sz=$(size_from "$LOGDIR/${srv}_${t}.txt")
+    # Fail-closed: re-verify exact body contract after load (peer still up).
+    if ! verify_one_body "$srv" "$t"; then
+      echo "  FAIL post-load body-check $srv $t — invalidating RPS" | tee -a "$DETAIL"
+      rps="INVALID"
+    fi
     if ! check_load_size "$srv" "$t" "$LOGDIR/${srv}_${t}.txt"; then
-      echo "$srv $t SIZE_WARN oha_size=$sz" >>"$DETAIL"
+      # oha Size metric often lies (esp. drogon); body re-check is authoritative.
+      echo "$srv $t OHA_SIZE_WARN oha_size=$sz (body re-check is source of truth)" >>"$DETAIL"
     fi
     row+=$'\t'"$rps"
     echo "$srv $t rps=$rps lat_avg=$lat oha_size=${sz:-?}" | tee -a "$DETAIL"
@@ -527,5 +544,10 @@ echo ""
 echo "=== RPS matrix (columns = tests) ==="
 column -t -s $'\t' "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
 echo ""
+# Mechanism-split note (PROFILE_MATRIX honesty)
+if [[ -f "$LOGDIR/meta.txt" ]]; then
+  echo "=== mechanism notes (from meta) ==="
+  grep -E 'mech|multi_send|preconcat|writev|sendfile|chunked' "$LOGDIR/meta.txt" || true
+fi
 echo "Detail: $DETAIL"
 echo "Logs: $LOGDIR"
