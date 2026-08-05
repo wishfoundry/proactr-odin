@@ -802,12 +802,15 @@ host_submit_writev :: proc(conn: ^Connection) -> proactr.Error {
 	if conn.iov_count <= 0 {
 		return .Invalid_Op
 	}
+	// Always raw socket fd for WRITEV — FIXED_FILE + WRITEV was unstable under load
+	// (bastion proactr-opt silent death after high-RPS blob). Register slot still
+	// used for RECV/SEND.
 	_, err := proactr.submit_writev(
 		&td.ring,
 		i32(conn.socket),
 		conn.iovecs[:conn.iov_count],
 		conn,
-		conn.fixed_idx,
+		-1,
 	)
 	if err == .None {
 		conn.kernel_writev_active = true
@@ -826,6 +829,7 @@ host_submit_sendfile :: proc(conn: ^Connection) -> proactr.Error {
 	if conn.file_send_fd < 0 || conn.file_send_remaining <= 0 {
 		return .Invalid_Op
 	}
+	// Raw socket fd (see host_submit_writev). file_fd is always a real open file.
 	_, err := proactr.submit_sendfile(
 		&td.ring,
 		i32(conn.socket),
@@ -833,7 +837,7 @@ host_submit_sendfile :: proc(conn: ^Connection) -> proactr.Error {
 		conn.file_send_off,
 		u64(conn.file_send_remaining),
 		conn,
-		conn.fixed_idx,
+		-1,
 	)
 	if err == .None {
 		conn.kernel_sendfile_active = true

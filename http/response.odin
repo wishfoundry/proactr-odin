@@ -1031,14 +1031,16 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
 	}
 
-	// Prefer kernel WRITEV (Linux io_uring); fall back to sequential multi-send.
+	// Prefer kernel WRITEV when ≥2 segments (heading+body or multi-body).
+	// Single-iov WRITEV is redundant with SEND and was implicated in opt-mode
+	// instability under load; use multi_send/SEND for the single-buffer case.
 	if plan_wire_prefer_kernel() {
-		if _conn_pack_iovecs(conn) > 0 {
+		n_iov := _conn_pack_iovecs(conn)
+		if n_iov >= 2 {
 			if err := host_submit_writev(conn); err == .None {
 				plan_wire_inc_kernel_writev()
 				return true
 			}
-			// Unsupported / submit fail → multi_send below.
 			conn.kernel_writev_active = false
 		}
 	}
@@ -1202,12 +1204,12 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 			// For pure empty: no file and no mem — count copy_into for mechanism bookkeeping.
 			return true
 		}
-		// Prefer kernel WRITEV for the mem prefix.
+		// Prefer kernel WRITEV for multi-segment mem prefix only.
 		if plan_wire_prefer_kernel() {
-			if _conn_pack_iovecs(conn) > 0 {
+			n_iov := _conn_pack_iovecs(conn)
+			if n_iov >= 2 {
 				if err := host_submit_writev(conn); err == .None {
 					plan_wire_inc_kernel_writev()
-					// File mechanism counted when prefix completes → _conn_file_region_start_or_finish.
 					return true
 				}
 				conn.kernel_writev_active = false
