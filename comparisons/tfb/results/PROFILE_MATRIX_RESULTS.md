@@ -1,89 +1,89 @@
-# Five-profile peer matrix — ranch-bastion (v1)
+# Five-profile peer matrix — ranch-bastion **v2** (WOW package)
 
 **Host:** ranch-bastion · WORKERS=8 · c=100 · z=15s · oha · FORCE_REBUILD=1  
 **Rules:** [`../PROFILE_MATRIX.md`](../PROFILE_MATRIX.md)  
-**TSV:** `profile_matrix_v1.tsv`
+**Artifacts:** `profile_matrix_v2.tsv` (pull from bastion `/tmp/profile-matrix-v2/`)  
+**INVALID cells:** none (post-load body re-check fail-closed)
 
-## Mechanism legend (required)
+## Mechanism legend
 
 | Label | Meaning |
 |-------|---------|
-| `preconcat_blob` | Multi-slice intent merged once at process start; one buffer on wire |
-| `multi_send` | proactr-opt: sequential multi-buffer send (**not** kernel writev) |
+| `preconcat_blob` | 8×64 KiB intent merged at process start; one buffer on wire |
+| `multi_send` | proactr-opt sequential multi-buffer send (**not** kernel writev) |
 | `file_read_full` | Full file read into userspace then send |
-| `file_chunked` | proactr-opt: chunked pread+send (**not** kernel sendfile) |
-| `materialize_copy` | CL body, single buffer |
-| `sse_oneshot_CL` | 42 B event-stream, Content-Length (peer-fair oneshot; re-measured after CL fix) |
+| `file_chunked` | proactr-opt chunked pread+send (**not** kernel sendfile) |
+| `materialize_copy` / `sse_oneshot_CL` | Content-Length body; SSE = exact 42 B event-stream |
 
-**Drogon:** I/O = **epoll**. oha `Size/request` is often **wrong** on large bodies (e.g. 1362 vs 524288); **post-load body re-check is source of truth**. RPS kept only if body contracts passed.
+**Drogon:** I/O = **epoll**. oha `Size/request` often wrong on large bodies; **post-load body re-check is source of truth**.
 
-## Full RPS table (all cells body-check OK; no INVALID)
+## Full RPS (v2, all body contracts green)
 
 | peer | tiny | gen | assembled | blob | file | sse |
 |------|-----:|----:|----------:|-----:|-----:|----:|
-| proactr-mat | 350249 | 374261 | 13157 | 6313 | 4814 | 359069 |
-| proactr-opt | 360268 | 358772 | 16904 | 6996 | 7453 | 344317 |
-| laytan | 324113 | 323673 | 5502 | 2301 | 1930 | 274862 |
-| ntex | 357965 | 360002 | 11953 | 5536 | 6094 | 346252 |
-| drogon† | 290496 | 289899 | 2847 | 1471 | 825 | 291719 |
+| proactr-mat | **370305** | **366295** | 14204 | 6045 | 4871 | 346734 |
+| proactr-opt | 347343 | **368913** | **18445**† | **7936** | **8359**‡ | 338772 |
+| ntex | 347122 | 345236 | 10726 | 4825 | 5799 | **349872** |
+| laytan | 319643 | 318491 | 7550 | 2866 | 2363 | 259190 |
+| drogon§ | 288236 | 291240 | 2843 | 1448 | 839 | 291243 |
 
-† epoll + oha size untrusted on large routes.
+† `multi_send` — do not rank vs peer preconcat  
+‡ `file_chunked` — do not rank vs peer `file_read_full`  
+§ epoll
 
-## Mechanism-split views (do not cross-rank)
+## Mechanism-split ranks (only same mechanism)
 
-### A. Framing / tiny work (`materialize_copy` / static 13 B)
+### Framing (13 B / 42 B CL)
 
 | peer | tiny | gen | sse |
 |------|-----:|----:|----:|
-| proactr-mat | 350k | 374k | 359k |
-| proactr-opt | 360k | 359k | 344k |
-| ntex | 358k | 360k | 346k |
-| laytan | 324k | 324k | 275k |
-| drogon | 290k | 290k | 292k |
+| proactr-mat | **370k** | **366k** | 347k |
+| proactr-opt | 347k | **369k** | 339k |
+| ntex | 347k | 345k | **350k** |
+| laytan | 320k | 318k | 259k |
+| drogon | 288k | 291k | 291k |
 
-### B. Preconcat large static (`preconcat_blob` / single buffer)
+### Preconcat large static
 
-| peer | assembled (512 KiB) | blob (1 MiB) |
-|------|--------------------:|-------------:|
-| proactr-mat | 13157 | 6313 |
-| ntex | 11953 | 5536 |
-| laytan | 5502 | 2301 |
-| drogon† | 2847 | 1471 |
+| peer | assembled 512 KiB | blob 1 MiB |
+|------|------------------:|-----------:|
+| proactr-mat | **14204** | **6045** |
+| ntex | 10726 | 4825 |
+| laytan | 7550 | 2866 |
+| drogon | 2843 | 1448 |
 
-**proactr-opt assembled (16904) is multi_send — not in this table.**
+### File
 
-### C. File paths (split)
+| peer | mechanism | RPS |
+|------|-----------|----:|
+| proactr-opt | file_chunked | **8359** |
+| ntex | file_read_full | 5799 |
+| proactr-mat | file_read_full | 4871 |
+| laytan | file_read_full | 2363 |
+| drogon | file_read_full | 839 |
 
-| peer | mechanism | file RPS |
-|------|-----------|---------:|
-| proactr-mat | file_read_full | 4814 |
-| ntex | file_read_full | 6094 |
-| laytan | file_read_full | 1930 |
-| drogon† | file_read_full | 825 |
-| proactr-opt | **file_chunked** | **7453** |
+### proactr mat vs opt (informational)
 
-### D. proactr mat vs opt (same host, different mechanism)
+| route | mat | opt | mechanisms |
+|-------|----:|----:|------------|
+| assembled | 14204 | 18445 | preconcat vs multi_send |
+| file | 4871 | 8359 | read_full vs chunked |
+| tiny | 370k | 347k | both materialize-class |
 
-| route | mat | opt | note |
-|-------|----:|----:|------|
-| assembled | 13157 preconcat | 16904 multi_send | different mechanism |
-| file | 4814 read_full | 7453 chunked | different mechanism |
-| tiny/gen/blob/sse | similar | similar | both materialize-class |
+## Allowed claims
 
-## What this matrix is allowed to claim
-
-- Five body profiles with **peer-shared contracts** (length + content + file=disk).  
-- Dual proactr modes.  
-- Honest mechanism labels (multi_send ≠ writev; chunked ≠ sendfile).  
+- Peer-shared body contracts (content + file=disk + post-load re-check).  
+- Dual proactr modes with honest multi_send / file_chunked labels.  
 - Competitive framing vs ntex on tiny/gen/sse.  
-- Preconcat large-body ceiling vs ntex/laytan/drogon.
+- Preconcat large-body ceiling: proactr-mat > ntex ≫ laytan ≫ drogon.  
+- Wire counter name: `plan_wire_multi_send_total` (not writev).
 
-## What it still must not claim
+## Forbidden claims
 
-- Kernel writev or sendfile parity with ntex.  
-- Peer multi-iovec contest (peers preconcat).  
-- Long-lived SSE ranking.  
-- Fortunes / DB framework ranking.
+- Kernel writev or sendfile.  
+- Peer multi-iov assembled contest.  
+- Long-lived SSE.  
+- Fortunes as framework RPS.
 
 ## Reproduce
 
@@ -91,5 +91,5 @@
 ssh ranch-bastion.local
 cd ~/Projects/proactr-odin
 WORKERS=8 BENCH_C=100 BENCH_Z=15s FORCE_REBUILD=1 \
-  LOGDIR=/tmp/profile-matrix-run ./comparisons/tfb/run_profile_matrix.sh
+  LOGDIR=/tmp/profile-matrix-v2 ./comparisons/tfb/run_profile_matrix.sh
 ```
