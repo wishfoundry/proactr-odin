@@ -202,6 +202,8 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.socket = {}
 	c.state = .Pending
 	c.pending_send = nil
+	c.exec_i = 0
+	c.exec_n = 0
 	c.close_pending = false
 	c.close_on_io = false
 	c.fixed_idx = -1
@@ -227,6 +229,8 @@ connection_destroy :: proc(c: ^Connection) {
 	}
 	c.socket = {}
 	c.pending_send = nil
+	c.exec_i = 0
+	c.exec_n = 0
 	c.close_pending = false
 	c.close_on_io = false
 	// Capture any growth from the last Response binding; keep capacity on free list.

@@ -467,3 +467,104 @@ test_body_middleware_apply_in_place :: proc(t: ^testing.T) {
 	// nil mw leaves length alone.
 	testing.expect_value(t, body_middleware_apply(nil, nil, buf[:1]), 1)
 }
+
+// --- Phase 3: multi-buffer exec queue advance + Writev wire policy ------------
+
+@(test)
+test_exec_queue_after_send_partial :: proc(t: ^testing.T) {
+	// Partial send stays on the same buffer / index.
+	a := [4]u8{1, 2, 3, 4}
+	b := [2]u8{5, 6}
+	bufs := [][]u8{a[:], b[:]}
+	pending := bufs[0]
+	new_p, new_i, finished := exec_queue_after_send(bufs, 0, 2, pending, 2)
+	testing.expect(t, !finished)
+	testing.expect_value(t, new_i, 0)
+	testing.expect_value(t, len(new_p), 2)
+	testing.expect_value(t, new_p[0], u8(3))
+	testing.expect_value(t, new_p[1], u8(4))
+}
+
+@(test)
+test_exec_queue_after_send_advance_and_finish :: proc(t: ^testing.T) {
+	a := [3]u8{1, 2, 3}
+	b := [2]u8{4, 5}
+	c := [1]u8{6}
+	bufs := [][]u8{a[:], b[:], c[:]}
+
+	// Full first buffer → move to second.
+	p1, i1, f1 := exec_queue_after_send(bufs, 0, 3, bufs[0], len(bufs[0]))
+	testing.expect(t, !f1)
+	testing.expect_value(t, i1, 1)
+	testing.expect_value(t, len(p1), 2)
+	testing.expect_value(t, p1[0], u8(4))
+
+	// Full second → third.
+	p2, i2, f2 := exec_queue_after_send(bufs, i1, 3, p1, len(p1))
+	testing.expect(t, !f2)
+	testing.expect_value(t, i2, 2)
+	testing.expect_value(t, len(p2), 1)
+	testing.expect_value(t, p2[0], u8(6))
+
+	// Full last → finished.
+	p3, i3, f3 := exec_queue_after_send(bufs, i2, 3, p2, len(p2))
+	testing.expect(t, f3)
+	testing.expect_value(t, i3, 3)
+	testing.expect(t, p3 == nil)
+}
+
+@(test)
+test_exec_queue_single_buffer_finish :: proc(t: ^testing.T) {
+	// exec_n == 0 or single buffer full → finished (matches materialize host path using exec_n=0).
+	a := [4]u8{1, 2, 3, 4}
+	bufs := [][]u8{a[:]}
+	_, _, f := exec_queue_after_send(bufs, 0, 1, a[:], 4)
+	testing.expect(t, f)
+
+	// exec_n == 0: treat as finished after full send of pending.
+	_, _, f0 := exec_queue_after_send(bufs, 0, 0, a[:], 4)
+	testing.expect(t, f0)
+}
+
+@(test)
+test_plan_is_writev_wire_gate :: proc(t: ^testing.T) {
+	// Multi large static → Writev and wire-eligible.
+	ctx := plan_context_default()
+	ctx.preferred_copy_budget = 0
+	ctx.max_iovecs = 64
+	cmds := []Response_Cmd {
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+	}
+	r := plan_body(cmds, ctx)
+	testing.expect(t, _plan_is_writev_wire(r))
+	testing.expect_value(t, r.ops[0].iov_count, u16(3))
+
+	// Materialize plan is not wire Writev.
+	m := plan_body_materialize_only(cmds)
+	testing.expect(t, !_plan_is_writev_wire(m))
+
+	// Sendfile plan is not Phase-3 wire Writev (falls back to materialize).
+	ctx2 := plan_context_default()
+	ctx2.sendfile_ok = true
+	ctx2.tls = false
+	sf := plan_body([]Response_Cmd{cmd_file(1, 0, 100)}, ctx2)
+	testing.expect(t, !_plan_is_writev_wire(sf))
+}
+
+@(test)
+test_cmds_mem_body_len :: proc(t: ^testing.T) {
+	n, ok := _cmds_mem_body_len([]Response_Cmd {
+		cmd_static(_small_a[:]),
+		cmd_bytes(_small_b[:], true),
+	})
+	testing.expect(t, ok)
+	testing.expect_value(t, n, len(_small_a) + len(_small_b))
+
+	_, ok2 := _cmds_mem_body_len([]Response_Cmd {
+		cmd_static(_small_a[:]),
+		cmd_file(1, 0, 10),
+	})
+	testing.expect(t, !ok2)
+}

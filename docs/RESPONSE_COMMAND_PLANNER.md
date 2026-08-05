@@ -1,7 +1,7 @@
 # Experiment: Response as Command Buffer + Transport Planner
 
 **Branch:** `exp/response-command-planner`  
-**Status:** Phase 2 wired (Plan_Context fill, profiles, body middleware hook); Phase 3–5 open  
+**Status:** Phase 3 wired (multi-buffer Writev-style send); Phase 4–5 open  
 
 **Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
 
@@ -286,11 +286,13 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 ### Phase 3 — Multi-Static gather (first real optimization)
 
-- [ ] Planner: multiple `Static`/`Bytes` with known lengths → prefer `Writev` when `!tls` and over copy budget and within `max_iovecs`
-- [ ] `host_submit_sendv` (or temporary glue: only enable Writev when backend ready; else fall back to copy)
-- [ ] Partial-send / multi-op executor if Writev is one SQE with multi-buffer
+- [x] Planner: multiple `Static`/`Bytes` with known lengths → prefer `Writev` when `!tls` and over copy budget and within `max_iovecs` (policy already in `plan_body`)
+- [x] Wire: pure Writev → multi-buffer sequential `submit_send` queue (`exec_bufs` / `exec_i` / `exec_n`) without requiring kernel writev; `Server_Opts.plan_optimize` (default false) or `prefer_gather`
+- [x] Partial-send advances within current buffer; full buffer advances `exec_i`; final CQE → `clean_request_loop` (no temp reset earlier)
+- [x] Sendfile / Copy_Into on plan → **materialize fallback** (Phase 4)
+- [x] Wire metrics: `plan_wire_writev_total` / `plan_wire_materialize_total`
 
-**Exit:** benchmark or micro-test shows gather path used when expected; fallback remains correct.
+**Exit:** unit tests + plan harness wire counters show gather when expected; fallback remains correct. ✅
 
 ### Phase 4 — File bodies
 
@@ -342,7 +344,7 @@ Use this when reviewing experimental PRs/commits:
 ### Structural success
 
 - [x] Clear types for intent (`Response_Cmd`) vs execution (`Exec_Op`)
-- [ ] Planner is the only place that chooses copy vs gather vs sendfile *(policy in `plan_body`; wire still materialize-only until Phase 3–4)*
+- [x] Planner is the only place that chooses copy vs gather vs sendfile *(wire executes Writev multi-buffer; Sendfile still materialize until Phase 4)*
 - [x] At least one middleware-shaped transform exists as cmd rewrite
 - [x] Streaming is either out of scope with a written reason, or a separate API
 
@@ -415,6 +417,11 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Body middleware on Response (`_body_mw`), not global Server hook | Per-request; cleared in `response_init`; toy `body_mw_drop_empty_static` only |
 | 2026-08-05 | Body middleware must rewrite in place (same `raw_data`); no post-return host copy | External/stack returns would be UAF; `body_middleware_apply` asserts contract |
 | 2026-08-05 | `response_plan_preview` applies middleware on a cmd snapshot (no Response mutate) | Matches send intent without double-apply at wire |
+| 2026-08-05 | Phase 3: Writev on wire as multi-buffer sequential sends (not kernel writev yet) | Correctness + partial-send reuse; proactr `submit_send` only; no new SQE kind |
+| 2026-08-05 | `Server_Opts.plan_optimize` default false; also enable when `prefer_gather` | No surprise for zero-profile apps; harness sets plan_optimize for PLAN_MODE=optimize |
+| 2026-08-05 | Sendfile/Copy_Into plan → materialize on wire in Phase 3 | Defer kernel sendfile to Phase 4; keep single fallback path |
+| 2026-08-05 | `Connection.exec_bufs[PLAN_MAX_BODY_CMDS+1]` + `exec_i`/`exec_n` | Fixed POD queue; heading in resp_buf, bodies borrowed until final CQE |
+| 2026-08-05 | Package atomics `plan_wire_writev_total` / `plan_wire_materialize_total` | Harness `/metrics` proves real wire path vs shadow policy |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 
@@ -425,11 +432,11 @@ Track answers here as the experiment proceeds.
 | File | Role |
 |------|------|
 | `docs/RESPONSE_COMMAND_PLANNER.md` | This plan |
-| `http/plan.odin` | Types + pure `plan_body` (optimize policy) + `plan_body_materialize_only` |
-| `http/plan_test.odin` | Table tests: cmds + context → exec op sequence |
-| `http/response.odin` | Phase 1: emit cmds from body helpers; call planner from send path |
-| `http/server.odin` | Phase 2+: executor hooks if multi-op; `Plan_Context` fill |
-| `proactr/*` | Only when Phase 3+ needs sendv/sendfile submit |
+| `http/plan.odin` | Types + pure `plan_body` (optimize policy) + `plan_body_materialize_only` + wire counters |
+| `http/plan_test.odin` | Table tests: cmds + context → exec op sequence; multi-op advance |
+| `http/response.odin` | Emit cmds; plan+execute (materialize or Writev multi-buffer) |
+| `http/server.odin` | Multi-buffer executor in `host_on_send`; `plan_optimize` opt |
+| `proactr/*` | Phase 4+: sendfile / true writev submit if needed |
 
 ---
 

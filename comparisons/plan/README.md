@@ -11,22 +11,25 @@ before (and after) the executor is wired.
 
 Design north star: [`docs/RESPONSE_COMMAND_PLANNER.md`](../../docs/RESPONSE_COMMAND_PLANNER.md).
 
-## What this proves today (Phase 0)
+## What this proves today (Phase 3)
 
-The demo server still **sends** with the existing single-buffer path (`body_set` /
-`respond_file` / `body_reserve`). On every request it also builds `Response_Cmd`s,
-runs **shadow** `plan_body` / `plan_body_materialize_only`, and records counters
-on `/metrics`.
+- **Shadow** counters (`plan_writev_total`, …): pure `plan_body` policy per route
+- **Wire** counters (`plan_wire_writev_total`, `plan_wire_materialize_total`): what
+  the host executor actually did (`Server_Opts.plan_optimize` + route profiles)
 
-So A/B can already show:
+| Mode | Wire behavior |
+|------|----------------|
+| `PLAN_MODE=materialize` | `plan_optimize=false`; multi-static routes still **materialize** (copy into `resp_buf`) |
+| `PLAN_MODE=optimize` | `plan_optimize=true`; assembled uses multi `body_static` + `prefer_gather` → **multi-buffer Writev-style** sequential sends (heading + 8 slices) |
 
-- `PLAN_MODE=materialize` → almost all body routes → `plan_materialize_total`
-- `PLAN_MODE=optimize` → assembled → `plan_writev_total`, file → `plan_sendfile_total`
+Sendfile remains shadow-only until Phase 4 (`/file/1m` wire still preloaded bytes).
+
+So A/B shows:
+
+- materialize → shadow + wire materialize; `plan_wire_writev_total == 0`
+- optimize → assembled → shadow `plan_writev` **and** `plan_wire_writev`
 - tiny/gen stay materialize under optimize (profile bias)
 - SSE never increments writev/sendfile (`stream_responses_total` only)
-
-When Phase 3–4 wire Writev/Sendfile, the same harness measures **RPS/CPU** wins
-on top of these counters.
 
 ## Routes (profiles)
 
@@ -104,7 +107,8 @@ Hard fails (script non-zero) when:
 | optimize after `iso_file` | `plan_sendfile_total == 0` |
 | either | loadgen non-2xx errors, or server died |
 
-RPS/p99 are **informational** until Phase 3+ (wire still materializes).
+RPS/p99: Phase 3 wire Writev may show wins on `iso_assembled` / large multi-static;
+Sendfile wire still Phase 4.
 
 ### Summary table
 
@@ -113,9 +117,10 @@ mode A vs B per scenario.
 
 ## Interpreting results
 
-- **Counters diverge, RPS flat** (Phase 0–1): expected. Policy works; executor not using Writev/Sendfile yet.
-- **Counters diverge, RPS/CPU improve** (Phase 3–4): meaningful per-handler optimize.
-- **optimize assembled still materialize**: check `PLAN_COPY_BUDGET`, slice count, profile `prefer_gather`.
+- **Shadow writev, wire materialize**: optimize off or profile missing `prefer_gather`.
+- **Shadow + wire writev on assembled (Phase 3)**: multi-buffer path is live.
+- **Wire writev under materialize mode**: bug (profile/optimize gate).
+- **optimize assembled still materialize**: check `PLAN_COPY_BUDGET`, slice count, profile `prefer_gather`, `plan_optimize`.
 - **tiny gains writev under optimize**: profile bug (tiny should force materialize).
 
 ## Layout

@@ -161,9 +161,9 @@ plan_context :: proc(r: ^Response) -> Plan_Context {
 	return plan_context_apply_profile(plan_context_for(conn), profile)
 }
 
-// Optimize-policy plan for tests/handlers (does not change the wire path).
+// Optimize-policy plan for tests/handlers (shadow of what plan_optimize wire would choose).
 // Applies body middleware to a *snapshot* of cmds (does not mutate Response; send applies once).
-// Wire send still plan_body_materialize_only (Phase 1–2).
+// Wire path uses plan_body when plan_optimize / prefer_gather; otherwise materialize-only.
 response_plan_preview :: proc(r: ^Response) -> Plan_Result {
 	if r == nil {
 		return plan_body({}, plan_context(r))
@@ -241,8 +241,9 @@ body_set_str :: proc(r: ^Response, str: string, loc := #caller_location) {
 Sets the response body to a single Static command (exclusive; second call asserts).
 
 Unlike the pre-Phase-1 path, this does **not** freeze headers: you may still add headers
-or change status until respond. Heading + body are materialised at send time into the
-single-buffer Write_Slice path (plan_body_materialize_only).
+or change status until respond. At send time the planner materialises into one buffer
+by default; with plan_optimize / prefer_gather a pure Writev plan may multi-buffer send
+(heading + borrowed body) without copying the body into resp_buf.
 
 Multi-part bodies: body_static / body_bytes / body_file (append).
 For in-place fixed-CL bodies use body_reserve / body_commit.
@@ -682,7 +683,167 @@ _response_strip_body_keep_heading :: proc(r: ^Response) {
 	// Malformed / empty: leave buffer alone rather than invent a strip point.
 }
 
-// Phase 1: plan_body_materialize_only + copy cmds into _buf as one Write_Slice payload.
+// True when wire send may use plan_body (Writev multi-buffer) instead of materialize-only.
+// Safe default false: Server_Opts.plan_optimize opt-in, or per-request prefer_gather.
+@(private)
+_response_wire_use_optimize :: proc(r: ^Response) -> bool {
+	if r == nil {
+		return false
+	}
+	if r._profile.prefer_gather {
+		return true
+	}
+	if r._conn != nil && r._conn.server != nil && r._conn.server.opts.plan_optimize {
+		return true
+	}
+	return false
+}
+
+// Phase 3: plan is a pure Writev (memory bodies only) that the multi-buffer executor can run.
+// Sendfile / Copy_Into / multi-op / unknown → false (caller materializes).
+@(private)
+_plan_is_writev_wire :: proc(plan: Plan_Result) -> bool {
+	if plan.materialized || plan.op_count != 1 {
+		return false
+	}
+	if plan.ops[0].kind != .Writev {
+		return false
+	}
+	// Body iovecs must fit Connection.exec_bufs (heading + bodies).
+	if int(plan.ops[0].iov_count) + 1 > PLAN_MAX_EXEC_BUFS {
+		return false
+	}
+	return true
+}
+
+// Sum known Static/Bytes lengths; false if any File or unknown length.
+@(private)
+_cmds_mem_body_len :: proc(cmds: []Response_Cmd) -> (body_len: int, ok: bool) {
+	body_len = 0
+	for c in cmds {
+		switch c.kind {
+		case .Static, .Bytes:
+			n := len(c.bytes)
+			if i64(body_len) + i64(n) > i64(max(int)) {
+				return 0, false
+			}
+			body_len += n
+		case .File:
+			return 0, false
+		}
+	}
+	return body_len, true
+}
+
+// Phase 3 Writev-style wire: heading in resp_buf; body slices borrowed from cmds.
+// Builds conn.exec_bufs = [heading, body1, …] and submits the first send.
+// Returns true if the send was submitted (or cleaned for empty). Caller must not
+// also materialize. On false, heading was not written — caller may materialize.
+@(private)
+_response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
+	assert(!r._heading_written)
+	assert(len(cmds) > 0)
+	conn := r._conn
+	assert(conn != nil)
+
+	body_len, ok := _cmds_mem_body_len(cmds)
+	if !ok {
+		return false
+	}
+
+	// Count non-empty body slices for the queue (empty Static is a no-op on the wire).
+	n_body := 0
+	for c in cmds {
+		if (c.kind == .Static || c.kind == .Bytes) && len(c.bytes) > 0 {
+			n_body += 1
+		}
+	}
+	// heading + bodies must fit fixed exec_bufs.
+	if 1 + n_body > PLAN_MAX_EXEC_BUFS {
+		return false
+	}
+
+	t0_build: u64
+	when HTTP_PHASE_STATS {
+		t0_build = phase_now()
+	}
+
+	_response_write_heading(r, body_len)
+
+	// HEAD: headers + Content-Length only; do not queue body slices (RFC 9110 §9.3.2).
+	if _response_is_head(conn) {
+		when HTTP_PHASE_STATS {
+			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+		}
+		// Fall through to single-buffer send of heading only (exec_n stays 0).
+		conn.resp_buf = r._buf.buf
+		buf := bytes.buffer_to_bytes(&r._buf)
+		if len(buf) == 0 {
+			plan_wire_inc_writev()
+			clean_request_loop(conn)
+			return true
+		}
+		conn.exec_n = 0
+		conn.pending_send = buf
+		plan_wire_inc_writev()
+		if err := host_submit_send(conn); err != .None {
+			log.errorf("submit_send failed: %v", err)
+			conn.pending_send = nil
+			connection_close(conn)
+		}
+		return true
+	}
+
+	conn.resp_buf = r._buf.buf
+	heading := bytes.buffer_to_bytes(&r._buf)
+
+	// Build multi-buffer queue: [heading, body…]
+	conn.exec_bufs[0] = heading
+	bi := 1
+	for c in cmds {
+		#partial switch c.kind {
+		case .Static, .Bytes:
+			if len(c.bytes) == 0 {
+				continue
+			}
+			// Borrowed for response lifetime; valid until final send CQE.
+			conn.exec_bufs[bi] = c.bytes
+			bi += 1
+		}
+	}
+	conn.exec_n = bi
+	conn.exec_i = 0
+
+	// Skip leading empty buffers (heading should never be empty after write).
+	for conn.exec_i < conn.exec_n && len(conn.exec_bufs[conn.exec_i]) == 0 {
+		conn.exec_i += 1
+	}
+	if conn.exec_i >= conn.exec_n {
+		_conn_clear_exec(conn)
+		plan_wire_inc_writev()
+		clean_request_loop(conn)
+		when HTTP_PHASE_STATS {
+			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+		}
+		return true
+	}
+
+	conn.pending_send = conn.exec_bufs[conn.exec_i]
+	plan_wire_inc_writev()
+
+	when HTTP_PHASE_STATS {
+		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+	}
+
+	if err := host_submit_send(conn); err != .None {
+		log.errorf("submit_send (writev queue) failed: %v", err)
+		_conn_clear_exec(conn)
+		connection_close(conn)
+	}
+	return true
+}
+
+// Materialize cmds into _buf as one Write_Slice payload (Phase 1–3 fallback).
 // Not used when body_reserve / response_writer already wrote the heading into _buf.
 @(private)
 _response_materialize_cmds :: proc(r: ^Response) {
@@ -693,16 +854,16 @@ _response_materialize_cmds :: proc(r: ^Response) {
 	plan := plan_body_materialize_only(cmds)
 	assert(plan.materialized && plan.op_count == 1 && plan.ops[0].kind == .Write_Slice)
 
-	// Content-Length: sum of known lengths. Phase 1 requires known body size.
+	// Content-Length: sum of known lengths. Materialize requires known body size.
 	// Validate *before* writing the heading so a bad File.length cannot emit a wrong CL
 	// and then assert mid-materialize (or worse under -disable-assert).
 	body_len: int
-	assert(plan.total_body >= 0, "Phase 1 materialize requires known body length (set File.length)")
+	assert(plan.total_body >= 0, "materialize requires known body length (set File.length)")
 	// Prefer recompute from cmds so a planner bug cannot poison CL.
 	body_len = 0
 	for c in cmds {
 		n, ok := cmd_known_length(c)
-		assert(ok, "Phase 1 materialize requires known body length (set File.length)")
+		assert(ok, "materialize requires known body length (set File.length)")
 		assert(n >= 0)
 		// Overflow guard: body must fit in int (buffer length).
 		assert(i64(body_len) + n <= i64(max(int)))
@@ -806,18 +967,35 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if !connection_set_state(r._conn, .Will_Close) { return }
 	}
 
-	// Wire assembly (Phase 1–2):
-	//  1) Heading already written (body_reserve after commit, or chunked writer) → send buffer as-is.
-	//  2) Body cmds present → optional middleware rewrite → materialize-only into heading + body.
+	// Wire assembly (Phase 3):
+	//  1) Heading already written (body_reserve / chunked) → single-buffer send as-is.
+	//  2) Body cmds → middleware → plan (optimize when plan_optimize|prefer_gather):
+	//       pure Writev → multi-buffer sequential sends (heading + borrowed slices)
+	//       else        → materialize into resp_buf + one Write_Slice
 	//  3) Empty buffer, no cmds → heading with Content-Length 0.
-	//  4) Buffer has content without heading_written is unexpected; treat as ready-to-send.
-	// Optimize plan (Writev/Sendfile) is not on the wire yet; use response_plan_preview.
+	// Sendfile/Copy_Into still materialize (Phase 4). HEAD: headers only.
 	if !r._heading_written {
 		if r._cmd_count > 0 {
 			_response_apply_body_middleware(r)
 		}
 		if r._cmd_count > 0 {
+			cmds := r._cmds[:r._cmd_count]
+			used_writev := false
+			if _response_wire_use_optimize(r) {
+				plan := plan_body(cmds, plan_context(r))
+				if _plan_is_writev_wire(plan) {
+					// Multi-buffer path submits itself (or clean_request_loop).
+					if _response_send_writev(r, cmds) {
+						used_writev = true
+					}
+					// false → heading not written; fall through to materialize
+				}
+			}
+			if used_writev {
+				return
+			}
 			_response_materialize_cmds(r)
+			plan_wire_inc_materialize()
 		} else if bytes.buffer_length(&r._buf) == 0 {
 			_response_write_heading(r, 0)
 		}
@@ -826,10 +1004,12 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		_response_strip_body_keep_heading(r)
 	}
 
-	// Build the full response buffer, then submit_send. Do NOT reset scrap arena
-	// or drop resp_buf while pending_send still points at response bytes
-	// (host_on_send clears pending_send before clean_request_loop).
+	// Single-buffer path: full response in resp_buf, one pending_send.
+	// Do NOT reset scrap arena or drop resp_buf while pending_send still points
+	// at response bytes (host_on_send clears pending_send before clean_request_loop).
 	// Sync growth: r._buf.buf is a header copy that may reallocate on write.
+	conn.exec_n = 0
+	conn.exec_i = 0
 	conn.resp_buf = r._buf.buf
 	buf := bytes.buffer_to_bytes(&r._buf)
 	if len(buf) == 0 {
@@ -848,7 +1028,7 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 }
 
 // Response has been sent, clean up and close/handle next.
-// Invariant: pending_send is already nil (host_on_send clears it before clean).
+// Invariant: pending_send / exec queue already cleared (host_on_send or writev path).
 @(private)
 clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	t0_reset: u64
@@ -857,7 +1037,13 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	}
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
+	// Ensure multi-buffer queue is inactive before reusing conn for next request.
+	conn.exec_i = 0
+	conn.exec_n = 0
+	conn.pending_send = nil
+
 	// Request scrap only (bump reset). Response lives in conn.resp_buf.
+	// Safe: no pending_send / exec_bufs still referencing scrap or Static bodies.
 	conn_temp_reset(conn)
 	when HTTP_PHASE_STATS {
 		phase_add(0, 0, 0, 0, 0, 0, phase_now() - t0_reset)

@@ -1,8 +1,11 @@
-// Planner A/B demo server — body-archetype routes + shadow plan counters.
+// Planner A/B demo server — body-archetype routes + plan counters.
 //
-// Wire path still uses today's body_set/respond_* (Phase 0/1). Each handler
-// builds Response_Cmd intent, runs plan_body (or materialize_only), and records
-// Exec_Op kinds. That lets the harness prove *policy* A/B before executor wiring.
+// Phase 3: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
+// the real wire path can multi-buffer send (Writev-style) for multi-static routes
+// (e.g. /static/assembled). Sendfile still shadow-only until Phase 4.
+//
+// Shadow plan_body counters remain for policy checks; http.plan_wire_* counters
+// show what the executor actually chose on the wire.
 //
 // Env:
 //   PORT              listen port (default 19090)
@@ -171,6 +174,8 @@ on_tiny :: proc(req: ^http.Request, res: ^http.Response) {
 	cmds := []http.Response_Cmd{http.cmd_static(body)}
 	run_shadow_plan(cmds, PROFILE_TINY)
 
+	// prefer_materialize: even under plan_optimize, keep single-buffer path.
+	http.response_set_profile(res, http.Handler_Profile{prefer_materialize = true})
 	http.headers_set(&res.headers, "server", "proactr-plan")
 	http.headers_set(&res.headers, "x-plan-profile", "tiny")
 	http.respond_plain(res, "Hello, World!")
@@ -200,10 +205,23 @@ on_assembled :: proc(req: ^http.Request, res: ^http.Response) {
 	}
 	run_shadow_plan(cmds[:], PROFILE_ASSEMBLED)
 
+	// Multi Static cmds always (proves multi-cmd path). prefer_gather only in
+	// optimize mode so materialize A/B does not enable wire Writev via profile.
+	if g_mode == .Optimize {
+		http.response_set_profile(
+			res,
+			http.Handler_Profile{prefer_gather = true, copy_budget = 0},
+		)
+	}
 	http.headers_set(&res.headers, "server", "proactr-plan")
 	http.headers_set(&res.headers, "x-plan-profile", "assembled")
 	http.headers_set(&res.headers, "x-plan-slices", "8")
-	http.respond_plain(res, transmute(string)g_assembled_flat)
+	http.headers_set_content_type(&res.headers, "text/plain")
+	res.status = .OK
+	for i in 0 ..< SLICE_N {
+		http.body_static(res, g_slices[i])
+	}
+	http.respond(res)
 }
 
 on_blob :: proc(req: ^http.Request, res: ^http.Response) {
@@ -211,6 +229,13 @@ on_blob :: proc(req: ^http.Request, res: ^http.Response) {
 	cmds := []http.Response_Cmd{http.cmd_static(g_blob_1m)}
 	run_shadow_plan(cmds, PROFILE_BLOB)
 
+	// Single large Static: optimize may Writev(heading+body) to avoid copy.
+	if g_mode == .Optimize {
+		http.response_set_profile(
+			res,
+			http.Handler_Profile{prefer_gather = true, copy_budget = 0},
+		)
+	}
 	http.headers_set(&res.headers, "server", "proactr-plan")
 	http.headers_set(&res.headers, "x-plan-profile", "blob")
 	http.respond_plain(res, transmute(string)g_blob_1m)
@@ -249,6 +274,8 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 
 	mode_s := g_mode == .Optimize ? "optimize" : "materialize"
 	fmt.sbprintf(&b, "# proactr plan A/B metrics\n")
+	wire_writev, wire_mat := http.plan_wire_load()
+
 	fmt.sbprintf(&b, "plan_mode %s\n", mode_s)
 	fmt.sbprintf(&b, "plan_sendfile_ok %v\n", g_sendfile_ok)
 	fmt.sbprintf(&b, "plan_copy_budget %d\n", g_copy_budget)
@@ -261,6 +288,9 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	fmt.sbprintf(&b, "plan_patch_cl_total %d\n", sync.atomic_load(&g_m.plan_patch_cl))
 	fmt.sbprintf(&b, "plan_flush_total %d\n", sync.atomic_load(&g_m.plan_flush))
 	fmt.sbprintf(&b, "plan_other_total %d\n", sync.atomic_load(&g_m.plan_other))
+	// Phase 3 real wire executor counters (package http).
+	fmt.sbprintf(&b, "plan_wire_writev_total %d\n", wire_writev)
+	fmt.sbprintf(&b, "plan_wire_materialize_total %d\n", wire_mat)
 	fmt.sbprintf(&b, "stream_responses_total %d\n", sync.atomic_load(&g_m.stream_responses))
 	fmt.sbprintf(&b, "route_hits{route=\"tiny\"} %d\n", sync.atomic_load(&g_m.hit_tiny))
 	fmt.sbprintf(&b, "route_hits{route=\"gen\"} %d\n", sync.atomic_load(&g_m.hit_gen))
@@ -402,13 +432,20 @@ main :: proc() {
 	http.server_shutdown_on_interrupt(&s)
 	opts := http.Default_Server_Opts
 	opts.thread_count = workers
+	// Phase 3: optimize mode enables real multi-buffer Writev-style wire path.
+	// Profiles on routes further bias plan_body (prefer_gather / prefer_materialize).
+	opts.plan_optimize = g_mode == .Optimize
+	opts.plan_copy_budget = g_copy_budget
+	opts.plan_max_iovecs = g_max_iovecs
+	opts.plan_sendfile_ok = g_sendfile_ok
 
 	mode_s := g_mode == .Optimize ? "optimize" : "materialize"
 	log.infof(
-		"proactr plan bench :%d workers=%d PLAN_MODE=%s sendfile_ok=%v copy_budget=%d max_iovecs=%d file=%s",
+		"proactr plan bench :%d workers=%d PLAN_MODE=%s plan_optimize=%v sendfile_ok=%v copy_budget=%d max_iovecs=%d file=%s",
 		port,
 		workers,
 		mode_s,
+		opts.plan_optimize,
 		g_sendfile_ok,
 		g_copy_budget,
 		g_max_iovecs,

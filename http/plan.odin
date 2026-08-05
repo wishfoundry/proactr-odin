@@ -3,18 +3,39 @@ package http
 /*
 Response command buffer + transport planner (experiment).
 
-Phase 1–2 wire: handlers emit Response_Cmd via body_* helpers; optional body
-middleware rewrites cmds; response_send still calls plan_body_materialize_only
-and copies heading+body into resp_buf for a single Write_Slice (pending_send).
-Optimize policy (Writev/Sendfile) is available via plan_body / response_plan_preview
-but not yet on the wire — see Phase 3–4.
+Phase 1–2: handlers emit Response_Cmd via body_* helpers; optional body middleware
+rewrites cmds; default wire path is plan_body_materialize_only → one Write_Slice.
+
+Phase 3 wire: when Server_Opts.plan_optimize or Handler_Profile.prefer_gather,
+response_send runs plan_body; pure Writev becomes a multi-buffer sequential send
+queue (heading + borrowed body slices) without requiring kernel writev.
+Sendfile / Copy_Into still fall back to materialize (Phase 4).
 
 See docs/RESPONSE_COMMAND_PLANNER.md.
 
 Intent (handlers / middleware)  →  Response_Cmd[]
 Policy (this file)              →  Plan_Result / Exec_Op[]
-Mechanism (executor / proactr)  →  syscalls  (wire: materialize only)
+Mechanism (executor / proactr)  →  multi-buffer send queue or single Write_Slice
 */
+
+import "core:sync"
+
+// Wire-path mechanism counters (Phase 3). Atomic; safe across workers.
+// Harness /metrics can load these to prove real wire Writev vs materialize.
+plan_wire_writev_total:      u64
+plan_wire_materialize_total: u64
+
+plan_wire_inc_writev :: #force_inline proc() {
+	sync.atomic_add(&plan_wire_writev_total, u64(1))
+}
+
+plan_wire_inc_materialize :: #force_inline proc() {
+	sync.atomic_add(&plan_wire_materialize_total, u64(1))
+}
+
+plan_wire_load :: proc() -> (writev: u64, materialize: u64) {
+	return sync.atomic_load(&plan_wire_writev_total), sync.atomic_load(&plan_wire_materialize_total)
+}
 
 // ---------------------------------------------------------------------------
 // Intent: body commands (POD)
@@ -513,7 +534,7 @@ plan_exec_kinds :: proc(cmds: []Response_Cmd, ctx: Plan_Context, out: []Exec_Op_
 	return n
 }
 
-// Force materialize-only plan (Phase 1 wire default used by response_send).
+// Force materialize-only plan (default wire path when plan_optimize is false).
 // Always one Write_Slice; ignores Writev/Sendfile optimize policy.
 plan_body_materialize_only :: proc(cmds: []Response_Cmd) -> Plan_Result {
 	r: Plan_Result

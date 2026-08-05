@@ -63,15 +63,21 @@ Server_Opts :: struct {
 	// Runs on the worker thread with thread-local host state set (safe to respond).
 	on_worker_tick:       proc(user: rawptr),
 	worker_tick_user:     rawptr,
-	// Plan_Context knobs (Phase 2+). Wire path still materialize-only; used by plan_context /
-	// response_plan_preview and later Writev/Sendfile executor phases.
+	// Plan_Context knobs (Phase 2+). Used by plan_context / response_plan_preview and the
+	// Phase 3 wire executor (Writev multi-buffer send when optimize is enabled).
 	// preferred_copy_budget: 0 → PLAN_DEFAULT_COPY_BUDGET (4096).
 	plan_copy_budget:     u32,
 	// max_iovecs gather budget: 0 → PLAN_DEFAULT_MAX_IOVECS (1024).
 	plan_max_iovecs:      u16,
 	// Allow sendfile in optimize plan when platform supports it (Linux/Darwin plain TCP).
 	// Default true in Default_Server_Opts. Ignored / false on non-posix platforms.
+	// Phase 3 wire still materializes File/Sendfile; Phase 4 executes sendfile.
 	plan_sendfile_ok:     bool,
+	// When true, response_send may run plan_body and execute pure Writev as multi-buffer
+	// sequential sends (heading + borrowed body slices). Default false: materialize-only
+	// (zero profile / no surprise). Harness sets true for PLAN_MODE=optimize.
+	// Also enabled per-request when Response profile has prefer_gather.
+	plan_optimize:        bool,
 }
 
 // Zero-valued sizing fields mean “use host product defaults” (resolved in listen).
@@ -95,6 +101,7 @@ Default_Server_Opts := Server_Opts {
 	plan_copy_budget     = 0, // → PLAN_DEFAULT_COPY_BUDGET at plan_context fill
 	plan_max_iovecs      = 0, // → PLAN_DEFAULT_MAX_IOVECS at plan_context fill
 	plan_sendfile_ok     = true,
+	plan_optimize        = false, // opt-in: multi-buffer Writev-style wire path
 }
 
 Server_State :: enum {
@@ -410,6 +417,14 @@ connection_set_state :: proc(c: ^Connection, s: Connection_State) -> bool {
 // Memory: resp_buf is permanent (conn_allocator) and holds response wire bytes across
 // keep-alive requests. temp_allocator is request scrap only (headers/parse) — bump reset
 // after each send completes; never free response memory while pending_send is non-nil.
+//
+// Phase 3 multi-buffer (Writev-style): when plan chooses Writev, exec_bufs[0..exec_n)
+// holds [heading_slice, body1, body2, …]. pending_send is the current buffer
+// (exec_bufs[exec_i] advanced on partial). Body slices are borrowed Static/Bytes and
+// must remain valid until the final CQE (no conn_temp_reset until then).
+// Max slots = PLAN_MAX_BODY_CMDS + 1 (heading).
+PLAN_MAX_EXEC_BUFS :: PLAN_MAX_BODY_CMDS + 1
+
 Connection :: struct {
 	server:         ^Server,
 	socket:         net.TCP_Socket,
@@ -423,8 +438,12 @@ Connection :: struct {
 	resp_buf:       [dynamic]u8,
 	loop:           Loop,
 	// Remaining response bytes for (possibly multi-CQE) send. Valid until send fully completes.
-	// Slices into resp_buf (or the Response binding of it).
+	// Slices into resp_buf (materialize) or exec_bufs[exec_i] (multi-buffer Writev path).
 	pending_send:   []u8,
+	// Multi-buffer send queue (Phase 3). exec_n == 0 → single-buffer / inactive.
+	exec_bufs:      [PLAN_MAX_EXEC_BUFS][]u8,
+	exec_i:         int,
+	exec_n:         int,
 	// True while a close SQE is outstanding.
 	close_pending:  bool,
 	// Set on shutdown for Idle/New conns that still have a pending Recv; close on that CQE.
@@ -717,7 +736,7 @@ host_dispatch :: proc(s: ^Server, op: ^proactr.Operation, c: proactr.Completion)
 		// Always account for the send CQE (clear buffer ownership). Dropping
 		// it after submit_close would UAF once the slab entry is recycled.
 		if conn.state >= .Closing {
-			conn.pending_send = nil
+			_conn_clear_exec(conn)
 			return
 		}
 		host_on_send(conn, op.result)
@@ -809,6 +828,8 @@ host_on_accept :: proc(s: ^Server, result: i32, cqe_flags: u32) {
 	c.close_pending = false
 	c.close_on_io = false
 	c.pending_send = nil
+	c.exec_i = 0
+	c.exec_n = 0
 	c.fixed_idx = -1
 	// reg_buf_index / scanner_pooled / temp_slot already set by conn_alloc.
 
@@ -857,13 +878,51 @@ host_on_recv :: proc(conn: ^Connection, result: i32) {
 	scanner_on_bytes(&conn.scanner, int(result), false)
 }
 
+// exec_queue_after_send advances multi-buffer send state after a successful CQE.
+// Pure helper for host_on_send and unit tests.
+//   - partial (n_sent < len(pending)): stay on exec_i, pending shrinks
+//   - full buffer: exec_i+1; if more buffers, next pending; else finished
+// Does not touch Connection; caller applies the result.
+@(private)
+exec_queue_after_send :: proc(
+	exec_bufs: [][]u8,
+	exec_i: int,
+	exec_n: int,
+	pending: []u8,
+	n_sent: int,
+) -> (
+	new_pending: []u8,
+	new_i: int,
+	finished: bool,
+) {
+	if n_sent < 0 {
+		return nil, exec_i, true
+	}
+	if n_sent < len(pending) {
+		return pending[n_sent:], exec_i, false
+	}
+	// Current buffer fully sent.
+	next := exec_i + 1
+	if next >= exec_n || exec_n <= 0 {
+		return nil, next, true
+	}
+	return exec_bufs[next], next, false
+}
+
+@(private)
+_conn_clear_exec :: proc(conn: ^Connection) {
+	conn.exec_i = 0
+	conn.exec_n = 0
+	conn.pending_send = nil
+}
+
 @(private)
 host_on_send :: proc(conn: ^Connection, result: i32) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Deferred close while a send SQE was outstanding: account for this CQE first.
 	if conn.close_on_io {
-		conn.pending_send = nil
+		_conn_clear_exec(conn)
 		conn.close_on_io = false
 		if conn.state < .Closing {
 			connection_close(conn)
@@ -873,12 +932,39 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 
 	if result < 0 {
 		log.errorf("send error fd=%v res=%d", conn.socket, result)
-		conn.pending_send = nil
+		_conn_clear_exec(conn)
 		connection_close(conn)
 		return
 	}
 
 	n := int(result)
+
+	// Multi-buffer Writev-style queue (Phase 3): advance within/across exec_bufs.
+	if conn.exec_n > 0 {
+		new_pending, new_i, finished := exec_queue_after_send(
+			conn.exec_bufs[:conn.exec_n],
+			conn.exec_i,
+			conn.exec_n,
+			conn.pending_send,
+			n,
+		)
+		if finished {
+			_conn_clear_exec(conn)
+			// Full multi-buffer response delivered; free request state only now.
+			clean_request_loop(conn)
+			return
+		}
+		conn.exec_i = new_i
+		conn.pending_send = new_pending
+		if err := host_submit_send(conn); err != .None {
+			log.errorf("submit_send (multi-op) failed: %v", err)
+			_conn_clear_exec(conn)
+			connection_close(conn)
+		}
+		return
+	}
+
+	// Single-buffer path (materialize / body_reserve / chunked).
 	if n < len(conn.pending_send) {
 		// Partial send — advance and resubmit. Buffer still owned until full send.
 		conn.pending_send = conn.pending_send[n:]
@@ -918,6 +1004,7 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 
 	// Invariant: at most one of {recv, send, close}. Never submit_close while
 	// a send SQE is outstanding — defer until host_on_send accounts for it.
+	// Multi-buffer: pending_send is set for the current buffer while SQE in flight.
 	if len(c.pending_send) > 0 {
 		log.debugf("connection %i close deferred (send in flight)", c.socket)
 		c.close_on_io = true
@@ -926,7 +1013,7 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 
 	log.debugf("closing connection: %i", c.socket)
 	c.state = .Closing
-	c.pending_send = nil
+	_conn_clear_exec(c)
 	c.close_on_io = false
 
 	if c.close_pending {
