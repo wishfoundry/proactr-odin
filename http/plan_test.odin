@@ -623,6 +623,18 @@ test_file_send_after_pread_math :: proc(t: ^testing.T) {
 	testing.expect_value(t, off2, i64(64))
 	testing.expect_value(t, rem2, i64(0))
 
+	// Short pread (got < want, got < remaining): progress, not error.
+	off3, rem3, ok3 := file_send_after_pread(0, 1000, 100)
+	testing.expect(t, ok3)
+	testing.expect_value(t, off3, i64(100))
+	testing.expect_value(t, rem3, i64(900))
+
+	// Short pread leaving a final partial region.
+	off4, rem4, ok4 := file_send_after_pread(900, 100, 40)
+	testing.expect(t, ok4)
+	testing.expect_value(t, off4, i64(940))
+	testing.expect_value(t, rem4, i64(60))
+
 	// Invalid: got 0, negative, or past remaining.
 	_, _, ok0 := file_send_after_pread(0, 10, 0)
 	testing.expect(t, !ok0)
@@ -632,6 +644,56 @@ test_file_send_after_pread_math :: proc(t: ^testing.T) {
 	testing.expect(t, !okx)
 	_, _, okr := file_send_after_pread(0, 0, 1)
 	testing.expect(t, !okr)
+}
+
+@(test)
+test_plan_mem_after_file_materializes :: proc(t: ^testing.T) {
+	// File then Static would be reordered by Writev+Sendfile (mem always before file).
+	// Policy must materialize to preserve cmd order on the wire.
+	ctx := plan_context_default()
+	ctx.sendfile_ok = true
+	ctx.tls = false
+	ctx.max_iovecs = 16
+	ctx.preferred_copy_budget = 0
+
+	// Prefix mem + file: optimize allowed.
+	prefix := []Response_Cmd {
+		cmd_static(_big_body[:]),
+		cmd_file(9, 0, 4096),
+	}
+	testing.expect(t, _plan_is_sendfile_wire(plan_body(prefix, ctx)))
+
+	// File then mem: must not Sendfile-wire.
+	suffix := []Response_Cmd {
+		cmd_file(9, 0, 4096),
+		cmd_static(_big_body[:]),
+	}
+	suf := plan_body(suffix, ctx)
+	testing.expect(t, suf.materialized)
+	testing.expect(t, !_plan_is_sendfile_wire(suf))
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	expect_kinds(t, kinds_of(suffix, ctx, buf[:]), { .Write_Slice })
+
+	// Interleaved: Static, File, Static → materialize.
+	inter := []Response_Cmd {
+		cmd_static(_small_a[:]),
+		cmd_file(9, 0, 10),
+		cmd_static(_small_b[:]),
+	}
+	ir := plan_body(inter, ctx)
+	testing.expect(t, ir.materialized)
+	testing.expect(t, !_plan_is_sendfile_wire(ir))
+
+	// Empty Static after File is harmless (no wire bytes) — still optimize.
+	empty: [0]u8
+	empty_after := []Response_Cmd {
+		cmd_file(9, 0, 100),
+		cmd_static(empty[:]),
+	}
+	// n_mem includes empty; mem_follows_file ignores empty → Writev+Sendfile.
+	ea := plan_body(empty_after, ctx)
+	testing.expect(t, !ea.materialized)
+	testing.expect(t, _plan_is_sendfile_wire(ea))
 }
 
 @(test)

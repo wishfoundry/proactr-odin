@@ -1205,6 +1205,9 @@ _response_materialize_file :: proc(r: ^Response, cmd: Response_Cmd) {
 				posix.off_t(off),
 			)
 			if got < 0 {
+				if posix.errno() == .EINTR {
+					continue
+				}
 				log.errorf("body_file materialize pread failed: %v", posix.errno())
 				assert(false, "file body pread failed during materialize")
 				return
@@ -1304,12 +1307,9 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Ensure multi-buffer / file-send queue is inactive before reusing conn.
-	conn.exec_i = 0
-	conn.exec_n = 0
-	conn.pending_send = nil
-	conn.file_send_fd = -1
-	conn.file_send_off = 0
-	conn.file_send_remaining = 0
+	// Must nil exec_bufs (not only exec_n) so keep-alive cannot retain dangling
+	// body/heading slice refs across temp reset / next request.
+	_conn_clear_exec(conn)
 
 	// Request scrap only (bump reset). Response lives in conn.resp_buf.
 	// Safe: no pending_send / exec_bufs still referencing scrap or Static bodies.

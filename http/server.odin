@@ -973,7 +973,9 @@ _conn_ensure_file_send_buf :: proc(conn: ^Connection) -> bool {
 }
 
 // pread next file chunk into file_send_buf and set pending_send.
-// On success: pending_send non-empty, off/remaining advanced.
+// On success: pending_send non-empty, off/remaining advanced (remaining = not-yet-pread).
+// Short pread (0 < got < want) is progress — next fill continues at new off.
+// got==0 with remaining>0 is unexpected EOF (declared length past file) → fail.
 // On failure: state uncleared (caller closes connection).
 @(private)
 _conn_file_send_fill_chunk :: proc(conn: ^Connection) -> bool {
@@ -993,18 +995,27 @@ _conn_file_send_fill_chunk :: proc(conn: ^Connection) -> bool {
 		log.errorf("file_send: pread not available on Windows (fd=%d)", conn.file_send_fd)
 		return false
 	} else {
-		got := posix.pread(
-			posix.FD(conn.file_send_fd),
-			raw_data(conn.file_send_buf),
-			c.size_t(n),
-			posix.off_t(conn.file_send_off),
-		)
-		if got < 0 {
-			log.errorf("file_send pread failed fd=%v file=%d: %v", conn.socket, conn.file_send_fd, posix.errno())
-			return false
+		got: int
+		for {
+			g := posix.pread(
+				posix.FD(conn.file_send_fd),
+				raw_data(conn.file_send_buf),
+				c.size_t(n),
+				posix.off_t(conn.file_send_off),
+			)
+			if g < 0 {
+				if posix.errno() == .EINTR {
+					continue
+				}
+				log.errorf("file_send pread failed fd=%v file=%d: %v", conn.socket, conn.file_send_fd, posix.errno())
+				return false
+			}
+			got = int(g)
+			break
 		}
 		if got == 0 {
-			log.errorf("file_send short/EOF fd=%v file=%d remaining=%d", conn.socket, conn.file_send_fd, conn.file_send_remaining)
+			// EOF before declared remaining — not a short-but-positive pread.
+			log.errorf("file_send EOF fd=%v file=%d remaining=%d", conn.socket, conn.file_send_fd, conn.file_send_remaining)
 			return false
 		}
 		new_off, new_rem, ok := file_send_after_pread(conn.file_send_off, conn.file_send_remaining, i64(got))
@@ -1013,15 +1024,9 @@ _conn_file_send_fill_chunk :: proc(conn: ^Connection) -> bool {
 		}
 		conn.file_send_off = new_off
 		conn.file_send_remaining = new_rem
-		// Last chunk: mark fd inactive once remaining hits 0 so post-send path finishes.
-		// Keep fd value until fully drained? remaining==0 alone is enough with fd check.
-		if new_rem == 0 {
-			// Mark inactive only after this last chunk is fully sent — keep fd non-zero
-			// so host_on_send knows a file stream was in progress? Simpler: remaining==0
-			// after fill means this is the last pending chunk; after it sends, done.
-			// file_send_fd stays set until _conn_clear_file_send on complete/error.
-		}
-		conn.pending_send = conn.file_send_buf[:int(got)]
+		// remaining==0 after fill: this is the last pending chunk; file_send_fd stays set
+		// until host_on_send drains pending_send and calls _conn_clear_file_send.
+		conn.pending_send = conn.file_send_buf[:got]
 		return true
 	}
 }

@@ -338,8 +338,9 @@ Policy (intended; Phase 3+ on the wire):
        sendfile_ok && !tls → Write_Slice (headers) + Sendfile
        else                → Copy_Into + Write_Slice
   4. Mixed mem + file
-       sendfile_ok && !tls && iovecs ok → Writev(header+mem) + Sendfile
-       else materialize all            → Write_Slice
+       sendfile_ok && !tls && iovecs ok && no mem after File
+         → Writev(header+mem prefix) + Sendfile
+       else materialize all            → Write_Slice (preserves cmd order)
   5. Unknown length / too many ops     → Write_Slice (safe fallback)
 
 Phase 0/1 wire path may ignore this and always materialize; tests lock the policy.
@@ -488,8 +489,10 @@ plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Context) -> Plan_Result {
 
 	// (4) Mixed memory + file
 	if r.n_file >= 1 && r.n_mem >= 1 {
-		// Only optimize the simple case: exactly one file (common: static prefix + file).
-		if r.n_file == 1 && ctx.sendfile_ok && !ctx.tls {
+		// Only optimize the simple case: exactly one file with optional *prefix* mem.
+		// Wire sends all mem then the file region — any non-empty mem *after* File
+		// would reorder the body, so fall back to materialize (preserve cmd order).
+		if r.n_file == 1 && ctx.sendfile_ok && !ctx.tls && !mem_follows_file(cmds) {
 			need_iov := 1 + r.n_mem // heading + mem bodies; file is separate Sendfile
 			iov_ok := ctx.max_iovecs > 0 && need_iov <= int(ctx.max_iovecs)
 			if iov_ok {
@@ -540,6 +543,24 @@ mem_total :: proc(cmds: []Response_Cmd) -> i64 {
 		}
 	}
 	return total
+}
+
+// True when a non-empty Static/Bytes cmd appears after a File cmd.
+// Sendfile wire always streams file after all mem; that would reorder such sequences.
+@(private = "file")
+mem_follows_file :: proc(cmds: []Response_Cmd) -> bool {
+	seen_file := false
+	for c in cmds {
+		#partial switch c.kind {
+		case .File:
+			seen_file = true
+		case .Static, .Bytes:
+			if seen_file && len(c.bytes) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // plan_exec_kinds fills out with the op kind sequence; returns count.
