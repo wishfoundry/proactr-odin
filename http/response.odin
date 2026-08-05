@@ -10,6 +10,8 @@ import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 
+import proactr "../proactr"
+
 Response :: struct {
 	// Add your headers and cookies here directly.
 	headers:          Headers,
@@ -35,6 +37,10 @@ Response :: struct {
 	// body_reserve / response_writer already wrote it. Headers may still be set after body_*.
 	_cmds:            [PLAN_MAX_BODY_CMDS]Response_Cmd,
 	_cmd_count:       int,
+	// Phase 2: handler plan bias (zero = server defaults) and optional body middleware.
+	_profile:         Handler_Profile,
+	_body_mw:         Body_Middleware,
+	_body_mw_user:    rawptr,
 }
 
 // response_init binds r to c.resp_buf (permanent, conn_allocator). Request temp
@@ -49,6 +55,9 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 	r._cl_off = -1
 	r._body_max = 0
 	r._cmd_count = 0
+	r._profile = {}
+	r._body_mw = nil
+	r._body_mw_user = nil
 	r._conn = c
 	r.cookies = {}
 	r.cookies.allocator = allocator
@@ -80,6 +89,100 @@ _response_append_cmd :: proc(r: ^Response, cmd: Response_Cmd, loc := #caller_loc
 	assert(r._cmd_count < PLAN_MAX_BODY_CMDS, "too many body commands (PLAN_MAX_BODY_CMDS)", loc)
 	r._cmds[r._cmd_count] = cmd
 	r._cmd_count += 1
+}
+
+// Set handler plan bias (prefer materialize / gather / sendfile). Cleared on response_init.
+// Zero profile leaves Plan_Context at server defaults (except prefer_sendfile is opt-in).
+response_set_profile :: proc(r: ^Response, p: Handler_Profile) {
+	r._profile = p
+}
+
+// Optional body middleware: rewrite Response_Cmd[] before plan/materialize on send.
+// Pass mw=nil to clear. Cleared on response_init.
+response_body_middleware :: proc(r: ^Response, mw: Body_Middleware, user: rawptr = nil) {
+	r._body_mw = mw
+	r._body_mw_user = user
+}
+
+// Base Plan_Context from connection/server/backend (no handler profile).
+// Safe with nil conn (pure defaults + platform sendfile when POSIX).
+plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
+	ctx := plan_context_default()
+
+	// Platform: plain TCP sendfile is OK on Linux/Darwin (no TLS in host yet).
+	when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+		ctx.sendfile_ok = true
+	} else {
+		ctx.sendfile_ok = false
+	}
+
+	if conn != nil && conn.server != nil {
+		opts := conn.server.opts
+		if opts.plan_max_iovecs > 0 {
+			ctx.max_iovecs = opts.plan_max_iovecs
+		}
+		// 0 → PLAN_DEFAULT_COPY_BUDGET (already in plan_context_default).
+		if opts.plan_copy_budget > 0 {
+			ctx.preferred_copy_budget = opts.plan_copy_budget
+		}
+		// plan_sendfile_ok: Default_Server_Opts true on posix; false disables.
+		// Non-posix remains false from the when above.
+		when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+			ctx.sendfile_ok = opts.plan_sendfile_ok
+		}
+	}
+
+	// fixed_files: registered fd table on this worker's proactr ring.
+	if td != nil && td.state != .Uninitialized {
+		ctx.fixed_files = proactr.ring_has_fixed_files(&td.ring)
+	}
+
+	// No TLS path yet; zero-copy send unknown.
+	ctx.tls = false
+	ctx.zero_copy_send = false
+	return ctx
+}
+
+// Live Plan_Context for advanced handlers: server/conn/backend + Response profile bias.
+plan_context :: proc(r: ^Response) -> Plan_Context {
+	conn: ^Connection
+	profile: Handler_Profile
+	if r != nil {
+		conn = r._conn
+		profile = r._profile
+	}
+	return plan_context_apply_profile(plan_context_for(conn), profile)
+}
+
+// Optimize-policy plan for tests/handlers (does not change the wire path).
+// Uses current body cmds + plan_context(r). Wire send still materialize_only (Phase 1–2).
+response_plan_preview :: proc(r: ^Response) -> Plan_Result {
+	if r == nil || r._cmd_count == 0 {
+		return plan_body({}, plan_context(r))
+	}
+	return plan_body(r._cmds[:r._cmd_count], plan_context(r))
+}
+
+// Run body middleware (if set) and update r._cmds / r._cmd_count.
+// Middleware should prefer compacting in place; external slices are copied back.
+@(private)
+_response_apply_body_middleware :: proc(r: ^Response) {
+	if r._body_mw == nil || r._cmd_count == 0 {
+		return
+	}
+	out := r._body_mw(r._cmds[:r._cmd_count], r._body_mw_user)
+	if len(out) == 0 {
+		r._cmd_count = 0
+		return
+	}
+	assert(len(out) <= PLAN_MAX_BODY_CMDS, "body middleware returned too many cmds")
+	// Copy if middleware returned a buffer other than our cmd array (in-place compact is fine).
+	if raw_data(out) != raw_data(r._cmds[:]) || (len(out) > 0 && &out[0] != &r._cmds[0]) {
+		for i in 0 ..< len(out) {
+			r._cmds[i] = out[i]
+		}
+	}
+	r._cmd_count = len(out)
 }
 
 // Append a borrowed Static body command (immutable for the response lifetime).
@@ -693,12 +796,16 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if !connection_set_state(r._conn, .Will_Close) { return }
 	}
 
-	// Wire assembly (Phase 1):
+	// Wire assembly (Phase 1–2):
 	//  1) Heading already written (body_reserve after commit, or chunked writer) → send buffer as-is.
-	//  2) Body cmds present → materialize-only plan into heading + body, one Write_Slice.
+	//  2) Body cmds present → optional middleware rewrite → materialize-only into heading + body.
 	//  3) Empty buffer, no cmds → heading with Content-Length 0.
 	//  4) Buffer has content without heading_written is unexpected; treat as ready-to-send.
+	// Optimize plan (Writev/Sendfile) is not on the wire yet; use response_plan_preview.
 	if !r._heading_written {
+		if r._cmd_count > 0 {
+			_response_apply_body_middleware(r)
+		}
 		if r._cmd_count > 0 {
 			_response_materialize_cmds(r)
 		} else if bytes.buffer_length(&r._buf) == 0 {

@@ -1,7 +1,7 @@
 # Experiment: Response as Command Buffer + Transport Planner
 
 **Branch:** `exp/response-command-planner`  
-**Status:** Phase 1 wired (cmd emit + materialize-only plan); Phase 2–5 open  
+**Status:** Phase 2 wired (Plan_Context fill, profiles, body middleware hook); Phase 3–5 open  
 
 **Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
 
@@ -276,11 +276,13 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 ### Phase 2 — Plan_Context + capability queries
 
-- [ ] Fill `Plan_Context` from server/conn/backend (`ring_has_fixed_files`, TLS flag placeholder, iovec max constant, copy budget from opts)
-- [ ] Optional `plan_context(res)` for advanced handlers
-- [ ] Middleware hook point: `[]Response_Cmd → []Response_Cmd` (even if only identity + one toy transform)
+- [x] Fill `Plan_Context` from server/conn/backend (`ring_has_fixed_files`, TLS flag placeholder, iovec max / copy budget from `Server_Opts`, sendfile on Linux/Darwin plain TCP)
+- [x] Optional `plan_context(res)` / `plan_context_for(conn)` for advanced handlers; `response_plan_preview` runs optimize `plan_body` (wire still materialize-only)
+- [x] Middleware hook: `Body_Middleware` on Response (`response_body_middleware`); identity + `body_mw_drop_empty_static`; applied before materialize on send
+- [x] `Handler_Profile` + `response_set_profile` (prefer_materialize / gather / sendfile bias; zero = defaults, prefer_sendfile opt-in)
+- [x] `Server_Opts`: `plan_copy_budget` (0 → default 4096), `plan_max_iovecs` (0 → 1024), `plan_sendfile_ok` (default true)
 
-**Exit:** handlers can read constraints; middleware can rewrite cmds without touching executor.
+**Exit:** handlers can read constraints; middleware can rewrite cmds without touching executor. ✅
 
 ### Phase 3 — Multi-Static gather (first real optimization)
 
@@ -339,10 +341,10 @@ Use this when reviewing experimental PRs/commits:
 
 ### Structural success
 
-- [ ] Clear types for intent (`Response_Cmd`) vs execution (`Exec_Op`)
-- [ ] Planner is the only place that chooses copy vs gather vs sendfile
-- [ ] At least one middleware-shaped transform exists as cmd rewrite
-- [ ] Streaming is either out of scope with a written reason, or a separate API
+- [x] Clear types for intent (`Response_Cmd`) vs execution (`Exec_Op`)
+- [ ] Planner is the only place that chooses copy vs gather vs sendfile *(policy in `plan_body`; wire still materialize-only until Phase 3–4)*
+- [x] At least one middleware-shaped transform exists as cmd rewrite
+- [x] Streaming is either out of scope with a written reason, or a separate API
 
 ### Behavioral success
 
@@ -408,6 +410,9 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Phase 1: `body_set` / `body_*` append `Response_Cmd`; wire uses `plan_body_materialize_only` | Structure first; heading deferred until send so headers stay mutable after body_set |
 | 2026-08-05 | Fixed `PLAN_MAX_BODY_CMDS` (32) on Response with assert overflow | Prefer fixed POD over unbounded growth (open question §9.4) |
 | 2026-08-05 | `body_reserve` / chunked `response_writer` stay special-cased (heading early) | Not rewritten as cmds yet; avoid breaking Fortunes / JSON writer paths |
+| 2026-08-05 | Phase 2: `plan_context` fills from `Server_Opts` + worker ring; wire still `plan_body_materialize_only` | Structure for constraints/middleware without mechanism change |
+| 2026-08-05 | `Handler_Profile.prefer_sendfile` is opt-in (`sendfile_ok &= prefer_sendfile`) | Matches `comparisons/plan` plan_ctx_for; zero profile keeps conservative optimize preview |
+| 2026-08-05 | Body middleware on Response (`_body_mw`), not global Server hook | Per-request; cleared in `response_init`; toy `body_mw_drop_empty_static` only |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 

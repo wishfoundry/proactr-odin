@@ -3,16 +3,17 @@ package http
 /*
 Response command buffer + transport planner (experiment).
 
-Phase 1 wire: handlers emit Response_Cmd via body_* helpers; response_send
-calls plan_body_materialize_only and copies heading+body into resp_buf for a
-single Write_Slice (pending_send). Optimize policy (Writev/Sendfile) is tested
-in plan_body but not yet on the wire — see Phase 3–4.
+Phase 1–2 wire: handlers emit Response_Cmd via body_* helpers; optional body
+middleware rewrites cmds; response_send still calls plan_body_materialize_only
+and copies heading+body into resp_buf for a single Write_Slice (pending_send).
+Optimize policy (Writev/Sendfile) is available via plan_body / response_plan_preview
+but not yet on the wire — see Phase 3–4.
 
 See docs/RESPONSE_COMMAND_PLANNER.md.
 
 Intent (handlers / middleware)  →  Response_Cmd[]
 Policy (this file)              →  Plan_Result / Exec_Op[]
-Mechanism (executor / proactr)  →  syscalls  (Phase 1: materialize only)
+Mechanism (executor / proactr)  →  syscalls  (wire: materialize only)
 */
 
 // ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ Plan_Context :: struct {
 }
 
 // Conservative defaults for pure tests and early wiring.
-// Live fill from conn/backend is Phase 2.
+// Live fill from conn/backend: plan_context(res) in response.odin.
 PLAN_DEFAULT_MAX_IOVECS :: u16(1024)
 PLAN_DEFAULT_COPY_BUDGET :: u32(4096)
 
@@ -82,6 +83,56 @@ plan_context_default :: proc() -> Plan_Context {
 		sqe_budget            = 0,
 		preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET,
 	}
+}
+
+// Handler-side bias over Plan_Context (POD). Zero value = no bias (server defaults).
+// Applied by plan_context / plan_context_apply_profile (same rules as comparisons/plan plan_ctx_for).
+Handler_Profile :: struct {
+	prefer_materialize: bool, // force huge copy budget → plan_body materializes memory bodies
+	prefer_gather:      bool, // use copy_budget for size gate (0 → disable size-based copy preference)
+	prefer_sendfile:    bool, // AND with platform sendfile_ok for plan_body Sendfile choice
+	copy_budget:        u32,  // with prefer_gather: preferred_copy_budget (0 disables size gate)
+}
+
+// Apply Handler_Profile bias onto a base Plan_Context (filled from server/conn).
+// Order matches comparisons/plan/server: prefer_gather first, prefer_materialize wins if both set.
+// sendfile_ok becomes base.sendfile_ok && profile.prefer_sendfile (opt-in).
+plan_context_apply_profile :: proc(base: Plan_Context, profile: Handler_Profile) -> Plan_Context {
+	ctx := base
+	if profile.prefer_gather {
+		ctx.preferred_copy_budget = profile.copy_budget
+	}
+	if profile.prefer_materialize {
+		ctx.preferred_copy_budget = max(u32)
+	}
+	ctx.sendfile_ok = base.sendfile_ok && profile.prefer_sendfile
+	return ctx
+}
+
+// Body middleware: rewrite intent cmds before plan/materialize.
+// Should compact in place into the input slice when possible and return a subslice
+// of cmds (or a new slice the host will copy back into Response._cmds).
+Body_Middleware :: #type proc(cmds: []Response_Cmd, user: rawptr) -> []Response_Cmd
+
+// Identity: leave cmds unchanged.
+body_mw_identity :: proc(cmds: []Response_Cmd, user: rawptr) -> []Response_Cmd {
+	_ = user
+	return cmds
+}
+
+// Drop empty Static/Bytes commands (len == 0). Compacts in place.
+// Toy transform to prove middleware can rewrite intent without touching the executor.
+body_mw_drop_empty_static :: proc(cmds: []Response_Cmd, user: rawptr) -> []Response_Cmd {
+	_ = user
+	w := 0
+	for c in cmds {
+		if (c.kind == .Static || c.kind == .Bytes) && len(c.bytes) == 0 {
+			continue
+		}
+		cmds[w] = c
+		w += 1
+	}
+	return cmds[:w]
 }
 
 // ---------------------------------------------------------------------------

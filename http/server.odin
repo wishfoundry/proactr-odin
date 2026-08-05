@@ -63,6 +63,15 @@ Server_Opts :: struct {
 	// Runs on the worker thread with thread-local host state set (safe to respond).
 	on_worker_tick:       proc(user: rawptr),
 	worker_tick_user:     rawptr,
+	// Plan_Context knobs (Phase 2+). Wire path still materialize-only; used by plan_context /
+	// response_plan_preview and later Writev/Sendfile executor phases.
+	// preferred_copy_budget: 0 → PLAN_DEFAULT_COPY_BUDGET (4096).
+	plan_copy_budget:     u32,
+	// max_iovecs gather budget: 0 → PLAN_DEFAULT_MAX_IOVECS (1024).
+	plan_max_iovecs:      u16,
+	// Allow sendfile in optimize plan when platform supports it (Linux/Darwin plain TCP).
+	// Default true in Default_Server_Opts. Ignored / false on non-posix platforms.
+	plan_sendfile_ok:     bool,
 }
 
 // Zero-valued sizing fields mean “use host product defaults” (resolved in listen).
@@ -83,6 +92,9 @@ Default_Server_Opts := Server_Opts {
 	wait_timeout_ms      = 0,
 	listen_backlog       = 0,
 	conn_chunk_size      = 0,
+	plan_copy_budget     = 0, // → PLAN_DEFAULT_COPY_BUDGET at plan_context fill
+	plan_max_iovecs      = 0, // → PLAN_DEFAULT_MAX_IOVECS at plan_context fill
+	plan_sendfile_ok     = true,
 }
 
 Server_State :: enum {

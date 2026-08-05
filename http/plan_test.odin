@@ -273,3 +273,148 @@ test_plan_bytes_and_static_same_memory_path :: proc(t: ^testing.T) {
 	got := kinds_of(cmds, ctx, buf[:])
 	expect_kinds(t, got, { .Writev })
 }
+
+// --- Phase 2: Handler_Profile, plan_context, body middleware -----------------
+
+@(test)
+test_plan_context_apply_profile_prefer_materialize :: proc(t: ^testing.T) {
+	// prefer_materialize → huge copy budget forces materialize even for large multi-static.
+	base := plan_context_default()
+	base.preferred_copy_budget = 0
+	base.max_iovecs = 64
+	base.tls = false
+	base.sendfile_ok = true
+
+	profile := Handler_Profile {
+		prefer_materialize = true,
+	}
+	ctx := plan_context_apply_profile(base, profile)
+	testing.expect_value(t, ctx.preferred_copy_budget, max(u32))
+	// prefer_sendfile is opt-in: zero/false clears sendfile_ok.
+	testing.expect(t, !ctx.sendfile_ok)
+
+	cmds := []Response_Cmd {
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+	}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got := kinds_of(cmds, ctx, buf[:])
+	expect_kinds(t, got, { .Write_Slice })
+	testing.expect(t, plan_body(cmds, ctx).materialized)
+}
+
+@(test)
+test_plan_context_apply_profile_prefer_gather :: proc(t: ^testing.T) {
+	// prefer_gather + copy_budget=0 disables size gate → Writev for multi large static.
+	base := plan_context_default()
+	base.preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET
+	base.max_iovecs = 64
+	base.tls = false
+
+	profile := Handler_Profile {
+		prefer_gather = true,
+		copy_budget   = 0,
+	}
+	ctx := plan_context_apply_profile(base, profile)
+	testing.expect_value(t, ctx.preferred_copy_budget, u32(0))
+
+	cmds := []Response_Cmd {
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+	}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got := kinds_of(cmds, ctx, buf[:])
+	expect_kinds(t, got, { .Writev })
+}
+
+@(test)
+test_plan_context_apply_profile_prefer_sendfile :: proc(t: ^testing.T) {
+	base := plan_context_default()
+	base.sendfile_ok = true
+	base.tls = false
+
+	// Without prefer_sendfile → no Sendfile.
+	ctx_off := plan_context_apply_profile(base, {})
+	testing.expect(t, !ctx_off.sendfile_ok)
+
+	// With prefer_sendfile → base capability preserved.
+	ctx_on := plan_context_apply_profile(base, Handler_Profile{prefer_sendfile = true})
+	testing.expect(t, ctx_on.sendfile_ok)
+
+	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got := kinds_of(cmds, ctx_on, buf[:])
+	expect_kinds(t, got, { .Write_Slice, .Sendfile })
+}
+
+@(test)
+test_plan_context_zero_profile_is_defaults :: proc(t: ^testing.T) {
+	// Response with zero profile and no conn: server-like base + zero bias.
+	// prefer_sendfile false → sendfile_ok false even if platform base was true.
+	r: Response
+	ctx := plan_context(&r)
+	testing.expect_value(t, ctx.preferred_copy_budget, PLAN_DEFAULT_COPY_BUDGET)
+	testing.expect_value(t, ctx.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
+	testing.expect(t, !ctx.tls)
+	testing.expect(t, !ctx.zero_copy_send)
+	testing.expect(t, !ctx.sendfile_ok) // prefer_sendfile opt-in
+}
+
+@(test)
+test_plan_context_profile_on_response :: proc(t: ^testing.T) {
+	r: Response
+	response_set_profile(&r, Handler_Profile{prefer_materialize = true})
+	ctx := plan_context(&r)
+	testing.expect_value(t, ctx.preferred_copy_budget, max(u32))
+
+	// response_plan_preview uses profile-biased context.
+	_response_append_cmd(&r, cmd_static(_big_body[:]))
+	_response_append_cmd(&r, cmd_static(_big_body[:]))
+	preview := response_plan_preview(&r)
+	testing.expect(t, preview.materialized)
+	testing.expect_value(t, preview.ops[0].kind, Exec_Op_Kind.Write_Slice)
+}
+
+@(test)
+test_body_mw_drop_empty_static :: proc(t: ^testing.T) {
+	empty: [0]u8
+	a := cmd_static(_small_a[:])
+	b := cmd_static(empty[:])
+	c := cmd_bytes(_small_b[:], true)
+	d := cmd_static(empty[:])
+	cmds := []Response_Cmd{a, b, c, d}
+	// Need a mutable buffer for in-place compact.
+	buf: [4]Response_Cmd
+	copy(buf[:], cmds)
+	out := body_mw_drop_empty_static(buf[:], nil)
+	testing.expect_value(t, len(out), 2)
+	testing.expect_value(t, out[0].kind, Response_Cmd_Kind.Static)
+	testing.expect_value(t, len(out[0].bytes), len(_small_a))
+	testing.expect_value(t, out[1].kind, Response_Cmd_Kind.Bytes)
+	testing.expect_value(t, len(out[1].bytes), len(_small_b))
+}
+
+@(test)
+test_response_body_middleware_rewrites_cmds :: proc(t: ^testing.T) {
+	r: Response
+	empty: [0]u8
+	_response_append_cmd(&r, cmd_static(empty[:]))
+	_response_append_cmd(&r, cmd_static(_small_a[:]))
+	_response_append_cmd(&r, cmd_static(empty[:]))
+	testing.expect_value(t, r._cmd_count, 3)
+
+	response_body_middleware(&r, body_mw_drop_empty_static, nil)
+	_response_apply_body_middleware(&r)
+	testing.expect_value(t, r._cmd_count, 1)
+	testing.expect_value(t, r._cmds[0].kind, Response_Cmd_Kind.Static)
+	testing.expect_value(t, len(r._cmds[0].bytes), len(_small_a))
+}
+
+@(test)
+test_body_mw_identity :: proc(t: ^testing.T) {
+	cmds := []Response_Cmd{cmd_static(_small_a[:]), cmd_static(_small_b[:])}
+	out := body_mw_identity(cmds, nil)
+	testing.expect_value(t, len(out), 2)
+	testing.expect(t, raw_data(out) == raw_data(cmds))
+}
