@@ -249,10 +249,10 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 - [x] Branch `exp/response-command-planner`
 - [x] This plan document
-- [ ] `http/plan.odin` (or similar): `Response_Cmd`, `Body_Flags`, `Plan_Context`, `Exec_Op`, `Plan_Result` types only
-- [ ] Unit-test style tables: *input cmds + Plan_Context → expected Exec_Op kinds* (even if executor not wired)
+- [x] `http/plan.odin`: `Response_Cmd`, `Body_Flags`, `Plan_Context`, `Exec_Op`, `Plan_Result` + pure `plan_body` / `plan_body_materialize_only`
+- [x] Unit-test tables in `http/plan_test.odin`: *input cmds + Plan_Context → expected Exec_Op kinds* (executor not wired)
 
-**Exit:** types compile; tests document intended policy without changing wire path.
+**Exit:** types compile; tests document intended policy without changing wire path. ✅
 
 ### Phase 1 — Emit commands, plan = materialize (behavior-identical)
 
@@ -388,6 +388,10 @@ Track answers here as the experiment proceeds.
 | 2026-08-04 | v0 planner = materialize + single Write_Slice | Preserve correctness; structure before optimization |
 | 2026-08-04 | No Body_Mode enum of transport strategies | Avoid mixing semantics with mechanisms |
 | 2026-08-04 | Streaming deferred / separate API | Different lifetime and middleware timing |
+| 2026-08-05 | Phase 0: pure `plan_body` encodes *intended* optimize policy; `plan_body_materialize_only` is Phase 1 wire default | Tests lock Writev/Sendfile choices before host wiring; wire path stays untouched until Phase 1 |
+| 2026-08-05 | Body cmds only (no Status/Header cmds yet) | Headers stay on `Response.headers` for lookup; open question §9.1 deferred |
+| 2026-08-05 | Small bodies (≤ `preferred_copy_budget`) always materialize | Avoid gather for tiny responses; matches “simple path first” |
+| 2026-08-05 | File without sendfile → `Copy_Into` + `Write_Slice` | Makes the copy stage explicit for later async file read |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 
@@ -398,10 +402,10 @@ Track answers here as the experiment proceeds.
 | File | Role |
 |------|------|
 | `docs/RESPONSE_COMMAND_PLANNER.md` | This plan |
-| `http/plan.odin` | Types + `plan_response` (start with materialize-only) |
-| `http/response.odin` | Emit cmds from body helpers; call planner from send path |
-| `http/server.odin` | Executor hooks if multi-op; `Plan_Context` fill |
+| `http/plan.odin` | Types + pure `plan_body` (optimize policy) + `plan_body_materialize_only` |
 | `http/plan_test.odin` | Table tests: cmds + context → exec op sequence |
+| `http/response.odin` | Phase 1: emit cmds from body helpers; call planner from send path |
+| `http/server.odin` | Phase 2+: executor hooks if multi-op; `Plan_Context` fill |
 | `proactr/*` | Only when Phase 3+ needs sendv/sendfile submit |
 
 ---
