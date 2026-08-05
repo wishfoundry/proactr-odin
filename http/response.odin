@@ -1251,12 +1251,51 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 
 // Materialize cmds into _buf as one Write_Slice payload (Phase 1–3 fallback).
 // Not used when body_reserve / response_writer already wrote the heading into _buf.
+//
+// Hot path (TFB plaintext/size ladder): single Static/Bytes with known length —
+// one exact buffer grow, heading into resp_buf, one body memcpy. Skips
+// plan_body_materialize_only + buffer_write bookkeeping tax.
 @(private)
 _response_materialize_cmds :: proc(r: ^Response) {
 	assert(!r._heading_written)
 	assert(r._cmd_count > 0)
 
 	cmds := r._cmds[:r._cmd_count]
+
+	// Fast path: one in-memory body region (respond_plain / body_set).
+	if r._cmd_count == 1 {
+		c := cmds[0]
+		if c.kind == .Static || c.kind == .Bytes {
+			body_len := len(c.bytes)
+			t0_build: u64
+			when HTTP_PHASE_STATS {
+				t0_build = phase_now()
+			}
+			// Exact capacity: heading ≤ 512 scratch + body (no 1MiB growth hint).
+			hscratch: [512]byte
+			hlen := _response_format_heading(r, body_len, hscratch[:])
+			assert(hlen > 0 && hlen <= len(hscratch))
+			need := hlen + body_len
+			if cap(r._buf.buf) < need {
+				reserve(&r._buf.buf, need)
+			}
+			// Write heading then body without intermediate buffer_write growth.
+			resize(&r._buf.buf, need)
+			copy(r._buf.buf[0:hlen], hscratch[:hlen])
+			r._heading_written = true
+			if !_response_is_head(r._conn) && body_len > 0 {
+				copy(r._buf.buf[hlen:][:body_len], c.bytes)
+			} else if _response_is_head(r._conn) {
+				// HEAD: CL set in heading, no body bytes.
+				resize(&r._buf.buf, hlen)
+			}
+			when HTTP_PHASE_STATS {
+				phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+			}
+			return
+		}
+	}
+
 	plan := plan_body_materialize_only(cmds)
 	assert(plan.materialized && plan.op_count == 1 && plan.ops[0].kind == .Write_Slice)
 

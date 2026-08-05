@@ -150,6 +150,39 @@ lat_from() {
   awk '/Latency/ {print $2; exit}' "$1" 2>/dev/null || echo "?"
 }
 
+# oha "Size/request" (bytes). Empty if missing. Critic: do not trust alone for RPS validity.
+size_from() {
+  awk '/Size\/request/ {
+    v=$2
+    if (v ~ /KiB/) { printf "%.0f", v*1024; exit }
+    if (v ~ /MiB/) { printf "%.0f", v*1024*1024; exit }
+    if (v ~ /GiB/) { printf "%.0f", v*1024*1024*1024; exit }
+    if (v ~ /B/) { gsub(/B/,"",v); printf "%.0f", v; exit }
+    print v; exit
+  }' "$1" 2>/dev/null || true
+}
+
+# After load: if size ladder and oha Size/request off by >10%, WARN (and mark ? in detail).
+check_load_size() {
+  local name="$1" test="$2" out="$3"
+  local exp got
+  exp="$(expected_body_len "$test")"
+  [[ -z "$exp" || "$exp" == "0" ]] && return 0
+  got="$(size_from "$out")"
+  [[ -z "$got" || "$got" == "?" ]] && return 0
+  # integer compare with 10% slack (oha may round)
+  python3 - "$exp" "$got" <<'PY' || true
+import sys
+exp, got = float(sys.argv[1]), float(sys.argv[2])
+if exp <= 0: sys.exit(0)
+err = abs(got - exp) / exp
+if err > 0.10:
+    print(f"  WARN size-mismatch {sys.argv[0] if False else ''}: oha Size/request={got:.0f} expected={exp:.0f} (RPS may still be valid; verify manually)", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 start_peer() {
   local name="$1"
   kill_port "$PORT"
@@ -347,8 +380,12 @@ for srv in $SERVERS; do
     run_load "$srv" "$t" || true
     rps=$(rps_from "$LOGDIR/${srv}_${t}.txt")
     lat=$(lat_from "$LOGDIR/${srv}_${t}.txt")
+    sz=$(size_from "$LOGDIR/${srv}_${t}.txt")
+    if ! check_load_size "$srv" "$t" "$LOGDIR/${srv}_${t}.txt"; then
+      echo "$srv $t SIZE_WARN oha_size=$sz" >>"$DETAIL"
+    fi
     row+=$'\t'"$rps"
-    echo "$srv $t rps=$rps lat_avg=$lat" | tee -a "$DETAIL"
+    echo "$srv $t rps=$rps lat_avg=$lat oha_size=${sz:-?}" | tee -a "$DETAIL"
   done
   printf '%s\n' "$row" | tee -a "$SUMMARY"
   stop_peer "$srv" "$pid"

@@ -1467,13 +1467,15 @@ Server_Date :: struct {
 }
 
 // server_date_refresh updates this worker's thread-local Date string.
+// Single time.now() (was two: format + assign).
 @(private)
 server_date_refresh :: proc() {
 	assert_has_td()
+	now := time.now()
 	td.date.buf.buf = slice.into_dynamic(td.date.buf_backing[:])
 	bytes.buffer_reset(&td.date.buf)
-	date_write(bytes.buffer_to_stream(&td.date.buf), time.now())
-	td.date_updated = time.now()
+	date_write(bytes.buffer_to_stream(&td.date.buf), now)
+	td.date_updated = now
 }
 
 // server_date returns this worker's Date header value (thread-local; no shared mutex).
