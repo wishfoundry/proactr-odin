@@ -1,7 +1,7 @@
 # Experiment: Response as Command Buffer + Transport Planner
 
 **Branch:** `exp/response-command-planner`  
-**Status:** Phase 3 wired (multi-buffer Writev-style send); Phase 4–5 open  
+**Status:** Phase 4 wired (file region chunked stream); Phase 5 open  
 
 **Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
 
@@ -296,11 +296,15 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 ### Phase 4 — File bodies
 
-- [ ] `body_file` as true `File` cmd (no forced full read in handler helpers when possible)
-- [ ] Planner: `Write_Slice(headers)` + `Sendfile` when `sendfile_ok && !tls`
-- [ ] Else: copy path (read into staging or temporary buffer)
+- [x] `body_file` as true `File` cmd (no forced full read in handler helpers when possible)
+- [x] Planner: `Write_Slice(headers)` + `Sendfile` when `sendfile_ok && !tls` (policy since Phase 0)
+- [x] Wire: headers via `pending_send`, then chunked pread into `conn.file_send_buf` (64 KiB) + sequential `submit_send` (portable; not kernel sendfile yet)
+- [x] Else (`plan_optimize` off / `sendfile_ok` false / Copy_Into plan): full materialize pread into `resp_buf`
+- [x] Wire metrics: `plan_wire_copy_into_total` (chunked stream), `plan_wire_sendfile_total` (reserved for kernel sendfile)
+- [x] HEAD: headers only, no file stream
+- [x] Fd ownership: handler keeps fd open until send completes; host never closes it
 
-**Exit:** file download path correct; TLS/disabled sendfile still works via copy.
+**Exit:** file download path correct; TLS/disabled sendfile still works via copy. ✅
 
 ### Phase 5 — Streaming split (only when needed)
 
@@ -344,7 +348,7 @@ Use this when reviewing experimental PRs/commits:
 ### Structural success
 
 - [x] Clear types for intent (`Response_Cmd`) vs execution (`Exec_Op`)
-- [x] Planner is the only place that chooses copy vs gather vs sendfile *(wire executes Writev multi-buffer; Sendfile still materialize until Phase 4)*
+- [x] Planner is the only place that chooses copy vs gather vs sendfile *(wire executes Writev multi-buffer + Sendfile region stream)*
 - [x] At least one middleware-shaped transform exists as cmd rewrite
 - [x] Streaming is either out of scope with a written reason, or a separate API
 
@@ -352,7 +356,7 @@ Use this when reviewing experimental PRs/commits:
 
 - [ ] No regression on current single-buffer correctness
 - [ ] `body_reserve` Fortunes-style path still valid (or documented replacement with equal clarity)
-- [ ] Partial send and connection cleanup invariants preserved (`pending_send` / multi-op equivalent)
+- [x] Partial send and connection cleanup invariants preserved (`pending_send` / multi-op / file_send equivalent)
 
 ### Learning success
 
@@ -422,6 +426,10 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Sendfile/Copy_Into plan → materialize on wire in Phase 3 | Defer kernel sendfile to Phase 4; keep single fallback path |
 | 2026-08-05 | `Connection.exec_bufs[PLAN_MAX_BODY_CMDS+1]` + `exec_i`/`exec_n` | Fixed POD queue; heading in resp_buf, bodies borrowed until final CQE |
 | 2026-08-05 | Package atomics `plan_wire_writev_total` / `plan_wire_materialize_total` | Harness `/metrics` proves real wire path vs shadow policy |
+| 2026-08-05 | Phase 4: Sendfile plan on wire = chunked pread + sequential send (not kernel sendfile) | Portable on Darwin/Linux; proactr has no sendfile SQE yet; avoids full multi‑MiB resp_buf load |
+| 2026-08-05 | Count chunked file stream as `plan_wire_copy_into_total`; reserve `plan_wire_sendfile_total` for kernel path | Honest mechanism counters; kernel sendfile can land later without renumbering |
+| 2026-08-05 | `Connection.file_send_{fd,off,remaining,buf}`; host never closes fd | Handler owns fd for full send lifetime; clear cursor on error/complete |
+| 2026-08-05 | `prefer_sendfile` alone enables optimize wire gate (like `prefer_gather`) | File routes can stream without global `plan_optimize` |
 
 *(Append rows; do not rewrite history — strike through and add superseding rows if needed.)*
 
@@ -433,10 +441,10 @@ Track answers here as the experiment proceeds.
 |------|------|
 | `docs/RESPONSE_COMMAND_PLANNER.md` | This plan |
 | `http/plan.odin` | Types + pure `plan_body` (optimize policy) + `plan_body_materialize_only` + wire counters |
-| `http/plan_test.odin` | Table tests: cmds + context → exec op sequence; multi-op advance |
-| `http/response.odin` | Emit cmds; plan+execute (materialize or Writev multi-buffer) |
-| `http/server.odin` | Multi-buffer executor in `host_on_send`; `plan_optimize` opt |
-| `proactr/*` | Phase 4+: sendfile / true writev submit if needed |
+| `http/plan_test.odin` | Table tests: cmds + context → exec op sequence; multi-op advance; file remaining math |
+| `http/response.odin` | Emit cmds; plan+execute (materialize, Writev multi-buffer, file-region stream) |
+| `http/server.odin` | Multi-buffer + file_send executor in `host_on_send`; `plan_optimize` opt |
+| `proactr/*` | Future: kernel sendfile / true writev submit if needed |
 
 ---
 

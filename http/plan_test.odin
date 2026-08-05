@@ -571,12 +571,67 @@ test_plan_is_writev_wire_gate :: proc(t: ^testing.T) {
 	m := plan_body_materialize_only(cmds)
 	testing.expect(t, !_plan_is_writev_wire(m))
 
-	// Sendfile plan is not Phase-3 wire Writev (falls back to materialize).
+	// Sendfile plan is not wire Writev (uses Phase 4 file path instead).
 	ctx2 := plan_context_default()
 	ctx2.sendfile_ok = true
 	ctx2.tls = false
 	sf := plan_body([]Response_Cmd{cmd_file(1, 0, 100)}, ctx2)
 	testing.expect(t, !_plan_is_writev_wire(sf))
+	testing.expect(t, _plan_is_sendfile_wire(sf))
+}
+
+@(test)
+test_plan_is_sendfile_wire_gate :: proc(t: ^testing.T) {
+	ctx := plan_context_default()
+	ctx.sendfile_ok = true
+	ctx.tls = false
+
+	// Pure file → Write_Slice + Sendfile → wire-eligible.
+	sf := plan_body([]Response_Cmd{cmd_file(7, 0, 1024)}, ctx)
+	testing.expect(t, _plan_is_sendfile_wire(sf))
+	testing.expect_value(t, sf.ops[0].kind, Exec_Op_Kind.Write_Slice)
+	testing.expect_value(t, sf.ops[1].kind, Exec_Op_Kind.Sendfile)
+	testing.expect_value(t, sf.ops[1].file_length, i64(1024))
+
+	// No sendfile → Copy_Into + Write_Slice → not Sendfile wire.
+	ctx_off := ctx
+	ctx_off.sendfile_ok = false
+	copy_plan := plan_body([]Response_Cmd{cmd_file(7, 0, 1024)}, ctx_off)
+	testing.expect(t, !_plan_is_sendfile_wire(copy_plan))
+
+	// Materialize-only never sendfile-wire.
+	mat := plan_body_materialize_only([]Response_Cmd{cmd_file(7, 0, 1024)})
+	testing.expect(t, !_plan_is_sendfile_wire(mat))
+
+	// Mixed mem + file with sendfile → Writev + Sendfile → wire-eligible.
+	mix := plan_body([]Response_Cmd{cmd_static(_big_body[:]), cmd_file(7, 0, 100)}, ctx)
+	testing.expect(t, _plan_is_sendfile_wire(mix))
+	testing.expect(t, !_plan_is_writev_wire(mix))
+}
+
+@(test)
+test_file_send_after_pread_math :: proc(t: ^testing.T) {
+	// Full chunk within remaining.
+	off, rem, ok := file_send_after_pread(100, 1000, 256)
+	testing.expect(t, ok)
+	testing.expect_value(t, off, i64(356))
+	testing.expect_value(t, rem, i64(744))
+
+	// Exact remaining.
+	off2, rem2, ok2 := file_send_after_pread(0, 64, 64)
+	testing.expect(t, ok2)
+	testing.expect_value(t, off2, i64(64))
+	testing.expect_value(t, rem2, i64(0))
+
+	// Invalid: got 0, negative, or past remaining.
+	_, _, ok0 := file_send_after_pread(0, 10, 0)
+	testing.expect(t, !ok0)
+	_, _, okn := file_send_after_pread(0, 10, -1)
+	testing.expect(t, !okn)
+	_, _, okx := file_send_after_pread(0, 10, 11)
+	testing.expect(t, !okx)
+	_, _, okr := file_send_after_pread(0, 0, 1)
+	testing.expect(t, !okr)
 }
 
 @(test)

@@ -11,23 +11,23 @@ before (and after) the executor is wired.
 
 Design north star: [`docs/RESPONSE_COMMAND_PLANNER.md`](../../docs/RESPONSE_COMMAND_PLANNER.md).
 
-## What this proves today (Phase 3)
+## What this proves today (Phase 4)
 
-- **Shadow** counters (`plan_writev_total`, …): pure `plan_body` policy per route
-- **Wire** counters (`plan_wire_writev_total`, `plan_wire_materialize_total`): what
-  the host executor actually did (`Server_Opts.plan_optimize` + route profiles)
+- **Shadow** counters (`plan_writev_total`, `plan_sendfile_total`, …): pure `plan_body` policy per route
+- **Wire** counters (`plan_wire_writev_total`, `plan_wire_materialize_total`,
+  `plan_wire_copy_into_total`, `plan_wire_sendfile_total`): what the host executor
+  actually did (`Server_Opts.plan_optimize` + route profiles)
 
 | Mode | Wire behavior |
 |------|----------------|
-| `PLAN_MODE=materialize` | `plan_optimize=false`; multi-static routes still **materialize** (copy into `resp_buf`) |
-| `PLAN_MODE=optimize` | `plan_optimize=true`; assembled uses multi `body_static` + `prefer_gather` → **multi-buffer Writev-style** sequential sends (heading + 8 slices) |
-
-Sendfile remains shadow-only until Phase 4 (`/file/1m` wire still preloaded bytes).
+| `PLAN_MODE=materialize` | `plan_optimize=false`; multi-static routes still **materialize** (copy into `resp_buf`); `/file/1m` uses preloaded bytes |
+| `PLAN_MODE=optimize` | `plan_optimize=true`; assembled → **multi-buffer Writev-style**; `/file/1m` → `body_file` + **chunked pread stream** (`plan_wire_copy_into`) |
 
 So A/B shows:
 
-- materialize → shadow + wire materialize; `plan_wire_writev_total == 0`
+- materialize → shadow + wire materialize; `plan_wire_writev_total == 0`, `plan_wire_copy_into_total == 0`
 - optimize → assembled → shadow `plan_writev` **and** `plan_wire_writev`
+- optimize → file → shadow `plan_sendfile` **and** `plan_wire_copy_into` (chunked; kernel sendfile reserved)
 - tiny/gen stay materialize under optimize (profile bias)
 - SSE never increments writev/sendfile (`stream_responses_total` only)
 
@@ -107,8 +107,9 @@ Hard fails (script non-zero) when:
 | optimize after `iso_file` | `plan_sendfile_total == 0` |
 | either | loadgen non-2xx errors, or server died |
 
-RPS/p99: Phase 3 wire Writev may show wins on `iso_assembled` / large multi-static;
-Sendfile wire still Phase 4.
+RPS/p99: wire Writev may show wins on `iso_assembled`; file path avoids full 1 MiB
+`resp_buf` materialize under optimize (`plan_wire_copy_into`). Kernel sendfile still
+future (`plan_wire_sendfile` reserved).
 
 ### Summary table
 

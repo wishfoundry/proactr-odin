@@ -1,8 +1,8 @@
 // Planner A/B demo server — body-archetype routes + plan counters.
 //
-// Phase 3: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
+// Phase 3–4: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
 // the real wire path can multi-buffer send (Writev-style) for multi-static routes
-// (e.g. /static/assembled). Sendfile still shadow-only until Phase 4.
+// and stream File regions via chunked pread+send for /file/1m (prefer_sendfile).
 //
 // Shadow plan_body counters remain for policy checks; http.plan_wire_* counters
 // show what the executor actually chose on the wire.
@@ -51,7 +51,8 @@ g_blob_1m: []u8
 g_assembled_flat: []u8 // same bytes as slices joined (wire body)
 g_file_path: string
 g_file_len: i64
-g_file_wire: []u8 // preloaded wire body (avoid per-request 1MiB temp alloc under load)
+g_file_fd: i32 = -1 // process-lifetime open for body_file wire path
+g_file_wire: []u8 // preloaded bytes for materialize-mode / fallback
 
 // --- metrics (atomic) --------------------------------------------------------
 
@@ -243,13 +244,26 @@ on_blob :: proc(req: ^http.Request, res: ^http.Response) {
 
 on_file :: proc(req: ^http.Request, res: ^http.Response) {
 	inc(&g_m.hit_file)
-	// Intent is File region (shadow plan). Wire uses preloaded bytes until Phase 4
-	// sendfile — avoids per-request read_entire_file into the request temp arena.
-	cmds := []http.Response_Cmd{http.cmd_file(3, 0, g_file_len)}
+	// Intent is File region. Shadow plan always uses File cmd.
+	// Optimize: body_file + prefer_sendfile → wire streams via chunked pread (Phase 4).
+	// Materialize: preloaded bytes (same pattern as on-disk) so load does not
+	// open/read entire file into the request temp arena per hit.
+	cmds := []http.Response_Cmd{http.cmd_file(g_file_fd >= 0 ? g_file_fd : 3, 0, g_file_len)}
 	run_shadow_plan(cmds, PROFILE_FILE)
 
 	http.headers_set(&res.headers, "server", "proactr-plan")
 	http.headers_set(&res.headers, "x-plan-profile", "file")
+	res.status = .OK
+	http.headers_set_content_type(&res.headers, "text/plain")
+
+	if g_mode == .Optimize && g_file_fd >= 0 {
+		http.response_set_profile(res, http.Handler_Profile{prefer_sendfile = true})
+		http.headers_set(&res.headers, "x-plan-wire", "body_file")
+		http.body_file(res, g_file_fd, 0, g_file_len)
+		http.respond(res)
+		return
+	}
+
 	http.headers_set(&res.headers, "x-plan-wire", "preloaded")
 	http.respond_plain(res, transmute(string)g_file_wire)
 }
@@ -275,6 +289,7 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	mode_s := g_mode == .Optimize ? "optimize" : "materialize"
 	fmt.sbprintf(&b, "# proactr plan A/B metrics\n")
 	wire_writev, wire_mat := http.plan_wire_load()
+	wire_sf, wire_ci := http.plan_wire_load_file()
 
 	fmt.sbprintf(&b, "plan_mode %s\n", mode_s)
 	fmt.sbprintf(&b, "plan_sendfile_ok %v\n", g_sendfile_ok)
@@ -288,9 +303,11 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	fmt.sbprintf(&b, "plan_patch_cl_total %d\n", sync.atomic_load(&g_m.plan_patch_cl))
 	fmt.sbprintf(&b, "plan_flush_total %d\n", sync.atomic_load(&g_m.plan_flush))
 	fmt.sbprintf(&b, "plan_other_total %d\n", sync.atomic_load(&g_m.plan_other))
-	// Phase 3 real wire executor counters (package http).
+	// Phase 3–4 real wire executor counters (package http).
 	fmt.sbprintf(&b, "plan_wire_writev_total %d\n", wire_writev)
 	fmt.sbprintf(&b, "plan_wire_materialize_total %d\n", wire_mat)
+	fmt.sbprintf(&b, "plan_wire_sendfile_total %d\n", wire_sf)
+	fmt.sbprintf(&b, "plan_wire_copy_into_total %d\n", wire_ci)
 	fmt.sbprintf(&b, "stream_responses_total %d\n", sync.atomic_load(&g_m.stream_responses))
 	fmt.sbprintf(&b, "route_hits{route=\"tiny\"} %d\n", sync.atomic_load(&g_m.hit_tiny))
 	fmt.sbprintf(&b, "route_hits{route=\"gen\"} %d\n", sync.atomic_load(&g_m.hit_gen))
@@ -411,8 +428,22 @@ main :: proc() {
 		os.exit(1)
 	}
 	g_file_len = i64(FILE_1M_SIZE)
-	// Same pattern as on-disk file for wire path under load.
+	// Same pattern as on-disk file for materialize-mode wire path under load.
 	g_file_wire = make_pattern_buf(FILE_1M_SIZE)
+	// Keep one open fd for body_file (Phase 4 optimize path). Process lifetime.
+	// Do not close until process exit — concurrent requests borrow this fd via pread.
+	{
+		f, err := os.open(g_file_path)
+		if err != nil {
+			log.errorf("open file payload %s: %v", g_file_path, err)
+			os.exit(1)
+		}
+		g_file_fd = i32(os.fd(f))
+		if g_file_fd < 0 {
+			log.errorf("invalid fd for %s", g_file_path)
+			os.exit(1)
+		}
+	}
 
 	router: http.Router
 	http.router_init(&router)

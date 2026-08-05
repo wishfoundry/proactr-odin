@@ -5,12 +5,14 @@ package http
 
 import "core:bufio"
 import "core:bytes"
+import "core:c"
 import "core:log"
 import "core:mem"
 import "core:mem/virtual"
 import "core:net"
 import "core:slice"
 import "core:sync"
+import "core:sys/posix"
 import "core:thread"
 import "core:time"
 
@@ -71,12 +73,12 @@ Server_Opts :: struct {
 	plan_max_iovecs:      u16,
 	// Allow sendfile in optimize plan when platform supports it (Linux/Darwin plain TCP).
 	// Default true in Default_Server_Opts. Ignored / false on non-posix platforms.
-	// Phase 3 wire still materializes File/Sendfile; Phase 4 executes sendfile.
+	// Phase 4: Sendfile plans stream file via chunked pread+send (not full materialize).
 	plan_sendfile_ok:     bool,
-	// When true, response_send may run plan_body and execute pure Writev as multi-buffer
-	// sequential sends (heading + borrowed body slices). Default false: materialize-only
-	// (zero profile / no surprise). Harness sets true for PLAN_MODE=optimize.
-	// Also enabled per-request when Response profile has prefer_gather.
+	// When true, response_send may run plan_body and execute Writev / Sendfile wire paths.
+	// Default false: materialize-only (zero profile / no surprise). Harness sets true for
+	// PLAN_MODE=optimize. Also enabled per-request when Response profile has prefer_gather
+	// or prefer_sendfile.
 	plan_optimize:        bool,
 }
 
@@ -423,7 +425,15 @@ connection_set_state :: proc(c: ^Connection, s: Connection_State) -> bool {
 // (exec_bufs[exec_i] advanced on partial). Body slices are borrowed Static/Bytes and
 // must remain valid until the final CQE (no conn_temp_reset until then).
 // Max slots = PLAN_MAX_BODY_CMDS + 1 (heading).
+//
+// Phase 4 file region: after heading (and optional mem iovecs) complete, stream a
+// File cmd via chunked pread into file_send_buf + sequential submit_send.
+// file_send_remaining > 0 means more file bytes remain to load; the current chunk
+// is still pending_send until fully drained. Host does NOT close file_send_fd —
+// the handler/app owns the fd for the full send lifetime.
 PLAN_MAX_EXEC_BUFS :: PLAN_MAX_BODY_CMDS + 1
+// Scratch size for Phase 4 chunked file send (not full-file materialize).
+FILE_SEND_CHUNK :: 64 * 1024
 
 Connection :: struct {
 	server:         ^Server,
@@ -438,12 +448,19 @@ Connection :: struct {
 	resp_buf:       [dynamic]u8,
 	loop:           Loop,
 	// Remaining response bytes for (possibly multi-CQE) send. Valid until send fully completes.
-	// Slices into resp_buf (materialize) or exec_bufs[exec_i] (multi-buffer Writev path).
+	// Slices into resp_buf (materialize), exec_bufs[exec_i] (Writev), or file_send_buf (Phase 4).
 	pending_send:   []u8,
 	// Multi-buffer send queue (Phase 3). exec_n == 0 → single-buffer / inactive.
 	exec_bufs:      [PLAN_MAX_EXEC_BUFS][]u8,
 	exec_i:         int,
 	exec_n:         int,
+	// Phase 4 file-region stream. fd < 0 → inactive (handler owns fd; host never closes).
+	// remaining = bytes not yet pread into a pending chunk; after last fill remaining==0
+	// while the last chunk is still in pending_send (fd still set until clear).
+	file_send_fd:        i32,
+	file_send_off:       i64,
+	file_send_remaining: i64,
+	file_send_buf:       []u8, // conn_allocator scratch; len==FILE_SEND_CHUNK when allocated
 	// True while a close SQE is outstanding.
 	close_pending:  bool,
 	// Set on shutdown for Idle/New conns that still have a pending Recv; close on that CQE.
@@ -830,6 +847,9 @@ host_on_accept :: proc(s: ^Server, result: i32, cqe_flags: u32) {
 	c.pending_send = nil
 	c.exec_i = 0
 	c.exec_n = 0
+	c.file_send_fd = -1
+	c.file_send_off = 0
+	c.file_send_remaining = 0
 	c.fixed_idx = -1
 	// reg_buf_index / scanner_pooled / temp_slot already set by conn_alloc.
 
@@ -916,6 +936,126 @@ exec_queue_after_send :: proc(
 	return nil, next, true
 }
 
+// Pure math: after pread of `got` bytes from a known remaining region.
+// Returns false if got is invalid (0, negative, or > remaining).
+@(private)
+file_send_after_pread :: proc(off, remaining, got: i64) -> (new_off, new_remaining: i64, ok: bool) {
+	if remaining <= 0 || got <= 0 || got > remaining {
+		return off, remaining, false
+	}
+	return off + got, remaining - got, true
+}
+
+// Clear Phase 4 file-region cursor. Keeps file_send_buf allocation for reuse.
+// Does not close file_send_fd (handler ownership).
+@(private)
+_conn_clear_file_send :: proc(conn: ^Connection) {
+	conn.file_send_fd = -1
+	conn.file_send_off = 0
+	conn.file_send_remaining = 0
+}
+
+// Ensure conn.file_send_buf has FILE_SEND_CHUNK capacity (conn_allocator, permanent).
+@(private)
+_conn_ensure_file_send_buf :: proc(conn: ^Connection) -> bool {
+	if len(conn.file_send_buf) >= FILE_SEND_CHUNK {
+		return true
+	}
+	if conn.server == nil {
+		return false
+	}
+	if conn.file_send_buf != nil {
+		delete(conn.file_send_buf, conn.server.conn_allocator)
+		conn.file_send_buf = nil
+	}
+	conn.file_send_buf = make([]u8, FILE_SEND_CHUNK, conn.server.conn_allocator)
+	return len(conn.file_send_buf) == FILE_SEND_CHUNK
+}
+
+// pread next file chunk into file_send_buf and set pending_send.
+// On success: pending_send non-empty, off/remaining advanced.
+// On failure: state uncleared (caller closes connection).
+@(private)
+_conn_file_send_fill_chunk :: proc(conn: ^Connection) -> bool {
+	if conn.file_send_remaining <= 0 {
+		return false
+	}
+	if !_conn_ensure_file_send_buf(conn) {
+		log.errorf("file_send: scratch alloc failed fd=%v", conn.socket)
+		return false
+	}
+	want := conn.file_send_remaining
+	if want > i64(FILE_SEND_CHUNK) {
+		want = i64(FILE_SEND_CHUNK)
+	}
+	n := int(want)
+	when ODIN_OS == .Windows {
+		log.errorf("file_send: pread not available on Windows (fd=%d)", conn.file_send_fd)
+		return false
+	} else {
+		got := posix.pread(
+			posix.FD(conn.file_send_fd),
+			raw_data(conn.file_send_buf),
+			c.size_t(n),
+			posix.off_t(conn.file_send_off),
+		)
+		if got < 0 {
+			log.errorf("file_send pread failed fd=%v file=%d: %v", conn.socket, conn.file_send_fd, posix.errno())
+			return false
+		}
+		if got == 0 {
+			log.errorf("file_send short/EOF fd=%v file=%d remaining=%d", conn.socket, conn.file_send_fd, conn.file_send_remaining)
+			return false
+		}
+		new_off, new_rem, ok := file_send_after_pread(conn.file_send_off, conn.file_send_remaining, i64(got))
+		if !ok {
+			return false
+		}
+		conn.file_send_off = new_off
+		conn.file_send_remaining = new_rem
+		// Last chunk: mark fd inactive once remaining hits 0 so post-send path finishes.
+		// Keep fd value until fully drained? remaining==0 alone is enough with fd check.
+		if new_rem == 0 {
+			// Mark inactive only after this last chunk is fully sent — keep fd non-zero
+			// so host_on_send knows a file stream was in progress? Simpler: remaining==0
+			// after fill means this is the last pending chunk; after it sends, done.
+			// file_send_fd stays set until _conn_clear_file_send on complete/error.
+		}
+		conn.pending_send = conn.file_send_buf[:int(got)]
+		return true
+	}
+}
+
+// After a full buffer (header / mem / chunk) has been sent: either fill next file
+// chunk, or finish the response. Returns true if a new send was submitted (or clean
+// completed); false if connection was closed on error.
+@(private)
+_conn_file_send_continue_or_finish :: proc(conn: ^Connection) -> bool {
+	if conn.file_send_remaining > 0 {
+		if !_conn_file_send_fill_chunk(conn) {
+			_conn_clear_exec(conn)
+			connection_close(conn)
+			return false
+		}
+		if len(conn.pending_send) == 0 {
+			_conn_clear_exec(conn)
+			connection_close(conn)
+			return false
+		}
+		if err := host_submit_send(conn); err != .None {
+			log.errorf("submit_send (file chunk) failed: %v", err)
+			_conn_clear_exec(conn)
+			connection_close(conn)
+			return false
+		}
+		return true
+	}
+	// File region fully loaded and prior chunk fully sent (or zero-length file).
+	_conn_clear_exec(conn)
+	clean_request_loop(conn)
+	return true
+}
+
 @(private)
 _conn_clear_exec :: proc(conn: ^Connection) {
 	conn.exec_i = 0
@@ -925,6 +1065,8 @@ _conn_clear_exec :: proc(conn: ^Connection) {
 	for i in 0 ..< len(conn.exec_bufs) {
 		conn.exec_bufs[i] = nil
 	}
+	_conn_clear_file_send(conn)
+	// Keep file_send_buf for reuse across requests.
 }
 
 @(private)
@@ -932,7 +1074,7 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Deferred close while a send SQE was outstanding: account for this CQE first.
-	// Mid multi-buffer: abort remaining queue (partial response already on the wire).
+	// Mid multi-buffer / file stream: abort remaining queue (partial response on wire).
 	if conn.close_on_io {
 		_conn_clear_exec(conn)
 		conn.close_on_io = false
@@ -961,6 +1103,7 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 	n := int(result)
 
 	// Multi-buffer Writev-style queue (Phase 3): advance within/across exec_bufs.
+	// When the queue finishes and a file region remains (Writev+Sendfile mixed), stream it.
 	if conn.exec_n > 0 {
 		new_pending, new_i, finished := exec_queue_after_send(
 			conn.exec_bufs[:conn.exec_n],
@@ -970,9 +1113,18 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 			n,
 		)
 		if finished {
-			_conn_clear_exec(conn)
-			// Full multi-buffer response delivered; free request state only now.
-			// (Zero-progress / error completions are closed above before this path.)
+			// Clear mem queue slots; file_send_* preserved if active.
+			conn.exec_i = 0
+			conn.exec_n = 0
+			conn.pending_send = nil
+			for i in 0 ..< len(conn.exec_bufs) {
+				conn.exec_bufs[i] = nil
+			}
+			if conn.file_send_remaining > 0 {
+				_ = _conn_file_send_continue_or_finish(conn)
+				return
+			}
+			_conn_clear_file_send(conn)
 			clean_request_loop(conn)
 			return
 		}
@@ -995,28 +1147,42 @@ host_on_send :: proc(conn: ^Connection, result: i32) {
 		return
 	}
 
-	// Single-buffer path (materialize / body_reserve / chunked / HEAD-via-writev).
+	// Single-buffer or file-chunk path: partial send within current pending.
 	if n < len(conn.pending_send) {
 		// Partial send — advance and resubmit. Buffer still owned until full send.
 		// n==0 already closed above; n>0 here.
 		conn.pending_send = conn.pending_send[n:]
 		if len(conn.pending_send) == 0 {
 			// Should not happen (n < len implies remainder > 0); fail closed.
-			conn.pending_send = nil
+			_conn_clear_exec(conn)
 			connection_close(conn)
 			return
 		}
 		if err := host_submit_send(conn); err != .None {
 			log.errorf("submit_send (partial) failed: %v", err)
-			conn.pending_send = nil
+			_conn_clear_exec(conn)
 			connection_close(conn)
 		}
 		return
 	}
 
+	// Current buffer fully sent.
 	conn.pending_send = nil
 
-	// Full HTTP response delivered; free request state only now.
+	// Phase 4: more file bytes to stream, or last chunk just finished (remaining==0
+	// after prior fill — then file_send_fd still set until clear).
+	if conn.file_send_remaining > 0 {
+		_ = _conn_file_send_continue_or_finish(conn)
+		return
+	}
+	if conn.file_send_fd >= 0 {
+		// Last file chunk fully delivered (remaining already 0 after last pread).
+		_conn_clear_file_send(conn)
+		clean_request_loop(conn)
+		return
+	}
+
+	// Single-buffer path complete (materialize / body_reserve / HEAD).
 	clean_request_loop(conn)
 }
 
