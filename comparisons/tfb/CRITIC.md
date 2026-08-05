@@ -104,11 +104,17 @@ Not shippable as a fair peer matrix until remaining IMPORTANT gaps are closed or
 
 ---
 
-## Top 3 fixes remaining (ordered by impact)
+## Closed after profile-matrix v1 + honesty pack
 
-1. **I1** — fail-closed body re-check after load (kill SIZE_WARN soft pass for profile matrix).
-2. **I3 + I2** — published tables split by mechanism (assembled preconcat vs multi_send; SSE chunked stream vs CL oneshot). No mixed ranking.
-3. **I5 + I4** — rename writev counter; make peer gen do real per-request fill.
+| Item | Status |
+|------|--------|
+| I1 post-load body re-check → INVALID | **CLOSED** |
+| I2 SSE peer-fair CL oneshot | **CLOSED** |
+| I3 mechanism-split published tables | **CLOSED** (`results/PROFILE_MATRIX_RESULTS.md`) |
+| I5 writev counter name | **CLOSED** → `plan_wire_multi_send_total` |
+| Drogon oha size | **Documented** in meta + results |
+
+**Standing residual (not fail-closed):** gen is static-bytes framing (all peers), not “handler build” work; peers still preconcat assembled (no multi-iov peer).
 
 ---
 
@@ -120,4 +126,4 @@ Not shippable as a fair peer matrix until remaining IMPORTANT gaps are closed or
 4. Call shortcuts by name with file:line.
 5. Prefer CRITICAL / IMPORTANT / NIT.
 
-**Return: FAIL until I1–I3 closed or results are published with mechanism-split tables and no soft size passes.**
+**Profile matrix package status:** ready for external **judge** re-score (not for kernel writev marketing).
