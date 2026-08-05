@@ -448,13 +448,16 @@ plan_body_materialize_only :: proc(cmds: []Response_Cmd) -> Plan_Result {
 		switch c.kind {
 		case .Static, .Bytes:
 			r.n_mem += 1
-			r.total_body += i64(len(c.bytes))
+			// Once unknown, stay unknown (do not add further lengths).
+			if r.total_body >= 0 {
+				r.total_body += i64(len(c.bytes))
+			}
 		case .File:
 			r.n_file += 1
-			if c.length >= 0 {
-				r.total_body += c.length
-			} else {
+			if c.length < 0 {
 				r.total_body = -1
+			} else if r.total_body >= 0 {
+				r.total_body += c.length
 			}
 		}
 	}

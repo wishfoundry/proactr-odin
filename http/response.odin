@@ -102,11 +102,16 @@ body_file :: proc(r: ^Response, fd: i32, offset: i64, length: i64, loc := #calle
 /*
 Prefer the procedure group `body_set`.
 
-Appends a Static body command. Does not write the HTTP heading yet — headers and status
-remain mutable until respond / plan / send. (body_reserve and response_writer still write
-the heading immediately.)
+Sets a single Static body command (exclusive). Does not write the HTTP heading yet — headers
+and status remain mutable until respond / plan / send. (body_reserve and response_writer still
+write the heading immediately.)
+
+For multi-part bodies use body_static / body_bytes / body_file (append). Double body_set asserts
+like pre-Phase-1 (body already written).
 */
 body_set_bytes :: proc(r: ^Response, byts: []byte, loc := #caller_location) {
+	// Preserve exclusive "set" semantics; multi-cmd is via body_static/body_bytes/body_file.
+	assert(r._cmd_count == 0, "the response body has already been written", loc)
 	// Borrowed for response lifetime; materialize copies into resp_buf at send.
 	body_static(r, byts, loc)
 }
@@ -120,12 +125,13 @@ body_set_str :: proc(r: ^Response, str: string, loc := #caller_location) {
 }
 
 /*
-Sets the response body by appending body command(s).
+Sets the response body to a single Static command (exclusive; second call asserts).
 
 Unlike the pre-Phase-1 path, this does **not** freeze headers: you may still add headers
 or change status until respond. Heading + body are materialised at send time into the
 single-buffer Write_Slice path (plan_body_materialize_only).
 
+Multi-part bodies: body_static / body_bytes / body_file (append).
 For in-place fixed-CL bodies use body_reserve / body_commit.
 For unknown size / io.Writer use response_writer_init (chunked; heading written early).
 */
@@ -536,6 +542,33 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 	}
 }
 
+// True when this response is for a HEAD (or redirect_head_to_get synthetic GET).
+@(private)
+_response_is_head :: proc(conn: ^Connection) -> bool {
+	if conn.loop.req.is_head {
+		return true
+	}
+	if line, ok := conn.loop.req.line.?; ok {
+		return line.method == .Head
+	}
+	return false
+}
+
+// Truncate wire buffer to the HTTP heading only (end of header block). Used for HEAD
+// on body_reserve / chunked paths where the body was already written into _buf.
+@(private)
+_response_strip_body_keep_heading :: proc(r: ^Response) {
+	buf := r._buf.buf[:]
+	// Responses we format always end the header block with \r\n\r\n.
+	for i := 0; i + 3 < len(buf); i += 1 {
+		if buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n' {
+			resize(&r._buf.buf, i + 4)
+			return
+		}
+	}
+	// Malformed / empty: leave buffer alone rather than invent a strip point.
+}
+
 // Phase 1: plan_body_materialize_only + copy cmds into _buf as one Write_Slice payload.
 // Not used when body_reserve / response_writer already wrote the heading into _buf.
 @(private)
@@ -548,17 +581,21 @@ _response_materialize_cmds :: proc(r: ^Response) {
 	assert(plan.materialized && plan.op_count == 1 && plan.ops[0].kind == .Write_Slice)
 
 	// Content-Length: sum of known lengths. Phase 1 requires known body size.
+	// Validate *before* writing the heading so a bad File.length cannot emit a wrong CL
+	// and then assert mid-materialize (or worse under -disable-assert).
 	body_len: int
-	if plan.total_body >= 0 {
-		body_len = int(plan.total_body)
-	} else {
-		// Unknown file length — still require known size for CL materialize path.
-		for c in cmds {
-			n, ok := cmd_known_length(c)
-			assert(ok, "Phase 1 materialize requires known body length (set File.length)")
-			body_len += int(n)
-		}
+	assert(plan.total_body >= 0, "Phase 1 materialize requires known body length (set File.length)")
+	// Prefer recompute from cmds so a planner bug cannot poison CL.
+	body_len = 0
+	for c in cmds {
+		n, ok := cmd_known_length(c)
+		assert(ok, "Phase 1 materialize requires known body length (set File.length)")
+		assert(n >= 0)
+		// Overflow guard: body must fit in int (buffer length).
+		assert(i64(body_len) + n <= i64(max(int)))
+		body_len += int(n)
 	}
+	assert(i64(body_len) == plan.total_body, "plan total_body mismatch vs cmd lengths")
 
 	t0_build: u64
 	when HTTP_PHASE_STATS {
@@ -566,6 +603,14 @@ _response_materialize_cmds :: proc(r: ^Response) {
 	}
 
 	_response_write_heading(r, body_len)
+
+	// HEAD: headers + Content-Length only; do not copy/read body (RFC 9110 §9.3.2).
+	if _response_is_head(r._conn) {
+		when HTTP_PHASE_STATS {
+			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+		}
+		return
+	}
 
 	for c in cmds {
 		switch c.kind {
@@ -582,12 +627,24 @@ _response_materialize_cmds :: proc(r: ^Response) {
 }
 
 // Sync pread of a File cmd region into the response wire buffer (Phase 1 only).
+// fd must remain open and the region readable until this returns (send copies into resp_buf).
 @(private)
 _response_materialize_file :: proc(r: ^Response, cmd: Response_Cmd) {
 	assert(cmd.kind == .File)
 	assert(cmd.length >= 0, "Phase 1 file materialize needs known length")
+	// Guard against -disable-assert + length=-1 (int(-1) would grow absurdly / UB).
+	if cmd.length < 0 {
+		log.errorf("body_file materialize rejected unknown length (fd=%d)", cmd.fd)
+		return
+	}
 	n := int(cmd.length)
 	if n == 0 {
+		return
+	}
+	// length that does not fit int (32-bit hosts / huge files): refuse.
+	if i64(n) != cmd.length {
+		log.errorf("body_file materialize length does not fit int: %d", cmd.length)
+		assert(false, "file body length too large for materialize buffer")
 		return
 	}
 
@@ -595,28 +652,37 @@ _response_materialize_file :: proc(r: ^Response, cmd: Response_Cmd) {
 	dst := _dynamic_unwritten(r._buf.buf)
 	assert(len(dst) >= n)
 
-	total := 0
-	off := cmd.offset
-	for total < n {
-		got := posix.pread(
-			posix.FD(cmd.fd),
-			raw_data(dst[total:n]),
-			c.size_t(n - total),
-			posix.off_t(off),
-		)
-		if got < 0 {
-			log.errorf("body_file materialize pread failed: %v", posix.errno())
-			assert(false, "file body pread failed during materialize")
-			return
+	when ODIN_OS == .Windows {
+		// Host HTTP path is POSIX/Linux; Windows ring exists but this host is not wired.
+		// Avoid referencing posix.pread (not available). Fail closed rather than wrong data.
+		_ = dst
+		log.errorf("body_file materialize: pread not available on Windows (fd=%d)", cmd.fd)
+		assert(false, "body_file materialize unsupported on Windows in Phase 1")
+		return
+	} else {
+		total := 0
+		off := cmd.offset
+		for total < n {
+			got := posix.pread(
+				posix.FD(cmd.fd),
+				raw_data(dst[total:n]),
+				c.size_t(n - total),
+				posix.off_t(off),
+			)
+			if got < 0 {
+				log.errorf("body_file materialize pread failed: %v", posix.errno())
+				assert(false, "file body pread failed during materialize")
+				return
+			}
+			if got == 0 {
+				assert(false, "file body short/EOF during materialize")
+				return
+			}
+			total += int(got)
+			off += i64(got)
 		}
-		if got == 0 {
-			assert(false, "file body short/EOF during materialize")
-			return
-		}
-		total += int(got)
-		off += i64(got)
+		_dynamic_add_len(&r._buf.buf, n)
 	}
-	_dynamic_add_len(&r._buf.buf, n)
 }
 
 @(private)
@@ -638,6 +704,9 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		} else if bytes.buffer_length(&r._buf) == 0 {
 			_response_write_heading(r, 0)
 		}
+	} else if _response_is_head(conn) {
+		// body_reserve / response_writer already put body bytes in _buf — drop them for HEAD.
+		_response_strip_body_keep_heading(r)
 	}
 
 	// Build the full response buffer, then submit_send. Do NOT reset scrap arena

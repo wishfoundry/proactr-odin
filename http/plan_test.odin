@@ -226,6 +226,22 @@ test_plan_materialize_only_always_write_slice :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_plan_materialize_only_unknown_length_stays_unknown :: proc(t: ^testing.T) {
+	// Regression: once total_body is -1, later known lengths must not add into it
+	// (previously File(-1) then Static corrupted total to -1+len).
+	cmds := []Response_Cmd {
+		cmd_file(1, 0, -1),
+		cmd_static(_small_a[:]),
+		cmd_file(2, 0, 50),
+	}
+	r := plan_body_materialize_only(cmds)
+	testing.expect_value(t, r.total_body, i64(-1))
+	testing.expect_value(t, r.n_file, 2)
+	testing.expect_value(t, r.n_mem, 1)
+	testing.expect(t, r.materialized)
+}
+
+@(test)
 test_cmd_caps_static_and_file :: proc(t: ^testing.T) {
 	s := cmd_static(_small_a[:])
 	testing.expect(t, .Borrowed in cmd_caps(s))
