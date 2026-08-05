@@ -21,13 +21,13 @@ Design north star: [`docs/RESPONSE_COMMAND_PLANNER.md`](../../docs/RESPONSE_COMM
 | Mode | Wire behavior |
 |------|----------------|
 | `PLAN_MODE=materialize` | `plan_optimize=false`; multi-static routes still **materialize** (copy into `resp_buf`); `/file/1m` uses preloaded bytes |
-| `PLAN_MODE=optimize` | `plan_optimize=true`; assembled → **multi-buffer Writev-style**; `/file/1m` → `body_file` + **chunked pread stream** (`plan_wire_copy_into`) |
+| `PLAN_MODE=optimize` | `plan_optimize=true`; assembled → **kernel WRITEV** (Linux) or multi_send; `/file/1m` → **sendfile(2)** (Linux) or chunked pread (`plan_wire_copy_into`) |
 
 So A/B shows:
 
-- materialize → shadow + wire materialize; `plan_wire_writev_total == 0`, `plan_wire_copy_into_total == 0`
-- optimize → assembled → shadow `plan_writev` **and** `plan_wire_writev`
-- optimize → file → shadow `plan_sendfile` **and** `plan_wire_copy_into` (chunked; kernel sendfile reserved)
+- materialize → shadow + wire materialize; multi_send/kernel_writev/sendfile/copy_into == 0 on body routes that only materialize
+- optimize → assembled → shadow `plan_writev` **and** `plan_wire_kernel_writev` (Linux) or `plan_wire_multi_send` (fallback)
+- optimize → file → shadow `plan_sendfile` **and** `plan_wire_sendfile` (Linux kernel) or `plan_wire_copy_into` (fallback)
 - tiny/gen stay materialize under optimize (profile bias)
 - SSE never increments writev/sendfile (`stream_responses_total` only)
 
@@ -55,6 +55,7 @@ So A/B shows:
 | `PLAN_COPY_BUDGET` | `4096` | Global preferred_copy_budget |
 | `PLAN_MAX_IOVECS` | `1024` | Gather budget |
 | `PLAN_DATA_DIR` | `/tmp/proactr-plan-bench` | Generated `file-1m.bin` |
+| `PLAN_WIRE_MODE` | `kernel` (Linux) | `kernel` → IORING_OP_WRITEV + sendfile(2); `fallback` → multi_send + chunked pread. Non-Linux always fallback. |
 
 ## Build & manual smoke
 

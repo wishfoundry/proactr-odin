@@ -310,6 +310,7 @@ on_metrics :: proc(req: ^http.Request, res: ^http.Response) {
 	fmt.sbprintf(&b, "plan_other_total %d\n", sync.atomic_load(&g_m.plan_other))
 	// Phase 3–4 real wire executor counters (package http).
 	fmt.sbprintf(&b, "plan_wire_multi_send_total %d\n", wire_multi)
+	fmt.sbprintf(&b, "plan_wire_kernel_writev_total %d\n", http.plan_wire_load_kernel_writev())
 	fmt.sbprintf(&b, "plan_wire_materialize_total %d\n", wire_mat)
 	fmt.sbprintf(&b, "plan_wire_sendfile_total %d\n", wire_sf)
 	fmt.sbprintf(&b, "plan_wire_copy_into_total %d\n", wire_ci)

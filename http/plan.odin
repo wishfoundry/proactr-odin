@@ -7,42 +7,82 @@ Phase 1–2: handlers emit Response_Cmd via body_* helpers; optional body middle
 rewrites cmds; default wire path is plan_body_materialize_only → one Write_Slice.
 
 Phase 3 wire: when Server_Opts.plan_optimize or Handler_Profile.prefer_gather,
-response_send runs plan_body; pure Writev becomes a multi-buffer sequential send
-queue (heading + borrowed body slices) without requiring kernel writev.
+response_send runs plan_body; pure Writev prefers Linux IORING_OP_WRITEV
+(plan_wire_kernel_writev_total), falling back to multi-buffer sequential send
+(plan_wire_multi_send_total) on Unsupported / PLAN_WIRE_MODE=fallback.
 
-Phase 4 wire: plan Write_Slice/Writev + Sendfile streams the file region via
-chunked pread + sequential submit_send (portable; not kernel sendfile yet).
-Copy_Into plans and plan_optimize off still full-materialize File into resp_buf.
+Phase 4 wire: plan Write_Slice/Writev + Sendfile prefers Linux sendfile(2)
+(plan_wire_sendfile_total), falling back to chunked pread + sequential send
+(plan_wire_copy_into_total). Copy_Into plans and plan_optimize off still
+full-materialize File into resp_buf.
 
 Phase 5: SSE / long-lived streams use Response_Stream (begin/write/flush/end),
 NOT Response_Cmd / plan_body. plan_wire_* does not count stream bodies.
+
+PLAN_WIRE_MODE env (Linux): "kernel" (default) | "fallback" — force multi_send/copy_into.
 
 See docs/RESPONSE_COMMAND_PLANNER.md.
 
 Intent (handlers / middleware)  →  Response_Cmd[]
 Policy (this file)              →  Plan_Result / Exec_Op[]
-Mechanism (executor / proactr)  →  multi-buffer send / file-region stream / Write_Slice
+Mechanism (executor / proactr)  →  writev / sendfile / multi-send / file-region stream
 Stream (Phase 5)                →  Response_Stream (chunked TE; separate lifetime)
 */
 
+import "core:os"
 import "core:sync"
 
 // Wire-path mechanism counters (Phase 3–4). Atomic; safe across workers.
 // Harness /metrics can load these to prove real wire paths vs materialize.
 // Stream responses use stream_responses_total (Phase 5), not these plan_wire_*.
 //
-// multi_send = sequential multi-buffer submit_send (NOT kernel writev).
-// copy_into  = chunked pread+send (NOT kernel sendfile).
-plan_wire_multi_send_total:  u64
-plan_wire_materialize_total: u64
-// Phase 4: kernel sendfile path (reserved; 0 until real sendfile lands).
-plan_wire_sendfile_total:    u64
-// Phase 4: chunked pread+send of a Sendfile plan (no full-file resp_buf load).
-plan_wire_copy_into_total:   u64
+// multi_send      = sequential multi-buffer submit_send (fallback when no kernel writev)
+// kernel_writev   = IORING_OP_WRITEV gather (Linux)
+// copy_into       = chunked pread+send (fallback when no kernel sendfile)
+// sendfile        = real sendfile(2) file→socket (Linux)
+plan_wire_multi_send_total:     u64
+plan_wire_kernel_writev_total:  u64
+plan_wire_materialize_total:    u64
+plan_wire_sendfile_total:       u64
+plan_wire_copy_into_total:      u64
 // Phase 5: response_begin_stream → stream_end completed (not a plan_body path).
-stream_responses_total:      u64
+stream_responses_total:         u64
 
-// Deprecated alias name — do not use in new code. Same counter as multi_send.
+// PLAN_WIRE_MODE: lazy once. Linux default prefer kernel; non-Linux always false.
+@(private)
+_plan_wire_mode_inited: bool
+@(private)
+_plan_wire_prefer_kernel: bool
+
+// plan_wire_prefer_kernel: true when host should try submit_writev / submit_sendfile.
+// Override with PLAN_WIRE_MODE=fallback (or multi_send) to force portable paths.
+// PLAN_WIRE_MODE=kernel (default on Linux) prefers kernel ops; non-Linux always false
+// after env parse (kernel ops return Unsupported there).
+plan_wire_prefer_kernel :: proc() -> bool {
+	if !_plan_wire_mode_inited {
+		_plan_wire_mode_inited = true
+		when ODIN_OS == .Linux {
+			_plan_wire_prefer_kernel = true
+		} else {
+			_plan_wire_prefer_kernel = false
+		}
+		// Env always consulted so PLAN_WIRE_MODE=fallback is documented/portable.
+		if v, ok := os.lookup_env("PLAN_WIRE_MODE", context.allocator); ok {
+			defer delete(v, context.allocator)
+			switch v {
+			case "fallback", "multi_send", "copy_into", "0", "false":
+				_plan_wire_prefer_kernel = false
+			case "kernel", "1", "true":
+				when ODIN_OS == .Linux {
+					_plan_wire_prefer_kernel = true
+				}
+			}
+		}
+	}
+	return _plan_wire_prefer_kernel
+}
+
+// Deprecated alias name — multi_send only (not kernel writev). Prefer plan_wire_load.
 plan_wire_writev_total :: proc() -> u64 {
 	return sync.atomic_load(&plan_wire_multi_send_total)
 }
@@ -54,10 +94,15 @@ plan_wire_inc_writev :: #force_inline proc() {
 
 plan_wire_inc_multi_send :: plan_wire_inc_writev
 
+plan_wire_inc_kernel_writev :: #force_inline proc() {
+	sync.atomic_add(&plan_wire_kernel_writev_total, u64(1))
+}
+
 plan_wire_inc_materialize :: #force_inline proc() {
 	sync.atomic_add(&plan_wire_materialize_total, u64(1))
 }
 
+// Only call when real kernel sendfile/splice path armed (not chunked pread).
 plan_wire_inc_sendfile :: #force_inline proc() {
 	sync.atomic_add(&plan_wire_sendfile_total, u64(1))
 }
@@ -72,6 +117,10 @@ stream_inc_responses :: #force_inline proc() {
 
 plan_wire_load :: proc() -> (multi_send: u64, materialize: u64) {
 	return sync.atomic_load(&plan_wire_multi_send_total), sync.atomic_load(&plan_wire_materialize_total)
+}
+
+plan_wire_load_kernel_writev :: proc() -> u64 {
+	return sync.atomic_load(&plan_wire_kernel_writev_total)
 }
 
 plan_wire_load_file :: proc() -> (sendfile: u64, copy_into: u64) {

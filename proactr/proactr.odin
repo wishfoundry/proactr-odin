@@ -51,7 +51,11 @@ Operation_Kind :: enum u8 {
 	Send,
 	Close,
 	Timeout,
-	// Connect, Writev, … later
+	// Linux: IORING_OP_WRITEV gather write (socket or file).
+	Writev,
+	// Linux: zero-copy file→socket via sendfile(2); EAGAIN uses POLL_ADD.
+	// Other platforms: submit_sendfile returns .Unsupported.
+	Sendfile,
 }
 
 Operation_Status :: enum u8 {
@@ -59,6 +63,13 @@ Operation_Status :: enum u8 {
 	Submitted,
 	Completed,
 	Cancelled,
+}
+
+// Io_Vec is a portable gather element (Linux iovec layout-compatible).
+// Caller-owned; must stay valid until the Writev CQE is harvested and the op freed.
+Io_Vec :: struct {
+	base: rawptr,
+	len:  uint,
 }
 
 // Operation is the portable in-flight / completed work unit.
@@ -72,7 +83,7 @@ Operation :: struct {
 	result: i32,
 	// Recv/Send buffer (caller owns; valid until completion applied + free).
 	buf:    []u8,
-	// Accept: listen fd. Recv/Send/Close: connection fd (raw).
+	// Accept: listen fd. Recv/Send/Close/Writev/Sendfile: connection fd (raw).
 	fd:     i32,
 	// Completion flags (e.g. COMPLETION_MORE).
 	flags:  u32,
@@ -80,6 +91,15 @@ Operation :: struct {
 	continuous: bool,
 	// Linux fixed-file index; -1 = raw fd. Ignored on other backends.
 	fixed_idx: i32,
+	// Writev: pointer to Io_Vec array + count (caller-owned until CQE).
+	iov_ptr:   rawptr,
+	iov_count: u32,
+	// Sendfile: input file fd + starting offset + remaining byte count for this submit.
+	file_fd: i32,
+	offset:  i64,
+	nbytes:  u64,
+	// Linux Sendfile: true while waiting on POLL_ADD (POLLOUT) after EAGAIN.
+	awaiting_poll: bool,
 }
 
 // Backward-compatible aliases (prefer Operation / Operation_Kind).
@@ -316,6 +336,61 @@ submit_close :: proc(
 	op.fd = fd
 	op.fixed_idx = fixed_idx
 	return _finish_submit(r, oid, op, _submit_close(r, oid, op))
+}
+
+// submit_writev enqueues a gather write (Linux: IORING_OP_WRITEV).
+// iovecs must remain valid until the matching completion is harvested and the op freed.
+// fixed_idx: Linux fixed-file slot for the socket/fd; -1 = raw fd.
+// Non-Linux backends return .Unsupported.
+submit_writev :: proc(
+	r: ^Ring,
+	fd: i32,
+	iovecs: []Io_Vec,
+	user: rawptr = nil,
+	fixed_idx: i32 = -1,
+) -> (id: u32, err: Error) {
+	if len(iovecs) == 0 {
+		return 0, .Invalid_Op
+	}
+	oid, op, e := _begin_submit(r, .Writev, user)
+	if e != .None {
+		return 0, e
+	}
+	op.fd = fd
+	op.fixed_idx = fixed_idx
+	op.iov_ptr = raw_data(iovecs)
+	op.iov_count = u32(len(iovecs))
+	return _finish_submit(r, oid, op, _submit_writev(r, oid, op))
+}
+
+// submit_sendfile zero-copies file_fd[offset..offset+length) to sock_fd.
+// Linux: real sendfile(2); short transfers complete with bytes sent (host advances
+// and resubmits). EAGAIN arms POLL_ADD then retries before completing.
+// Non-Linux backends return .Unsupported (host should fall back to pread+send).
+// fixed_idx applies to the socket for poll/wait only; sendfile uses raw fds.
+submit_sendfile :: proc(
+	r: ^Ring,
+	sock_fd: i32,
+	file_fd: i32,
+	offset: i64,
+	length: u64,
+	user: rawptr = nil,
+	fixed_idx: i32 = -1,
+) -> (id: u32, err: Error) {
+	if file_fd < 0 || length == 0 {
+		return 0, .Invalid_Op
+	}
+	oid, op, e := _begin_submit(r, .Sendfile, user)
+	if e != .None {
+		return 0, e
+	}
+	op.fd = sock_fd
+	op.fixed_idx = fixed_idx
+	op.file_fd = file_fd
+	op.offset = offset
+	op.nbytes = length
+	op.awaiting_poll = false
+	return _finish_submit(r, oid, op, _submit_sendfile(r, oid, op))
 }
 
 // --- wait / complete --------------------------------------------------------

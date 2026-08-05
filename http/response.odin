@@ -912,8 +912,9 @@ _cmds_mem_body_len :: proc(cmds: []Response_Cmd) -> (body_len: int, ok: bool) {
 	return body_len, true
 }
 
-// Phase 3 Writev-style wire: heading in resp_buf; body slices borrowed from cmds.
-// Builds conn.exec_bufs = [heading, body1, …] and submits the first send.
+// Phase 3 Writev wire: heading in resp_buf; body slices borrowed from cmds.
+// Prefers Linux IORING_OP_WRITEV (plan_wire_kernel_writev); falls back to sequential
+// multi-buffer submit_send (plan_wire_multi_send) when kernel path is unavailable.
 // Returns true if the send was submitted (or cleaned for empty). Caller must not
 // also materialize. On false, heading was not written — caller may materialize.
 //
@@ -984,7 +985,7 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 	if len(heading) == 0 && n_body == 0 {
 		// Degenerate: nothing to send.
 		_conn_clear_exec(conn)
-		plan_wire_inc_writev()
+		plan_wire_inc_multi_send()
 		clean_request_loop(conn)
 		when HTTP_PHASE_STATS {
 			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
@@ -1018,12 +1019,28 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 	}
 	if conn.exec_i >= conn.exec_n {
 		_conn_clear_exec(conn)
-		plan_wire_inc_writev()
+		plan_wire_inc_multi_send()
 		clean_request_loop(conn)
 		when HTTP_PHASE_STATS {
 			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
 		}
 		return true
+	}
+
+	when HTTP_PHASE_STATS {
+		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+	}
+
+	// Prefer kernel WRITEV (Linux io_uring); fall back to sequential multi-send.
+	if plan_wire_prefer_kernel() {
+		if _conn_pack_iovecs(conn) > 0 {
+			if err := host_submit_writev(conn); err == .None {
+				plan_wire_inc_kernel_writev()
+				return true
+			}
+			// Unsupported / submit fail → multi_send below.
+			conn.kernel_writev_active = false
+		}
 	}
 
 	conn.pending_send = conn.exec_bufs[conn.exec_i]
@@ -1034,23 +1051,21 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 		return true
 	}
 
-	when HTTP_PHASE_STATS {
-		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
-	}
-
 	if err := host_submit_send(conn); err != .None {
 		log.errorf("submit_send (writev queue) failed: %v", err)
 		_conn_clear_exec(conn)
 		connection_close(conn)
 		return true
 	}
-	// Count only after a real SQE is posted (or empty complete above).
-	plan_wire_inc_writev()
+	// Sequential multi-buffer fallback (or non-Linux).
+	plan_wire_inc_multi_send()
 	return true
 }
 
-// Phase 4 Sendfile wire: heading (+ optional mem Writev) then chunked pread+send of file.
-// Does NOT load the full file into resp_buf. Counts plan_wire_copy_into (portable stream).
+// Phase 4 Sendfile wire: heading (+ optional mem Writev) then kernel sendfile(2)
+// or chunked pread+send of the file region. Does NOT load the full file into resp_buf.
+// Counters: plan_wire_sendfile (kernel) or plan_wire_copy_into (chunked fallback),
+// plus kernel_writev/multi_send when a mem prefix is gathered.
 // Returns true if path handled the response (submitted / cleaned / closed).
 // false → heading not written; caller may materialize.
 //
@@ -1135,6 +1150,7 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 	conn.file_send_fd = sf.fd
 	conn.file_send_off = sf.file_offset
 	conn.file_send_remaining = sf.file_length
+	conn.kernel_sendfile_active = false
 	// Zero-length file: clear immediately after arming if no body to stream.
 	// Keep fd marker only while remaining > 0 OR we still need post-header continue.
 	if sf.file_length == 0 {
@@ -1156,7 +1172,7 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 	}
 
 	if has_writev_prefix || n_mem_body > 0 {
-		// Mixed: multi-buffer heading + mem, then file_send_continue after exec finishes.
+		// Mixed: gather heading + mem, then file region after exec finishes.
 		bi := 0
 		if len(heading) > 0 {
 			conn.exec_bufs[0] = heading
@@ -1181,24 +1197,21 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 			// No mem/heading bytes — start file immediately if any.
 			conn.exec_n = 0
 			conn.exec_i = 0
-			if conn.file_send_remaining > 0 {
-				if !_conn_file_send_fill_chunk(conn) {
-					_conn_clear_exec(conn)
-					connection_close(conn)
-					return true
-				}
-				if err := host_submit_send(conn); err != .None {
-					log.errorf("submit_send (file region) failed: %v", err)
-					_conn_clear_exec(conn)
-					connection_close(conn)
-					return true
-				}
-				plan_wire_inc_copy_into()
-				return true
-			}
-			plan_wire_inc_copy_into()
-			clean_request_loop(conn)
+			_ = _conn_file_region_start_or_finish(conn)
+			// _conn_file_region_start_or_finish counts sendfile or copy_into (or clean).
+			// For pure empty: no file and no mem — count copy_into for mechanism bookkeeping.
 			return true
+		}
+		// Prefer kernel WRITEV for the mem prefix.
+		if plan_wire_prefer_kernel() {
+			if _conn_pack_iovecs(conn) > 0 {
+				if err := host_submit_writev(conn); err == .None {
+					plan_wire_inc_kernel_writev()
+					// File mechanism counted when prefix completes → _conn_file_region_start_or_finish.
+					return true
+				}
+				conn.kernel_writev_active = false
+			}
 		}
 		conn.pending_send = conn.exec_bufs[conn.exec_i]
 		if err := host_submit_send(conn); err != .None {
@@ -1207,45 +1220,30 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 			connection_close(conn)
 			return true
 		}
-		plan_wire_inc_copy_into()
+		plan_wire_inc_multi_send()
+		// File mechanism counted when prefix completes.
 		return true
 	}
 
-	// Pure file: send heading first, then file chunks on host_on_send.
+	// Pure file: send heading first, then kernel sendfile or chunked on host_on_send.
 	conn.exec_n = 0
 	conn.exec_i = 0
 	if len(heading) == 0 {
-		// Degenerate headers empty — start file or finish.
-		if conn.file_send_remaining > 0 {
-			if !_conn_file_send_fill_chunk(conn) {
-				_conn_clear_exec(conn)
-				connection_close(conn)
-				return true
-			}
-			if err := host_submit_send(conn); err != .None {
-				log.errorf("submit_send (file region) failed: %v", err)
-				_conn_clear_exec(conn)
-				connection_close(conn)
-				return true
-			}
-			plan_wire_inc_copy_into()
-			return true
-		}
-		plan_wire_inc_copy_into()
-		clean_request_loop(conn)
+		// Degenerate headers empty — start file or finish (counts sendfile/copy_into).
+		_ = _conn_file_region_start_or_finish(conn)
 		return true
 	}
 
 	conn.pending_send = heading
-	// file_send_remaining already set; after heading CQE, host_on_send continues file.
+	// file_send_remaining already set; after heading CQE, host_on_send starts file region.
 	if err := host_submit_send(conn); err != .None {
 		log.errorf("submit_send (file headers) failed: %v", err)
 		_conn_clear_exec(conn)
 		connection_close(conn)
 		return true
 	}
-	// Chunked pread+send path for Sendfile plan (not kernel sendfile).
-	plan_wire_inc_copy_into()
+	// File mechanism (sendfile or copy_into) counted on first file submit after heading.
+	// No early copy_into here — avoids lying when kernel sendfile wins.
 	return true
 }
 
@@ -1419,8 +1417,8 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	//  1) Heading already written (body_reserve / Response_Writer / Response_Stream)
 	//     → single-buffer send as-is (stream path does not use plan_body).
 	//  2) Body cmds → middleware → plan (optimize when plan_optimize|prefer_gather|prefer_sendfile):
-	//       pure Writev          → multi-buffer sequential sends (heading + borrowed slices)
-	//       Write_Slice+Sendfile → heading then chunked file stream (no full-file materialize)
+	//       pure Writev          → kernel WRITEV (Linux) or multi-buffer sequential sends
+	//       Write_Slice+Sendfile → heading then kernel sendfile or chunked pread stream
 	//       else                 → materialize into resp_buf + one Write_Slice
 	//  3) Empty buffer, no cmds → heading with Content-Length 0.
 	// HEAD: headers only (no file/body stream).

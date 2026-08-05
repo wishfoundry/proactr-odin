@@ -215,6 +215,21 @@ _submit_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .None
 }
 
+// Kernel WRITEV / sendfile: not on kqueue façade (host falls back to multi-send / pread).
+_submit_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	_ = r
+	_ = id
+	_ = op
+	return .Unsupported
+}
+
+_submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	_ = r
+	_ = id
+	_ = op
+	return .Unsupported
+}
+
 _ring_submit :: proc(r: ^Ring) -> Error {
 	if !r.impl.active {
 		return .Unsupported
@@ -271,6 +286,9 @@ _kq_handle_event :: proc(r: ^Ring, ev: kqueue.KEvent) {
 	case .Nop, .Close, .Timeout:
 		// Not kevent-driven (Timeout is software).
 		_kq_post(r, op_id, 0)
+	case .Writev, .Sendfile:
+		// Never armed on kqueue (submit returns Unsupported).
+		_kq_post(r, op_id, -_EINVAL)
 	}
 }
 

@@ -93,6 +93,20 @@ _submit_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .None
 }
 
+_submit_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	_ = r
+	_ = id
+	_ = op
+	return .Unsupported
+}
+
+_submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	_ = r
+	_ = id
+	_ = op
+	return .Unsupported
+}
+
 _ring_submit :: proc(r: ^Ring) -> Error {
 	if !r.impl.active {
 		return .Unsupported

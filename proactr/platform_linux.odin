@@ -516,6 +516,66 @@ _prep_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .None
 }
 
+// IORING_OP_WRITEV: addr = iovec*, len = iovcnt. Socket offset is unused (0).
+_prep_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	if op.iov_ptr == nil || op.iov_count == 0 {
+		return .Invalid_Op
+	}
+	sqe := _get_sqe(r) or_return
+	sqe.opcode = .WRITEV
+	_apply_fixed_file(sqe, op.fixed_idx, op.fd)
+	sqe.addr = cast(u64)uintptr(op.iov_ptr)
+	sqe.len = op.iov_count
+	sqe.off = 0
+	sqe.rw_flags = 0
+	sqe.user_data = u64(id)
+	return .None
+}
+
+// POLL_ADD for Sendfile EAGAIN (wait until socket is writable).
+_prep_poll_out :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	sqe := _get_sqe(r) or_return
+	sqe.opcode = .POLL_ADD
+	_apply_fixed_file(sqe, op.fixed_idx, op.fd)
+	sqe.poll_events = {.OUT}
+	sqe.poll_flags = {}
+	sqe.user_data = u64(id)
+	return .None
+}
+
+// One sendfile(2) attempt. Returns (bytes, again=EAGAIN) or (-errno, false).
+// Does not update op.offset/nbytes — host owns Connection progress; result is bytes transferred.
+_sendfile_once :: proc(op: ^Operation) -> (n: i32, again: bool) {
+	if op.nbytes == 0 {
+		return 0, false
+	}
+	off := op.offset
+	ret, errno := linux.sendfile(linux.Fd(op.fd), linux.Fd(op.file_fd), &off, uint(op.nbytes))
+	if errno == .EAGAIN {
+		return 0, true
+	}
+	if errno != .NONE {
+		return -i32(errno), false
+	}
+	// Kernel advances *offset on success; keep op.offset in sync for any platform re-try.
+	op.offset = off
+	return i32(ret), false
+}
+
+// Issue sendfile: soft-complete on progress/error, or arm POLL_ADD on EAGAIN.
+_sendfile_issue :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	n, again := _sendfile_once(op)
+	if again {
+		op.awaiting_poll = true
+		return _prep_poll_out(r, id, op)
+	}
+	op.awaiting_poll = false
+	if !_soft_post(r, id, n) {
+		return .Submit_Failed
+	}
+	return .None
+}
+
 _submit_nop :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
 		return .Unsupported
@@ -550,6 +610,23 @@ _submit_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 		return .Unsupported
 	}
 	return _prep_close(r, id, op)
+}
+
+_submit_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	if !r.impl.active {
+		return .Unsupported
+	}
+	return _prep_writev(r, id, op)
+}
+
+// Real zero-copy: linux.sendfile (not pread+send). SPLICE needs a pipe for
+// file→socket, so sendfile(2) is the direct path. Partial + host resubmit;
+// EAGAIN → POLL_ADD then retry (see _copy_cqes_ready Sendfile intercept).
+_submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+	if !r.impl.active {
+		return .Unsupported
+	}
+	return _sendfile_issue(r, id, op)
 }
 
 // --- Submit / wait / peek ---------------------------------------------------
@@ -613,21 +690,57 @@ _cq_needs_flush :: proc(r: ^Ring) -> bool {
 
 _copy_cqes_ready :: proc(r: ^Ring, out: []Completion) -> int {
 	n_ready := _cq_ready(r)
-	n := min(u32(len(out)), n_ready)
-	if n == 0 {
+	if n_ready == 0 || len(out) == 0 {
 		return 0
 	}
+	// Process one CQE at a time so Sendfile POLL waits can re-arm without emitting.
 	head := r.impl.cq_head^
-	for i: u32 = 0; i < n; i += 1 {
-		cqe := r.impl.cqes[(head + i) & r.impl.cq_mask]
-		out[i] = Completion {
-			op_id  = u32(cqe.user_data),
-			result = cqe.res,
-			flags  = transmute(u32)cqe.flags,
+	out_n := 0
+	consumed: u32 = 0
+	for consumed < n_ready && out_n < len(out) {
+		cqe := r.impl.cqes[(head + consumed) & r.impl.cq_mask]
+		consumed += 1
+		op_id := u32(cqe.user_data)
+		result := cqe.res
+		flags := transmute(u32)cqe.flags
+
+		// Sendfile EAGAIN path: POLL_ADD CQE → retry sendfile (do not surface poll mask).
+		if int(op_id) < len(r.ops) {
+			op := &r.ops[op_id]
+			if op.kind == .Sendfile && op.status == .Submitted && op.awaiting_poll {
+				op.awaiting_poll = false
+				if result < 0 {
+					out[out_n] = Completion{op_id = op_id, result = result, flags = flags}
+					out_n += 1
+					continue
+				}
+				n, again := _sendfile_once(op)
+				if again {
+					// Still not writable — re-arm POLL without completing the op.
+					op.awaiting_poll = true
+					if perr := _prep_poll_out(r, op_id, op); perr != .None {
+						op.awaiting_poll = false
+						out[out_n] = Completion{op_id = op_id, result = -i32(11), flags = 0} // -EAGAIN
+						out_n += 1
+					}
+					// else: no completion this round; SQE pending for next enter
+					continue
+				}
+				out[out_n] = Completion{op_id = op_id, result = n, flags = 0}
+				out_n += 1
+				continue
+			}
 		}
+
+		out[out_n] = Completion {
+			op_id  = op_id,
+			result = result,
+			flags  = flags,
+		}
+		out_n += 1
 	}
-	sync.atomic_store_explicit(r.impl.cq_head, head + n, .Release)
-	return int(n)
+	sync.atomic_store_explicit(r.impl.cq_head, head + consumed, .Release)
+	return out_n
 }
 
 _ring_wait :: proc(

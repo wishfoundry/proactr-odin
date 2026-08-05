@@ -206,6 +206,9 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.pending_send = nil
 	c.exec_i = 0
 	c.exec_n = 0
+	c.iov_count = 0
+	c.kernel_writev_active = false
+	c.kernel_sendfile_active = false
 	c.file_send_fd = -1
 	c.file_send_off = 0
 	c.file_send_remaining = 0
@@ -238,6 +241,9 @@ connection_destroy :: proc(c: ^Connection) {
 	c.pending_send = nil
 	c.exec_i = 0
 	c.exec_n = 0
+	c.iov_count = 0
+	c.kernel_writev_active = false
+	c.kernel_sendfile_active = false
 	for i in 0 ..< len(c.exec_bufs) {
 		c.exec_bufs[i] = nil
 	}
