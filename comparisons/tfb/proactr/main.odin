@@ -227,8 +227,7 @@ on_assembled :: proc(req: ^http.Request, res: ^http.Response) {
 	res.status = .OK
 	http.headers_set_content_type(&res.headers, "text/plain")
 	if g_plan_optimize {
-		// Multi-cmd intent → multi_send when plan_optimize (NOT kernel writev).
-		http.response_set_profile(res, http.Handler_Profile{prefer_gather = true, copy_budget = 0})
+		// Multi-cmd intent → Writev/multi_send under plan_optimize (no prefer_gather required).
 		for i in 0 ..< SLICE_N {
 			http.body_static(res, g_slices[i])
 		}
@@ -248,9 +247,9 @@ on_file :: proc(req: ^http.Request, res: ^http.Response) {
 	set_server(res)
 	// Never fall back to in-memory P_1M — PROFILE_MATRIX: /file/1m must be disk.
 	if g_plan_optimize && g_file_fd >= 0 {
+		// plan_optimize + plan_sendfile_ok → Sendfile plan (prefer_sendfile not required).
 		res.status = .OK
 		http.headers_set_content_type(&res.headers, "text/plain")
-		http.response_set_profile(res, http.Handler_Profile{prefer_sendfile = true, copy_budget = 0})
 		http.body_file(res, g_file_fd, 0, g_file_len)
 		http.respond(res)
 		return

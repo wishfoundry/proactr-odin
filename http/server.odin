@@ -5,14 +5,12 @@ package http
 
 import "core:bufio"
 import "core:bytes"
-import "core:c"
 import "core:log"
 import "core:mem"
 import "core:mem/virtual"
 import "core:net"
 import "core:slice"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import "core:time"
 
@@ -76,9 +74,10 @@ Server_Opts :: struct {
 	// Phase 4: Linux prefers sendfile(2); else chunked pread+send (not full materialize).
 	plan_sendfile_ok:     bool,
 	// When true, response_send may run plan_body and execute Writev / Sendfile wire paths.
-	// Default false: materialize-only (zero profile / no surprise). Harness sets true for
-	// PLAN_MODE=optimize. Also enabled per-request when Response profile has prefer_gather
-	// or prefer_sendfile. PLAN_WIRE_MODE=fallback forces multi_send/copy_into on Linux.
+	// Implies multi-mem gather and file Sendfile when platform/server allow (prefer_sendfile
+	// not required). Default false: materialize-only. Harness PLAN_MODE=optimize sets true.
+	// Also enabled per-request via prefer_gather / prefer_sendfile.
+	// PLAN_WIRE_MODE=fallback forces multi_send/copy_into on Linux.
 	plan_optimize:        bool,
 }
 
@@ -290,6 +289,10 @@ serve :: proc(s: ^Server, h: Handler) -> (err: proactr.Error) {
 	if atomic_load(&s.closing) {
 		return .Closed
 	}
+		// Belt-and-suspenders: even if the app skipped server_shutdown_on_interrupt,
+		// never die on client disconnect mid-sendfile/send (SIGPIPE → exit 141).
+		server_ignore_sigpipe()
+
 		s.handler = h
 
 		thread_count := max(1, s.opts.thread_count)
@@ -411,28 +414,26 @@ connection_set_state :: proc(c: ^Connection, s: Connection_State) -> bool {
 
 // Connection holds per-client request/response state for the protocol layer.
 //
-// In-flight invariant: at most one of {recv, send, close} is outstanding per connection
-// at a time (no concurrent SQEs, no refcount). pending_send stays valid until the full
-// send completes; close_pending gates submit_close; close_on_io defers close until the
-// in-flight recv CQE so the connection is not freed under a still-submitted op.
+// In-flight invariant: at most one of {recv, send/writev/sendfile, close} is outstanding
+// per connection at a time (no concurrent SQEs, no refcount). wire.kind != .None while a
+// send/WRITEV/sendfile SQE (or soft completion) is outstanding; wire.pending_send stays valid
+// until a Send fully completes. close_pending gates submit_close; close_on_io defers
+// close until the in-flight CQE so the connection is not freed under a still-submitted
+// op (and wire.exec_bufs/iovecs/file_send_* stay live). See wire.odin for the wire executor.
 //
 // Memory: resp_buf is permanent (conn_allocator) and holds response wire bytes across
 // keep-alive requests. temp_allocator is request scrap only (headers/parse) — bump reset
-// after each send completes; never free response memory while pending_send is non-nil.
+// after each send completes; never free response memory while wire I/O is in flight.
 //
-// Phase 3 multi-buffer (Writev-style): when plan chooses Writev, exec_bufs[0..exec_n)
-// holds [heading_slice, body1, body2, …]. Linux prefers IORING_OP_WRITEV via iovecs[];
-// fallback is sequential pending_send (exec_bufs[exec_i] advanced on partial).
+// Phase 3 multi-buffer (Writev-style): when plan chooses Writev, wire.exec_bufs[0..exec_n)
+// holds [heading_slice, body1, body2, …]. Linux prefers IORING_OP_WRITEV via ephemeral
+// iovecs packed from exec_bufs; fallback is sequential pending_send (exec_i advanced).
 // Body slices are borrowed Static/Bytes and must remain valid until the final CQE.
-// Max slots = PLAN_MAX_BODY_CMDS + 1 (heading).
 //
-// Phase 4 file region: after heading (and optional mem iovecs) complete, stream a
-// File cmd via kernel sendfile(2) (Linux) or chunked pread into file_send_buf + send.
-// file_send_remaining > 0 means more file bytes remain; Host does NOT close
+// Phase 4 file region: after heading (and optional mem) complete, stream a File cmd
+// via kernel sendfile(2) (Linux) or chunked pread into wire.file_send_buf + send.
+// wire.file_send_remaining > 0 means more file bytes remain; Host does NOT close
 // file_send_fd — the handler/app owns the fd for the full send lifetime.
-PLAN_MAX_EXEC_BUFS :: PLAN_MAX_BODY_CMDS + 1
-// Scratch size for Phase 4 chunked file send (not full-file materialize).
-FILE_SEND_CHUNK :: 64 * 1024
 
 Connection :: struct {
 	server:         ^Server,
@@ -446,28 +447,13 @@ Connection :: struct {
 	// Permanent response wire buffer (headers+body). Capacity retained across requests.
 	resp_buf:       [dynamic]u8,
 	loop:           Loop,
-	// Remaining response bytes for (possibly multi-CQE) send. Valid until send fully completes.
-	// Slices into resp_buf (materialize), exec_bufs[exec_i] (multi_send), or file_send_buf.
-	pending_send:   []u8,
-	// Multi-buffer send queue (Phase 3). exec_n == 0 → single-buffer / inactive.
-	exec_bufs:      [PLAN_MAX_EXEC_BUFS][]u8,
-	exec_i:         int,
-	exec_n:         int,
-	// Kernel WRITEV: packed from exec_bufs; advanced on short writev completions.
-	iovecs:         [PLAN_MAX_EXEC_BUFS]proactr.Io_Vec,
-	iov_count:      int,
-	kernel_writev_active: bool,
-	// Phase 4 file-region stream. fd < 0 → inactive (handler owns fd; host never closes).
-	// remaining = bytes not yet delivered; kernel_sendfile_active → sendfile(2) path.
-	file_send_fd:        i32,
-	file_send_off:       i64,
-	file_send_remaining: i64,
-	file_send_buf:       []u8, // conn_allocator scratch; len==FILE_SEND_CHUNK when allocated
-	kernel_sendfile_active: bool,
+	// Nested wire bag: mem queue, iovecs, file region, in-flight kind (see Wire_State).
+	wire:           Wire_State,
 	// True while a close SQE is outstanding.
 	close_pending:  bool,
 	// Set on shutdown for Idle/New conns that still have a pending Recv; close on that CQE.
 	// Do not set while Active (finish the request via Will_Close instead).
+	// Also set when connection_close is deferred while wire.kind != .None.
 	close_on_io:    bool,
 	// Registered file table index (>= 0) or -1 when using raw fds.
 	fixed_idx:      i32,
@@ -717,134 +703,6 @@ host_submit_recv :: proc(conn: ^Connection, buf: []u8) -> proactr.Error {
 	return err
 }
 
-// host_submit_send enqueues send of conn.pending_send.
-@(private)
-host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
-	assert_has_td()
-	if conn.state >= .Closing {
-		return .Closed
-	}
-	if len(conn.pending_send) == 0 {
-		return .None
-	}
-	_, err := proactr.submit_send(
-		&td.ring,
-		i32(conn.socket),
-		conn.pending_send,
-		conn,
-		conn.fixed_idx,
-	)
-	return err
-}
-
-// Pack non-empty exec_bufs into conn.iovecs. Returns iov count (0 if nothing to send).
-@(private)
-_conn_pack_iovecs :: proc(conn: ^Connection) -> int {
-	n := 0
-	for i in 0 ..< conn.exec_n {
-		b := conn.exec_bufs[i]
-		if len(b) == 0 {
-			continue
-		}
-		if n >= PLAN_MAX_EXEC_BUFS {
-			break
-		}
-		conn.iovecs[n] = proactr.Io_Vec {
-			base = raw_data(b),
-			len  = uint(len(b)),
-		}
-		n += 1
-	}
-	conn.iov_count = n
-	return n
-}
-
-// Advance iovecs after a short writev of `sent` bytes. Returns remaining iov count.
-@(private)
-_conn_advance_iovecs :: proc(conn: ^Connection, sent: int) -> int {
-	if sent <= 0 || conn.iov_count <= 0 {
-		return conn.iov_count
-	}
-	left := sent
-	i := 0
-	for i < conn.iov_count && left > 0 {
-		l := int(conn.iovecs[i].len)
-		if left >= l {
-			left -= l
-			i += 1
-		} else {
-			// Partial within this iov: slide base forward.
-			base := uintptr(conn.iovecs[i].base) + uintptr(left)
-			conn.iovecs[i].base = rawptr(base)
-			conn.iovecs[i].len = uint(l - left)
-			left = 0
-		}
-	}
-	if i > 0 {
-		// Compact remaining iovs to the front.
-		remain := conn.iov_count - i
-		for j in 0 ..< remain {
-			conn.iovecs[j] = conn.iovecs[i + j]
-		}
-		conn.iov_count = remain
-	}
-	return conn.iov_count
-}
-
-// host_submit_writev enqueues IORING_OP_WRITEV from conn.iovecs[:iov_count].
-// Caller packs iovecs (or call after _conn_pack_iovecs). On .Unsupported, caller falls back.
-@(private)
-host_submit_writev :: proc(conn: ^Connection) -> proactr.Error {
-	assert_has_td()
-	if conn.state >= .Closing {
-		return .Closed
-	}
-	if conn.iov_count <= 0 {
-		return .Invalid_Op
-	}
-	// Always raw socket fd for WRITEV — FIXED_FILE + WRITEV was unstable under load
-	// (bastion proactr-opt silent death after high-RPS blob). Register slot still
-	// used for RECV/SEND.
-	_, err := proactr.submit_writev(
-		&td.ring,
-		i32(conn.socket),
-		conn.iovecs[:conn.iov_count],
-		conn,
-		-1,
-	)
-	if err == .None {
-		conn.kernel_writev_active = true
-	}
-	return err
-}
-
-// host_submit_sendfile enqueues kernel sendfile for conn.file_send_* region.
-// On .Unsupported, caller falls back to chunked pread+send.
-@(private)
-host_submit_sendfile :: proc(conn: ^Connection) -> proactr.Error {
-	assert_has_td()
-	if conn.state >= .Closing {
-		return .Closed
-	}
-	if conn.file_send_fd < 0 || conn.file_send_remaining <= 0 {
-		return .Invalid_Op
-	}
-	// Raw socket fd (see host_submit_writev). file_fd is always a real open file.
-	_, err := proactr.submit_sendfile(
-		&td.ring,
-		i32(conn.socket),
-		conn.file_send_fd,
-		conn.file_send_off,
-		u64(conn.file_send_remaining),
-		conn,
-		-1,
-	)
-	if err == .None {
-		conn.kernel_sendfile_active = true
-	}
-	return err
-}
-
 @(private)
 host_dispatch :: proc(s: ^Server, op: ^proactr.Operation, c: proactr.Completion) {
 	switch op.kind {
@@ -856,19 +714,9 @@ host_dispatch :: proc(s: ^Server, op: ^proactr.Operation, c: proactr.Completion)
 			return
 		}
 		host_on_recv(conn, op.result)
-	case .Send:
-		conn := cast(^Connection)op.user
-		if conn == nil {
-			return
-		}
-		// Always account for the send CQE (clear buffer ownership). Dropping
+	case .Send, .Writev, .Sendfile:
+		// Always account for the wire CQE (clear buffer ownership). Dropping
 		// it after submit_close would UAF once the slab entry is recycled.
-		if conn.state >= .Closing {
-			_conn_clear_exec(conn)
-			return
-		}
-		host_on_send(conn, op.result)
-	case .Writev:
 		conn := cast(^Connection)op.user
 		if conn == nil {
 			return
@@ -877,17 +725,18 @@ host_dispatch :: proc(s: ^Server, op: ^proactr.Operation, c: proactr.Completion)
 			_conn_clear_exec(conn)
 			return
 		}
-		host_on_writev(conn, op.result)
-	case .Sendfile:
-		conn := cast(^Connection)op.user
-		if conn == nil {
+		kind: Wire_Kind
+		switch op.kind {
+		case .Send:
+			kind = .Send
+		case .Writev:
+			kind = .Writev
+		case .Sendfile:
+			kind = .Sendfile
+		case .Accept, .Recv, .Close, .Timeout, .Nop:
 			return
 		}
-		if conn.state >= .Closing {
-			_conn_clear_exec(conn)
-			return
-		}
-		host_on_sendfile(conn, op.result)
+		host_on_wire(conn, kind, op.result)
 	case .Close:
 		conn := cast(^Connection)op.user
 		if conn == nil {
@@ -975,12 +824,15 @@ host_on_accept :: proc(s: ^Server, result: i32, cqe_flags: u32) {
 	c.socket = client_fd
 	c.close_pending = false
 	c.close_on_io = false
-	c.pending_send = nil
-	c.exec_i = 0
-	c.exec_n = 0
-	c.file_send_fd = -1
-	c.file_send_off = 0
-	c.file_send_remaining = 0
+	// Keep file_send_buf allocation across accept; reset cursor only.
+	c.wire.pending_send = nil
+	c.wire.exec_i = 0
+	c.wire.exec_n = 0
+	c.wire.iov_count = 0
+	c.wire.kind = .None
+	c.wire.file_send_fd = -1
+	c.wire.file_send_off = 0
+	c.wire.file_send_remaining = 0
 	c.fixed_idx = -1
 	// reg_buf_index / scanner_pooled / temp_slot already set by conn_alloc.
 
@@ -1029,434 +881,6 @@ host_on_recv :: proc(conn: ^Connection, result: i32) {
 	scanner_on_bytes(&conn.scanner, int(result), false)
 }
 
-// exec_queue_after_send advances multi-buffer send state after a successful CQE.
-// Pure helper for host_on_send and unit tests.
-//   - partial (0 < n_sent < len(pending)): stay on exec_i, pending shrinks
-//   - full buffer: exec_i+1, skip empty slots; if more non-empty, next pending; else finished
-//   - n_sent <= 0 or n_sent > len(pending): finished (caller treats as error / clamp complete)
-// Does not touch Connection; caller applies the result.
-// CRITICAL: never return a zero-length pending with finished=false — host_submit_send
-// returns .None for empty slices without posting a CQE (connection would hang).
-@(private)
-exec_queue_after_send :: proc(
-	exec_bufs: [][]u8,
-	exec_i: int,
-	exec_n: int,
-	pending: []u8,
-	n_sent: int,
-) -> (
-	new_pending: []u8,
-	new_i: int,
-	finished: bool,
-) {
-	if n_sent <= 0 {
-		// No progress (or error signal from caller): do not spin on the same buffer.
-		return nil, exec_i, true
-	}
-	if n_sent < len(pending) {
-		return pending[n_sent:], exec_i, false
-	}
-	// Current buffer fully sent (n_sent >= len(pending)); advance, skipping empties.
-	next := exec_i + 1
-	for next < exec_n && next >= 0 {
-		if len(exec_bufs[next]) > 0 {
-			return exec_bufs[next], next, false
-		}
-		next += 1
-	}
-	return nil, next, true
-}
-
-// Pure math: after pread of `got` bytes from a known remaining region.
-// Returns false if got is invalid (0, negative, or > remaining).
-@(private)
-file_send_after_pread :: proc(off, remaining, got: i64) -> (new_off, new_remaining: i64, ok: bool) {
-	if remaining <= 0 || got <= 0 || got > remaining {
-		return off, remaining, false
-	}
-	return off + got, remaining - got, true
-}
-
-// Clear Phase 4 file-region cursor. Keeps file_send_buf allocation for reuse.
-// Does not close file_send_fd (handler ownership).
-@(private)
-_conn_clear_file_send :: proc(conn: ^Connection) {
-	conn.file_send_fd = -1
-	conn.file_send_off = 0
-	conn.file_send_remaining = 0
-	conn.kernel_sendfile_active = false
-}
-
-// After mem/heading complete: start kernel sendfile if preferred, else chunked pread.
-// Increments plan_wire_sendfile or plan_wire_copy_into once when the file body starts.
-// Returns true if a new SQE was submitted or clean finished; false if connection closed.
-@(private)
-_conn_file_region_start_or_finish :: proc(conn: ^Connection) -> bool {
-	if conn.file_send_remaining > 0 {
-		// Opt-in kernel sendfile (PLAN_WIRE_SENDFILE=1); default chunked for stability.
-		if plan_wire_prefer_sendfile() {
-			if err := host_submit_sendfile(conn); err == .None {
-				plan_wire_inc_sendfile()
-				return true
-			}
-			conn.kernel_sendfile_active = false
-		}
-		// Chunked pread+send (default; real sendfile path available via env).
-		plan_wire_inc_copy_into()
-		return _conn_file_send_continue_or_finish(conn)
-	}
-	_conn_clear_file_send(conn)
-	clean_request_loop(conn)
-	return true
-}
-
-// Ensure conn.file_send_buf has FILE_SEND_CHUNK capacity (conn_allocator, permanent).
-@(private)
-_conn_ensure_file_send_buf :: proc(conn: ^Connection) -> bool {
-	if len(conn.file_send_buf) >= FILE_SEND_CHUNK {
-		return true
-	}
-	if conn.server == nil {
-		return false
-	}
-	if conn.file_send_buf != nil {
-		delete(conn.file_send_buf, conn.server.conn_allocator)
-		conn.file_send_buf = nil
-	}
-	conn.file_send_buf = make([]u8, FILE_SEND_CHUNK, conn.server.conn_allocator)
-	return len(conn.file_send_buf) == FILE_SEND_CHUNK
-}
-
-// pread next file chunk into file_send_buf and set pending_send.
-// On success: pending_send non-empty, off/remaining advanced (remaining = not-yet-pread).
-// Short pread (0 < got < want) is progress — next fill continues at new off.
-// got==0 with remaining>0 is unexpected EOF (declared length past file) → fail.
-// On failure: state uncleared (caller closes connection).
-@(private)
-_conn_file_send_fill_chunk :: proc(conn: ^Connection) -> bool {
-	if conn.file_send_remaining <= 0 {
-		return false
-	}
-	if !_conn_ensure_file_send_buf(conn) {
-		log.errorf("file_send: scratch alloc failed fd=%v", conn.socket)
-		return false
-	}
-	want := conn.file_send_remaining
-	if want > i64(FILE_SEND_CHUNK) {
-		want = i64(FILE_SEND_CHUNK)
-	}
-	n := int(want)
-	when ODIN_OS == .Windows {
-		log.errorf("file_send: pread not available on Windows (fd=%d)", conn.file_send_fd)
-		return false
-	} else {
-		got: int
-		for {
-			g := posix.pread(
-				posix.FD(conn.file_send_fd),
-				raw_data(conn.file_send_buf),
-				c.size_t(n),
-				posix.off_t(conn.file_send_off),
-			)
-			if g < 0 {
-				if posix.errno() == .EINTR {
-					continue
-				}
-				log.errorf("file_send pread failed fd=%v file=%d: %v", conn.socket, conn.file_send_fd, posix.errno())
-				return false
-			}
-			got = int(g)
-			break
-		}
-		if got == 0 {
-			// EOF before declared remaining — not a short-but-positive pread.
-			log.errorf("file_send EOF fd=%v file=%d remaining=%d", conn.socket, conn.file_send_fd, conn.file_send_remaining)
-			return false
-		}
-		new_off, new_rem, ok := file_send_after_pread(conn.file_send_off, conn.file_send_remaining, i64(got))
-		if !ok {
-			return false
-		}
-		conn.file_send_off = new_off
-		conn.file_send_remaining = new_rem
-		// remaining==0 after fill: this is the last pending chunk; file_send_fd stays set
-		// until host_on_send drains pending_send and calls _conn_clear_file_send.
-		conn.pending_send = conn.file_send_buf[:got]
-		return true
-	}
-}
-
-// After a full buffer (header / mem / chunk) has been sent: either fill next file
-// chunk, or finish the response. Returns true if a new send was submitted (or clean
-// completed); false if connection was closed on error.
-@(private)
-_conn_file_send_continue_or_finish :: proc(conn: ^Connection) -> bool {
-	if conn.file_send_remaining > 0 {
-		if !_conn_file_send_fill_chunk(conn) {
-			_conn_clear_exec(conn)
-			connection_close(conn)
-			return false
-		}
-		if len(conn.pending_send) == 0 {
-			_conn_clear_exec(conn)
-			connection_close(conn)
-			return false
-		}
-		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send (file chunk) failed: %v", err)
-			_conn_clear_exec(conn)
-			connection_close(conn)
-			return false
-		}
-		return true
-	}
-	// File region fully loaded and prior chunk fully sent (or zero-length file).
-	_conn_clear_exec(conn)
-	clean_request_loop(conn)
-	return true
-}
-
-@(private)
-_conn_clear_exec :: proc(conn: ^Connection) {
-	conn.exec_i = 0
-	conn.exec_n = 0
-	conn.pending_send = nil
-	conn.iov_count = 0
-	conn.kernel_writev_active = false
-	// Drop dangling body/heading slice refs (temp may be reset / slab recycled).
-	for i in 0 ..< len(conn.exec_bufs) {
-		conn.exec_bufs[i] = nil
-	}
-	_conn_clear_file_send(conn)
-	// Keep file_send_buf for reuse across requests.
-}
-
-// Kernel WRITEV completion: advance iovecs on short write; then file region or finish.
-@(private)
-host_on_writev :: proc(conn: ^Connection, result: i32) {
-	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
-
-	if conn.close_on_io {
-		_conn_clear_exec(conn)
-		conn.close_on_io = false
-		if conn.state < .Closing {
-			connection_close(conn)
-		}
-		return
-	}
-
-	if result < 0 {
-		log.errorf("writev error fd=%v res=%d", conn.socket, result)
-		_conn_clear_exec(conn)
-		connection_close(conn)
-		return
-	}
-
-	if result == 0 && conn.iov_count > 0 {
-		log.errorf("writev zero-length fd=%v iov_count=%d", conn.socket, conn.iov_count)
-		_conn_clear_exec(conn)
-		connection_close(conn)
-		return
-	}
-
-	remain := _conn_advance_iovecs(conn, int(result))
-	if remain > 0 {
-		if err := host_submit_writev(conn); err != .None {
-			log.errorf("submit_writev (partial) failed: %v", err)
-			_conn_clear_exec(conn)
-			connection_close(conn)
-		}
-		return
-	}
-
-	// Gather complete.
-	conn.kernel_writev_active = false
-	conn.exec_i = 0
-	conn.exec_n = 0
-	conn.pending_send = nil
-	for i in 0 ..< len(conn.exec_bufs) {
-		conn.exec_bufs[i] = nil
-	}
-	// Mixed Writev+Sendfile: start file region (kernel sendfile or chunked).
-	if conn.file_send_remaining > 0 || conn.file_send_fd >= 0 {
-		_ = _conn_file_region_start_or_finish(conn)
-		return
-	}
-	clean_request_loop(conn)
-}
-
-// Kernel sendfile completion: advance file cursor; resubmit remainder or finish.
-@(private)
-host_on_sendfile :: proc(conn: ^Connection, result: i32) {
-	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
-
-	if conn.close_on_io {
-		_conn_clear_exec(conn)
-		conn.close_on_io = false
-		if conn.state < .Closing {
-			connection_close(conn)
-		}
-		return
-	}
-
-	if result < 0 {
-		log.errorf("sendfile error fd=%v res=%d", conn.socket, result)
-		_conn_clear_exec(conn)
-		connection_close(conn)
-		return
-	}
-
-	n := i64(result)
-	if n == 0 && conn.file_send_remaining > 0 {
-		log.errorf("sendfile zero progress fd=%v file=%d remaining=%d", conn.socket, conn.file_send_fd, conn.file_send_remaining)
-		_conn_clear_exec(conn)
-		connection_close(conn)
-		return
-	}
-
-	if n > conn.file_send_remaining {
-		n = conn.file_send_remaining
-	}
-	conn.file_send_off += n
-	conn.file_send_remaining -= n
-
-	if conn.file_send_remaining > 0 {
-		if err := host_submit_sendfile(conn); err != .None {
-			log.errorf("submit_sendfile (partial) failed: %v — falling back to chunked", err)
-			conn.kernel_sendfile_active = false
-			_ = _conn_file_send_continue_or_finish(conn)
-		}
-		return
-	}
-
-	// File region fully delivered.
-	_conn_clear_exec(conn)
-	clean_request_loop(conn)
-}
-
-@(private)
-host_on_send :: proc(conn: ^Connection, result: i32) {
-	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
-
-	// Deferred close while a send SQE was outstanding: account for this CQE first.
-	// Mid multi-buffer / file stream: abort remaining queue (partial response on wire).
-	if conn.close_on_io {
-		_conn_clear_exec(conn)
-		conn.close_on_io = false
-		if conn.state < .Closing {
-			connection_close(conn)
-		}
-		return
-	}
-
-	if result < 0 {
-		log.errorf("send error fd=%v res=%d", conn.socket, result)
-		_conn_clear_exec(conn)
-		connection_close(conn)
-		return
-	}
-
-	// Zero-byte completion with a non-empty pending buffer: do not resubmit forever.
-	// (Normal TCP send of N>0 bytes returns >0, EAGAIN-as-error, or short count.)
-	if result == 0 && len(conn.pending_send) > 0 {
-		log.errorf("send zero-length fd=%v pending=%d exec_n=%d", conn.socket, len(conn.pending_send), conn.exec_n)
-		_conn_clear_exec(conn)
-		connection_close(conn)
-		return
-	}
-
-	n := int(result)
-
-	// Multi-buffer sequential queue (Phase 3 fallback): advance within/across exec_bufs.
-	// When the queue finishes and a file region remains, start sendfile or chunked stream.
-	if conn.exec_n > 0 {
-		new_pending, new_i, finished := exec_queue_after_send(
-			conn.exec_bufs[:conn.exec_n],
-			conn.exec_i,
-			conn.exec_n,
-			conn.pending_send,
-			n,
-		)
-		if finished {
-			// Clear mem queue slots; file_send_* preserved if active.
-			conn.exec_i = 0
-			conn.exec_n = 0
-			conn.pending_send = nil
-			for i in 0 ..< len(conn.exec_bufs) {
-				conn.exec_bufs[i] = nil
-			}
-			if conn.file_send_remaining > 0 || conn.file_send_fd >= 0 {
-				_ = _conn_file_region_start_or_finish(conn)
-				return
-			}
-			_conn_clear_file_send(conn)
-			clean_request_loop(conn)
-			return
-		}
-		// Defense: never arm a zero-length pending (no CQE → hang).
-		if len(new_pending) == 0 {
-			log.errorf("multi-op empty pending after advance fd=%v i=%d n=%d", conn.socket, new_i, conn.exec_n)
-			_conn_clear_exec(conn)
-			connection_close(conn)
-			return
-		}
-		conn.exec_i = new_i
-		conn.pending_send = new_pending
-		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send (multi-op) failed: %v", err)
-			_conn_clear_exec(conn)
-			connection_close(conn)
-			return
-		}
-		// host_submit_send(.None) with empty pending is a hang; guarded above.
-		return
-	}
-
-	// Single-buffer or file-chunk path: partial send within current pending.
-	if n < len(conn.pending_send) {
-		// Partial send — advance and resubmit. Buffer still owned until full send.
-		// n==0 already closed above; n>0 here.
-		conn.pending_send = conn.pending_send[n:]
-		if len(conn.pending_send) == 0 {
-			// Should not happen (n < len implies remainder > 0); fail closed.
-			_conn_clear_exec(conn)
-			connection_close(conn)
-			return
-		}
-		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send (partial) failed: %v", err)
-			_conn_clear_exec(conn)
-			connection_close(conn)
-		}
-		return
-	}
-
-	// Current buffer fully sent.
-	conn.pending_send = nil
-
-	// Phase 4: after heading (or last multi_send buffer), start file region;
-	// or continue chunked fills when already in copy_into path.
-	if conn.file_send_remaining > 0 {
-		if !conn.kernel_sendfile_active {
-			// First transition into file body: try kernel sendfile, else chunked.
-			_ = _conn_file_region_start_or_finish(conn)
-			return
-		}
-		// kernel_sendfile_active handled by host_on_sendfile; should not land here.
-		_ = _conn_file_send_continue_or_finish(conn)
-		return
-	}
-	if conn.file_send_fd >= 0 {
-		// Last file chunk fully delivered (remaining already 0 after last pread).
-		_conn_clear_file_send(conn)
-		clean_request_loop(conn)
-		return
-	}
-
-	// Single-buffer path complete (materialize / body_reserve / HEAD).
-	clean_request_loop(conn)
-}
-
 @(private)
 host_on_close :: proc(conn: ^Connection) {
 	conn.close_pending = false
@@ -1477,11 +901,12 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 		return
 	}
 
-	// Invariant: at most one of {recv, send, close}. Never submit_close while
-	// a send SQE is outstanding — defer until host_on_send accounts for it.
-	// Multi-buffer: pending_send is set for the current buffer while SQE in flight.
-	if len(c.pending_send) > 0 {
-		log.debugf("connection %i close deferred (send in flight)", c.socket)
+	// Invariant: at most one of {recv, send/writev/sendfile, close}. Never
+	// submit_close while wire I/O is outstanding — defer until host_on_wire CQE.
+	// wire.kind != .None covers Send, WRITEV, and sendfile (pending_send alone is not enough:
+	// WRITEV/sendfile leave pending empty while SQE is still outstanding).
+	if _conn_wire_in_flight(c) {
+		log.debugf("connection %i close deferred (wire I/O in flight)", c.socket)
 		c.close_on_io = true
 		return
 	}

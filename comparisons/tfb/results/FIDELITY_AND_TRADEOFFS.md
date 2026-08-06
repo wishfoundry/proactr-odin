@@ -9,44 +9,50 @@
 
 ## Fidelity audit (code)
 
-**Verdict: PASS (Linux)** — with production defaults noted.
+**Verdict: PASS (Linux)** — real mechanisms default on after hardening.
 
 | Mechanism | Code | Default |
 |-----------|------|---------|
 | `IORING_OP_WRITEV` | `proactr/platform_linux.odin` `_prep_writev` | On for multi-segment assemble (`PLAN_WIRE_MODE=kernel`) |
 | multi_send | sequential `submit_send` | Fallback / `PLAN_WIRE_MODE=fallback` |
-| `sendfile(2)` | `_sendfile_once` + soft complete / POLL | **Opt-in** `PLAN_WIRE_SENDFILE=1` (unstable under load) |
-| file_chunked | pread+send | **Default** for opt file when sendfile off |
+| `sendfile(2)` | `_sendfile_drive` + soft complete / POLL | **On** with kernel wire + `plan_optimize` (prefer_sendfile only if optimize off); `PLAN_WIRE_SENDFILE=0` → chunked |
+| file_chunked | pread+send 256 KiB | Fallback / env off |
 
 Counters: `plan_wire_kernel_writev_total`, `plan_wire_multi_send_total`, `plan_wire_sendfile_total`, `plan_wire_copy_into_total`.
 
-## Bastion tradeoff matrix (W=8, c=100, z=10s)
+## Bastion tradeoff matrix (W=8, c=100, z=10s) — post-hardening
 
-`/tmp/profile-matrix-final` — **no INVALID** cells.
+`/tmp/profile-matrix-harden2` — **no INVALID** cells. See `WRITE_MODE_HARDEN.md`.
 
 | peer | tiny | assembled | blob | file | sse |
 |------|-----:|----------:|-----:|-----:|----:|
-| proactr-mat (preconcat / materialize) | **379k** | 10637 | 4318 | 3287 | **355k** |
-| proactr-opt kernel WRITEV (≥2 segs) | 355k | 9684 | 4293 | 6519† | 346k |
-| proactr-opt-fallback multi_send / chunked | 377k | **14891** | 4309 | 6327† | 353k |
-| ntex | 365k | 8459 | **5243** | 5219 | 345k |
+| proactr-mat | 362k | 12.3k | 5.7k | 4.8k | 347k |
+| proactr-opt WRITEV + chunked† | 376k | **15.6k** | 6.5k | 5.7k | 354k |
+| proactr-opt-fallback multi_send | 363k | **15.7k** | 5.5k | 5.7k | 341k |
+| proactr-opt-sendfile | 363k | 13.9k | 6.0k | **14.3k** | 356k |
+| ntex | 365k | 12.2k | 6.5k | 6.4k | 351k |
 
-† file: opt uses **chunked** by default (sendfile opt-in); not kernel sendfile unless `PLAN_WIRE_SENDFILE=1`.
+† This run still had sendfile default-off on opt; defaults now enable sendfile so opt ≈ opt-sendfile on file.
 
-### Tradeoff reading (what you asked for)
+### Tradeoff reading
 
-| Question | Result (this run) |
-|----------|-------------------|
-| multi_send vs kernel WRITEV (assembled) | **multi_send wins** (14.9k vs 9.7k) — WRITEV path needs more tuning |
-| materialize preconcat vs multi_send | multi_send still faster than mat preconcat for 512 KiB assemble |
-| file chunked (opt) vs full materialize | chunked **~2×** mat full-read (6.5k vs 3.3k) |
-| vs ntex preconcat assemble | mat 10.6k ≥ ntex 8.5k; multi_send 14.9k > ntex |
+| Question | Result |
+|----------|--------|
+| multi_send vs kernel WRITEV (assembled) | **tie** (~15.6k) after FIXED_FILE + close-defer |
+| materialize preconcat vs gather | gather ~27% faster on 512 KiB assemble |
+| file sendfile vs chunked vs mat | **14.3k / 5.7k / 4.8k** — sendfile wins decisively |
+| vs ntex file full-read | sendfile **~2.2×** ntex |
 
-**Honest caveat:** kernel sendfile is implemented but **not default** under load (process death with soft_post/POLL path). Enable with `PLAN_WIRE_SENDFILE=1` for experimental A/B only until hardened.
+### Hardening that unblocked sendfile
+
+1. Defer `connection_close` while `wire.kind != .None` (`Wire_Kind`: Send / Writev / Sendfile)
+2. Ignore **SIGPIPE** (sendfile was killing the process with exit 141)
+3. `_sendfile_drive` batching + POLL on EAGAIN
+4. Re-enable FIXED_FILE on WRITEV after lifecycle fix
 
 ## Fortunes (app-tier — unequal SQL)
 
-`run_fortunes_fair.sh` FAIR=app, W=8, c=100, z=15s:
+`run_fortunes_fair.sh` FAIR=app, W=8, c=100, z=15s (prior run):
 
 | peer | plaintext | fortunes |
 |------|----------:|---------:|
@@ -59,14 +65,13 @@ Counters: `plan_wire_kernel_writev_total`, `plan_wire_multi_send_total`, `plan_w
 ## Reproduce
 
 ```bash
-# Profile tradeoffs
-SERVERS="proactr-mat proactr-opt proactr-opt-fallback ntex" \
+SERVERS="proactr-mat proactr-opt proactr-opt-fallback proactr-opt-chunked ntex" \
   TESTS="tiny assembled blob file sse" \
   PLAN_WIRE_MODE=kernel WORKERS=8 \
   ./comparisons/tfb/run_profile_matrix.sh
 
-# Experimental kernel sendfile
-PLAN_WIRE_SENDFILE=1 PLAN_MODE=optimize ...
+# Force chunked file path
+PLAN_WIRE_SENDFILE=0 PLAN_MODE=optimize ...
 
 # Fortunes (declared unfair app work)
 FAIR=app ./comparisons/tfb/run_fortunes_fair.sh

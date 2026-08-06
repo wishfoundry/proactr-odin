@@ -48,8 +48,9 @@ PY
   echo "file=$PLAN_FILE_PATH"
   echo "mechanisms:"
   echo "  proactr-mat: tiny/gen/blob/sse=materialize_copy(CL) assembled=preconcat_blob file=file_read_full"
-  echo "  proactr-opt (Linux PLAN_WIRE_MODE=kernel default): assembled=kernel_writev (IORING_OP_WRITEV) file=kernel_sendfile (sendfile2)"
-  echo "  proactr-opt (PLAN_WIRE_MODE=fallback): assembled=multi_send file=file_chunked"
+  echo "  proactr-opt (Linux PLAN_WIRE_MODE=kernel default): assembled=kernel_writev file=kernel_sendfile (PLAN_WIRE_SENDFILE=0 → chunked)"
+  echo "  proactr-opt-fallback: assembled=multi_send file=file_chunked"
+  echo "  proactr-opt-chunked: kernel_writev + file_chunked (sendfile off)"
   echo "  laytan/ntex/drogon: assembled=preconcat_blob file=file_read_full sse=sse_oneshot_CL"
   echo "  drogon_io=epoll; others=io_uring_class_on_linux"
   echo "  PLAN_WIRE_MODE=${PLAN_WIRE_MODE:-kernel}"
@@ -69,7 +70,7 @@ if [[ "$FORCE_REBUILD" == "1" ]]; then
   echo "==> FORCE_REBUILD=1 (profile matrix peers)"
   for s in $SERVERS; do
     case "$s" in
-      proactr|proactr-sync|proactr-async|proactr-mat|proactr-opt)
+      proactr|proactr-sync|proactr-async|proactr-mat|proactr-opt|proactr-opt-fallback|proactr-opt-sendfile)
         (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || exit 1
         ;;
       laytan)

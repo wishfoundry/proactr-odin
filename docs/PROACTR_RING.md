@@ -44,13 +44,19 @@ Local `sqe_head` / `sqe_tail` batch array updates; `ring_submit` / `ring_wait` f
 | `submit_accept` | `ACCEPT` | dense op id (`CLOEXEC\|NONBLOCK` on new fd) |
 | `submit_recv` | `RECV` | dense op id |
 | `submit_send` | `SEND` | dense op id |
+| `submit_writev` | `WRITEV` | dense op id |
+| `submit_sendfile` | soft_cq / POLL | dense op id (see below) |
 | `submit_close` | `CLOSE` | dense op id |
 
 Op slab lives in `Ring.ops`; free list recycles ids. CQ harvest fills `Completion{op_id, result, flags}`; `complete_apply` writes `Op.result` / `.Completed`.
 
+### Sendfile soft-complete (Linux)
+
+Linux `submit_sendfile` is **not** a pure io_uring opcode for file→socket. The façade runs synchronous `sendfile(2)` in a short drive loop, posts progress via **`soft_cq`**, and on **EAGAIN** arms **`POLL_ADD` (POLLOUT)** then retries before completing. Host (`http/wire.odin`) owns remaining progress via `file_send_*` and resubmits until the region is done. **SIGPIPE** is ignored at `serve` so a client disconnect mid-sendfile returns `-EPIPE` instead of killing the process (exit 141). `connection_close` defers while `wire == .Sendfile` so the op user and `file_send_*` stay valid for the soft CQE.
+
 **Hard rules**
 
-- **Buffers stay valid until CQE.** For `submit_recv` / `submit_send`, the caller-owned `buf` must remain live and unchanged from SQE prep until the matching completion is harvested (and applied). Freeing or reusing the buffer earlier is undefined.
+- **Buffers stay valid until CQE.** For `submit_recv` / `submit_send` / `submit_writev`, the caller-owned buffers (and Connection `exec_bufs` / `iovecs`) must remain live and unchanged from SQE prep until the matching completion is harvested (and applied). Freeing or reusing the buffer earlier is undefined.
 - **`op_free` only after Idle / Completed / Cancelled.** Never free a `.Submitted` (in-flight) op; the free list would recycle `user_data` while a CQE can still arrive.
 
 ## Enter / wait

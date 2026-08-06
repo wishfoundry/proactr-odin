@@ -12,6 +12,15 @@ headers_init :: proc(h: ^Headers, allocator := context.temp_allocator) {
 	h._kv.allocator = allocator
 }
 
+// Free the internal map (keys/values not owned by Headers unless caller allocated them separately).
+headers_destroy :: proc(h: ^Headers) {
+	if h == nil {
+		return
+	}
+	delete(h._kv)
+	h^ = {}
+}
+
 headers_count :: #force_inline proc(h: Headers) -> int {
 	return len(h._kv)
 }

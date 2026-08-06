@@ -100,7 +100,8 @@ _response_append_cmd :: proc(r: ^Response, cmd: Response_Cmd, loc := #caller_loc
 }
 
 // Set handler plan bias (prefer materialize / gather / sendfile). Cleared on response_init.
-// Zero profile: server copy/iovec defaults; prefer_sendfile remains opt-in (see Handler_Profile).
+// Zero profile: server copy/iovec defaults. With plan_optimize, Sendfile follows
+// platform/server plan_sendfile_ok without prefer_sendfile (see Handler_Profile).
 response_set_profile :: proc(r: ^Response, p: Handler_Profile) {
 	r._profile = p
 }
@@ -137,7 +138,8 @@ plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
 		}
 		// plan_sendfile_ok: Default_Server_Opts true on posix; false disables.
 		// Non-posix remains false from the when above.
-		// Note: prefer_sendfile on the Response is still required for sendfile_ok after profile apply.
+		// After profile: plan_optimize keeps this capability; without optimize,
+		// prefer_sendfile (or prefer_gather) is required (plan_context_apply_profile).
 		when ODIN_OS == .Linux || ODIN_OS == .Darwin {
 			ctx.sendfile_ok = opts.plan_sendfile_ok
 		}
@@ -159,14 +161,18 @@ plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
 // Live Plan_Context for advanced handlers: server/conn/backend + Response profile bias.
 // Response._profile is request-scoped (cleared in response_init); not atomic — same
 // single-worker-per-conn model as the rest of Response.
+// optimize flag matches wire gate (plan_optimize | prefer_gather | prefer_sendfile)
+// so Sendfile policy aligns with what response_send will actually run.
 plan_context :: proc(r: ^Response) -> Plan_Context {
 	conn: ^Connection
 	profile: Handler_Profile
+	optimize := false
 	if r != nil {
 		conn = r._conn
 		profile = r._profile
+		optimize = _response_wire_use_optimize(r)
 	}
-	return plan_context_apply_profile(plan_context_for(conn), profile)
+	return plan_context_apply_profile(plan_context_for(conn), profile, optimize)
 }
 
 // Optimize-policy plan for tests/handlers (shadow of what plan_optimize wire would choose).
@@ -216,13 +222,15 @@ body_bytes :: proc(r: ^Response, data: []u8, owned := true, loc := #caller_locat
 
 // Append a File body command (fd region). Does not read the file here.
 //
-// Ownership: the caller must keep `fd` open and the region readable until the response
-// send fully completes (final send CQE / clean_request_loop). The host never closes the
-// fd. With plan_optimize + prefer_sendfile the wire path streams via chunked pread
-// (Phase 4); otherwise materialize preads the full region into resp_buf at send time.
+// Ownership: by default the caller must keep `fd` open and the region readable until the
+// response send fully completes (final send CQE / clean_request_loop); the host does not
+// close the fd. Pass owned=true to transfer close responsibility to the host (closes after
+// materialize, HEAD headers-only path, or file-region stream clear). With plan_optimize
+// (or prefer_sendfile) the wire path uses sendfile(2) or chunked pread (Phase 4); otherwise
+// materialize preads the full region into resp_buf at send time.
 // length must be known (>= 0) for both paths.
-body_file :: proc(r: ^Response, fd: i32, offset: i64, length: i64, loc := #caller_location) {
-	_response_append_cmd(r, cmd_file(fd, offset, length), loc)
+body_file :: proc(r: ^Response, fd: i32, offset: i64, length: i64, owned := false, loc := #caller_location) {
+	_response_append_cmd(r, cmd_file(fd, offset, length, owned), loc)
 }
 
 /*
@@ -862,7 +870,7 @@ _plan_is_writev_wire :: proc(plan: Plan_Result) -> bool {
 	if plan.ops[0].kind != .Writev {
 		return false
 	}
-	// Body iovecs must fit Connection.exec_bufs (heading + bodies).
+	// Body iovecs must fit Wire_State.exec_bufs (heading + bodies).
 	if int(plan.ops[0].iov_count) + 1 > PLAN_MAX_EXEC_BUFS {
 		return false
 	}
@@ -935,10 +943,16 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 		return false
 	}
 
-	// Count non-empty body slices for the queue (empty Static is a no-op on the wire).
+	// Collect non-empty body slices (empty Static is a no-op on the wire).
+	bodies: [PLAN_MAX_BODY_CMDS][]u8
 	n_body := 0
 	for c in cmds {
 		if (c.kind == .Static || c.kind == .Bytes) && len(c.bytes) > 0 {
+			if n_body >= PLAN_MAX_BODY_CMDS {
+				return false
+			}
+			// Borrowed until final send CQE; see LIFETIME comment above.
+			bodies[n_body] = c.bytes
 			n_body += 1
 		}
 	}
@@ -963,104 +977,53 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 		conn.resp_buf = r._buf.buf
 		buf := bytes.buffer_to_bytes(&r._buf)
 		if len(buf) == 0 {
+			// First arm only: HEAD headers path (single buffer / empty).
 			plan_wire_inc_materialize()
 			clean_request_loop(conn)
 			return true
 		}
-		conn.exec_n = 0
-		conn.exec_i = 0
-		conn.pending_send = buf
+		conn.wire.exec_n = 0
+		conn.wire.exec_i = 0
+		conn.wire.pending_send = buf
 		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send failed: %v", err)
-			conn.pending_send = nil
-			connection_close(conn)
+			_wire_fail(conn, "submit_send failed: %v", err)
 			return true
 		}
+		// First arm only: HEAD is headers-only single buffer.
 		plan_wire_inc_materialize()
 		return true
 	}
 
 	conn.resp_buf = r._buf.buf
 	heading := bytes.buffer_to_bytes(&r._buf)
-	if len(heading) == 0 && n_body == 0 {
-		// Degenerate: nothing to send.
-		_conn_clear_exec(conn)
-		plan_wire_inc_multi_send()
-		clean_request_loop(conn)
-		when HTTP_PHASE_STATS {
-			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
-		}
-		return true
-	}
-
-	// Build multi-buffer queue: [heading, body…] (skip empty heading only if bodies remain).
-	bi := 0
-	if len(heading) > 0 {
-		conn.exec_bufs[0] = heading
-		bi = 1
-	}
-	for c in cmds {
-		#partial switch c.kind {
-		case .Static, .Bytes:
-			if len(c.bytes) == 0 {
-				continue
-			}
-			// Borrowed until final send CQE; see LIFETIME comment above.
-			conn.exec_bufs[bi] = c.bytes
-			bi += 1
-		}
-	}
-	conn.exec_n = bi
-	conn.exec_i = 0
-
-	// Skip leading empty buffers.
-	for conn.exec_i < conn.exec_n && len(conn.exec_bufs[conn.exec_i]) == 0 {
-		conn.exec_i += 1
-	}
-	if conn.exec_i >= conn.exec_n {
-		_conn_clear_exec(conn)
-		plan_wire_inc_multi_send()
-		clean_request_loop(conn)
-		when HTTP_PHASE_STATS {
-			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
-		}
-		return true
-	}
 
 	when HTTP_PHASE_STATS {
 		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
 	}
 
-	// Prefer kernel WRITEV when ≥2 segments (heading+body or multi-body).
-	// Single-iov WRITEV is redundant with SEND and was implicated in opt-mode
-	// instability under load; use multi_send/SEND for the single-buffer case.
-	if plan_wire_prefer_kernel() {
-		n_iov := _conn_pack_iovecs(conn)
-		if n_iov >= 2 {
-			if err := host_submit_writev(conn); err == .None {
-				plan_wire_inc_kernel_writev()
-				return true
-			}
-			conn.kernel_writev_active = false
-		}
-	}
-
-	conn.pending_send = conn.exec_bufs[conn.exec_i]
-	if len(conn.pending_send) == 0 {
-		// Should be unreachable after skip; fail closed (no CQE hang).
+	if !_conn_arm_mem_queue(conn, heading, bodies[:n_body]) {
+		// Degenerate: nothing to send (empty heading + empty bodies).
 		_conn_clear_exec(conn)
-		connection_close(conn)
+		// First arm only: empty multi_send path.
+		plan_wire_inc_multi_send()
+		clean_request_loop(conn)
 		return true
 	}
 
-	if err := host_submit_send(conn); err != .None {
-		log.errorf("submit_send (writev queue) failed: %v", err)
-		_conn_clear_exec(conn)
-		connection_close(conn)
+	mech, submit_ok := _conn_submit_mem_queue(conn)
+	if !submit_ok {
+		_wire_fail(conn, "mem queue submit failed fd=%v", conn.socket)
 		return true
 	}
-	// Sequential multi-buffer fallback (or non-Linux).
-	plan_wire_inc_multi_send()
+	// First arm only: count which mechanism was armed (not mid-stream fallback).
+	switch mech {
+	case .Kernel_Writev:
+		plan_wire_inc_kernel_writev()
+	case .Multi_Send:
+		plan_wire_inc_multi_send()
+	case .None:
+		// Unreachable when submit_ok.
+	}
 	return true
 }
 
@@ -1098,10 +1061,15 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 	}
 	body_len = int(plan.total_body)
 
-	// Count non-empty mem body slices for optional Writev prefix.
+	// Collect non-empty mem body slices for optional Writev prefix.
+	bodies: [PLAN_MAX_BODY_CMDS][]u8
 	n_mem_body := 0
 	for c in cmds {
 		if (c.kind == .Static || c.kind == .Bytes) && len(c.bytes) > 0 {
+			if n_mem_body >= PLAN_MAX_BODY_CMDS {
+				return false
+			}
+			bodies[n_mem_body] = c.bytes
 			n_mem_body += 1
 		}
 	}
@@ -1117,29 +1085,40 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 
 	_response_write_heading(r, body_len)
 
+	// Owned File cmds: transfer close to wire when streaming; close immediately on HEAD.
+	file_owned := false
+	for c in cmds {
+		if c.kind == .File && c.fd == sf.fd && .Owned in c.flags {
+			file_owned = true
+			break
+		}
+	}
+
 	// HEAD: headers + Content-Length only; do not stream file (RFC 9110 §9.3.2).
 	if _response_is_head(conn) {
 		when HTTP_PHASE_STATS {
 			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
 		}
+		if file_owned {
+			_response_close_owned_file_cmds(cmds)
+		}
 		conn.resp_buf = r._buf.buf
 		buf := bytes.buffer_to_bytes(&r._buf)
 		_conn_clear_file_send(conn)
-		conn.exec_n = 0
-		conn.exec_i = 0
+		conn.wire.exec_n = 0
+		conn.wire.exec_i = 0
 		if len(buf) == 0 {
+			// First arm only: file HEAD empty body.
 			plan_wire_inc_materialize()
 			clean_request_loop(conn)
 			return true
 		}
-		conn.pending_send = buf
+		conn.wire.pending_send = buf
 		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send (file HEAD) failed: %v", err)
-			conn.pending_send = nil
-			connection_close(conn)
+			_wire_fail(conn, "submit_send (file HEAD) failed: %v", err)
 			return true
 		}
-		// HEAD is headers-only; count as materialize-style single buffer, not file stream.
+		// First arm only: HEAD is headers-only single buffer, not file stream.
 		plan_wire_inc_materialize()
 		return true
 	}
@@ -1149,14 +1128,14 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 	heading := bytes.buffer_to_bytes(&r._buf)
 
 	// Arm file-region state (even for length 0 so finish path is uniform).
-	conn.file_send_fd = sf.fd
-	conn.file_send_off = sf.file_offset
-	conn.file_send_remaining = sf.file_length
-	conn.kernel_sendfile_active = false
+	conn.wire.file_send_fd = sf.fd
+	conn.wire.file_send_off = sf.file_offset
+	conn.wire.file_send_remaining = sf.file_length
+	conn.wire.file_send_close = file_owned
 	// Zero-length file: clear immediately after arming if no body to stream.
 	// Keep fd marker only while remaining > 0 OR we still need post-header continue.
 	if sf.file_length == 0 {
-		// No file bytes; still may have mem prefix. Clear file cursor.
+		// No file bytes; still may have mem prefix. Clear file cursor (closes if owned).
 		_conn_clear_file_send(conn)
 	}
 
@@ -1175,76 +1154,46 @@ _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Pla
 
 	if has_writev_prefix || n_mem_body > 0 {
 		// Mixed: gather heading + mem, then file region after exec finishes.
-		bi := 0
-		if len(heading) > 0 {
-			conn.exec_bufs[0] = heading
-			bi = 1
-		}
-		for c in cmds {
-			#partial switch c.kind {
-			case .Static, .Bytes:
-				if len(c.bytes) == 0 {
-					continue
-				}
-				conn.exec_bufs[bi] = c.bytes
-				bi += 1
-			}
-		}
-		conn.exec_n = bi
-		conn.exec_i = 0
-		for conn.exec_i < conn.exec_n && len(conn.exec_bufs[conn.exec_i]) == 0 {
-			conn.exec_i += 1
-		}
-		if conn.exec_i >= conn.exec_n {
+		if !_conn_arm_mem_queue(conn, heading, bodies[:n_mem_body]) {
 			// No mem/heading bytes — start file immediately if any.
-			conn.exec_n = 0
-			conn.exec_i = 0
+			conn.wire.exec_n = 0
+			conn.wire.exec_i = 0
 			_ = _conn_file_region_start_or_finish(conn)
 			// _conn_file_region_start_or_finish counts sendfile or copy_into (or clean).
-			// For pure empty: no file and no mem — count copy_into for mechanism bookkeeping.
 			return true
 		}
-		// Prefer kernel WRITEV for multi-segment mem prefix only.
-		if plan_wire_prefer_kernel() {
-			n_iov := _conn_pack_iovecs(conn)
-			if n_iov >= 2 {
-				if err := host_submit_writev(conn); err == .None {
-					plan_wire_inc_kernel_writev()
-					return true
-				}
-				conn.kernel_writev_active = false
-			}
-		}
-		conn.pending_send = conn.exec_bufs[conn.exec_i]
-		if err := host_submit_send(conn); err != .None {
-			log.errorf("submit_send (file prefix) failed: %v", err)
-			_conn_clear_exec(conn)
-			connection_close(conn)
+		mech, submit_ok := _conn_submit_mem_queue(conn)
+		if !submit_ok {
+			_wire_fail(conn, "submit_send (file prefix) failed fd=%v", conn.socket)
 			return true
 		}
-		plan_wire_inc_multi_send()
-		// File mechanism counted when prefix completes.
+		// First arm only: mem-prefix mechanism (file body counted later at file arm).
+		switch mech {
+		case .Kernel_Writev:
+			plan_wire_inc_kernel_writev()
+		case .Multi_Send:
+			plan_wire_inc_multi_send()
+		case .None:
+		}
 		return true
 	}
 
-	// Pure file: send heading first, then kernel sendfile or chunked on host_on_send.
-	conn.exec_n = 0
-	conn.exec_i = 0
+	// Pure file: send heading first, then kernel sendfile or chunked on host_on_wire.
+	conn.wire.exec_n = 0
+	conn.wire.exec_i = 0
 	if len(heading) == 0 {
 		// Degenerate headers empty — start file or finish (counts sendfile/copy_into).
 		_ = _conn_file_region_start_or_finish(conn)
 		return true
 	}
 
-	conn.pending_send = heading
-	// file_send_remaining already set; after heading CQE, host_on_send starts file region.
+	conn.wire.pending_send = heading
+	// file_send_remaining already set; after heading CQE, host_on_wire starts file region.
 	if err := host_submit_send(conn); err != .None {
-		log.errorf("submit_send (file headers) failed: %v", err)
-		_conn_clear_exec(conn)
-		connection_close(conn)
+		_wire_fail(conn, "submit_send (file headers) failed: %v", err)
 		return true
 	}
-	// File mechanism (sendfile or copy_into) counted on first file submit after heading.
+	// File mechanism (sendfile or copy_into) counted on first file arm after heading CQE.
 	// No early copy_into here — avoids lying when kernel sendfile wins.
 	return true
 }
@@ -1324,7 +1273,9 @@ _response_materialize_cmds :: proc(r: ^Response) {
 	_response_write_heading(r, body_len)
 
 	// HEAD: headers + Content-Length only; do not copy/read body (RFC 9110 §9.3.2).
+	// Close Owned File cmds immediately — no stream/materialize read will take ownership.
 	if _response_is_head(r._conn) {
+		_response_close_owned_file_cmds(cmds)
 		when HTTP_PHASE_STATS {
 			phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
 		}
@@ -1345,8 +1296,51 @@ _response_materialize_cmds :: proc(r: ^Response) {
 	}
 }
 
+// Close File cmds marked Owned (after HEAD headers-only or failed arm before wire transfer).
+@(private)
+_response_close_owned_file_cmds :: proc(cmds: []Response_Cmd) {
+	when ODIN_OS != .Windows {
+		for c in cmds {
+			if c.kind == .File && .Owned in c.flags && c.fd >= 0 {
+				_ = posix.close(posix.FD(c.fd))
+			}
+		}
+	}
+}
+
+// Public: abandon staged body cmds that own File fds without transferring to the wire.
+// Clears the response cmd buffer. Used by middleware tests and callers that prepare then cancel.
+response_close_owned_body_files :: proc(r: ^Response) {
+	if r == nil || r._cmd_count == 0 {
+		return
+	}
+	_response_close_owned_file_cmds(r._cmds[:r._cmd_count])
+	r._cmd_count = 0
+}
+
+// Introspection for tests / advanced middleware (body cmd buffer is otherwise private).
+response_body_cmd_count :: proc(r: ^Response) -> int {
+	if r == nil {
+		return 0
+	}
+	return r._cmd_count
+}
+
+response_body_cmd :: proc(r: ^Response, i: int) -> (cmd: Response_Cmd, ok: bool) {
+	if r == nil || i < 0 || i >= r._cmd_count {
+		return {}, false
+	}
+	return r._cmds[i], true
+}
+
+response_prefer_sendfile :: proc(r: ^Response) -> bool {
+	return r != nil && r._profile.prefer_sendfile
+}
+
 // Sync pread of a File cmd region into the response wire buffer (Phase 1 only).
 // fd must remain open and the region readable until this returns (send copies into resp_buf).
+// Owned fds are always closed before return (success, empty region, or error) so a failed
+// Sendfile-wire → materialize fallback cannot leak static middleware fds.
 @(private)
 _response_materialize_file :: proc(r: ^Response, cmd: Response_Cmd) {
 	assert(cmd.kind == .File)
@@ -1354,9 +1348,25 @@ _response_materialize_file :: proc(r: ^Response, cmd: Response_Cmd) {
 	// Guard against -disable-assert + length=-1 (int(-1) would grow absurdly / UB).
 	if cmd.length < 0 {
 		log.errorf("body_file materialize rejected unknown length (fd=%d)", cmd.fd)
+		// Still close Owned so callers cannot leak on bad length.
+		if .Owned in cmd.flags && cmd.fd >= 0 {
+			when ODIN_OS != .Windows {
+				_ = posix.close(posix.FD(cmd.fd))
+			}
+		}
 		return
 	}
 	n := int(cmd.length)
+	owned := .Owned in cmd.flags
+	fd := cmd.fd
+	// Close Owned once on every exit path (including assert failure under -disable-assert).
+	defer {
+		if owned && fd >= 0 {
+			when ODIN_OS != .Windows {
+				_ = posix.close(posix.FD(fd))
+			}
+		}
+	}
 	if n == 0 {
 		return
 	}
@@ -1461,6 +1471,7 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 				return
 			}
 			_response_materialize_cmds(r)
+			// First arm only: full materialize into single pending_send.
 			plan_wire_inc_materialize()
 		} else if bytes.buffer_length(&r._buf) == 0 {
 			_response_write_heading(r, 0)
@@ -1472,7 +1483,7 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 
 	// Single-buffer path: full response in resp_buf, one pending_send.
 	// Do NOT reset scrap arena or drop resp_buf while pending_send still points
-	// at response bytes (host_on_send clears pending_send before clean_request_loop).
+	// at response bytes (host_on_wire clears pending_send before clean_request_loop).
 	// Sync growth: r._buf.buf is a header copy that may reallocate on write.
 	// Explicitly inactive multi-op queue so a prior writev path cannot leak exec_n.
 	_conn_clear_exec(conn)
@@ -1483,18 +1494,16 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		return
 	}
 
-	conn.pending_send = buf
+	conn.wire.pending_send = buf
 	if err := host_submit_send(conn); err != .None {
-		log.errorf("submit_send failed: %v", err)
-		// No CQE will clear this; partial-send fail path already nils pending_send.
-		// Leaving it set would make connection_close defer forever (close_on_io).
-		conn.pending_send = nil
-		connection_close(conn)
+		// No CQE will clear this; leaving wire.kind set would make connection_close
+		// defer forever (close_on_io).
+		_wire_fail(conn, "submit_send failed: %v", err)
 	}
 }
 
 // Response has been sent, clean up and close/handle next.
-// Invariant: pending_send / exec queue already cleared (host_on_send or writev path).
+// Invariant: pending_send / exec queue already cleared (host_on_wire path).
 @(private)
 clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	t0_reset: u64

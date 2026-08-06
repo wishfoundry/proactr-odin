@@ -292,7 +292,7 @@ test_plan_context_apply_profile_prefer_materialize :: proc(t: ^testing.T) {
 	}
 	ctx := plan_context_apply_profile(base, profile)
 	testing.expect_value(t, ctx.preferred_copy_budget, max(u32))
-	// prefer_sendfile is opt-in: zero/false clears sendfile_ok.
+	// prefer_materialize always clears sendfile_ok.
 	testing.expect(t, !ctx.sendfile_ok)
 
 	cmds := []Response_Cmd {
@@ -336,17 +336,35 @@ test_plan_context_apply_profile_prefer_sendfile :: proc(t: ^testing.T) {
 	base.sendfile_ok = true
 	base.tls = false
 
-	// Without prefer_sendfile → no Sendfile.
-	ctx_off := plan_context_apply_profile(base, {})
+	// Without optimize and without prefer_sendfile → no Sendfile (conservative).
+	ctx_off := plan_context_apply_profile(base, {}, false)
 	testing.expect(t, !ctx_off.sendfile_ok)
 
-	// With prefer_sendfile → base capability preserved.
-	ctx_on := plan_context_apply_profile(base, Handler_Profile{prefer_sendfile = true})
+	// prefer_sendfile alone enables when base allows (per-route opt-in).
+	ctx_on := plan_context_apply_profile(base, Handler_Profile{prefer_sendfile = true}, false)
 	testing.expect(t, ctx_on.sendfile_ok)
+
+	// plan_optimize / optimize=true keeps base sendfile without prefer_sendfile.
+	ctx_opt := plan_context_apply_profile(base, {}, true)
+	testing.expect(t, ctx_opt.sendfile_ok)
 
 	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
-	got := kinds_of(cmds, ctx_on, buf[:])
+	got := kinds_of(cmds, ctx_opt, buf[:])
+	expect_kinds(t, got, { .Write_Slice, .Sendfile })
+}
+
+@(test)
+test_plan_context_optimize_allows_sendfile_without_prefer :: proc(t: ^testing.T) {
+	// Server plan_optimize path: zero profile still gets Sendfile when base allows.
+	base := plan_context_default()
+	base.sendfile_ok = true
+	base.tls = false
+	ctx := plan_context_apply_profile(base, {}, true)
+	testing.expect(t, ctx.sendfile_ok)
+	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got := kinds_of(cmds, ctx, buf[:])
 	expect_kinds(t, got, { .Write_Slice, .Sendfile })
 }
 
@@ -369,15 +387,15 @@ test_plan_context_prefer_sendfile_cannot_promote :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_context_zero_profile_is_defaults :: proc(t: ^testing.T) {
-	// Response with zero profile and no conn: server-like base + zero bias.
-	// prefer_sendfile false → sendfile_ok false even if platform base was true.
+	// Response with zero profile and no conn: no optimize wire → sendfile stays off
+	// even if platform base would allow (no plan_optimize / prefer_*).
 	r: Response
 	ctx := plan_context(&r)
 	testing.expect_value(t, ctx.preferred_copy_budget, PLAN_DEFAULT_COPY_BUDGET)
 	testing.expect_value(t, ctx.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
 	testing.expect(t, !ctx.tls)
 	testing.expect(t, !ctx.zero_copy_send)
-	testing.expect(t, !ctx.sendfile_ok) // prefer_sendfile opt-in
+	testing.expect(t, !ctx.sendfile_ok)
 }
 
 @(test)
@@ -471,87 +489,119 @@ test_body_middleware_apply_in_place :: proc(t: ^testing.T) {
 }
 
 // --- Phase 3: multi-buffer exec queue advance + Writev wire policy ------------
+// Single host mutator: _conn_advance_exec_bufs (WRITEV short writes and multi_send).
 
 @(test)
-test_exec_queue_after_send_partial :: proc(t: ^testing.T) {
-	// Partial send stays on the same buffer / index.
+test_conn_advance_exec_bufs_partial_within_first :: proc(t: ^testing.T) {
+	// Partial send stays on the same buffer / index (slice remainder).
+	conn: Connection
 	a := [4]u8{1, 2, 3, 4}
 	b := [2]u8{5, 6}
-	bufs := [][]u8{a[:], b[:]}
-	pending := bufs[0]
-	new_p, new_i, finished := exec_queue_after_send(bufs, 0, 2, pending, 2)
-	testing.expect(t, !finished)
-	testing.expect_value(t, new_i, 0)
-	testing.expect_value(t, len(new_p), 2)
-	testing.expect_value(t, new_p[0], u8(3))
-	testing.expect_value(t, new_p[1], u8(4))
+	conn.wire.exec_bufs[0] = a[:]
+	conn.wire.exec_bufs[1] = b[:]
+	conn.wire.exec_n = 2
+	conn.wire.exec_i = 0
+
+	remain := _conn_advance_exec_bufs(&conn, 2)
+	testing.expect(t, remain)
+	testing.expect_value(t, conn.wire.exec_i, 0)
+	testing.expect_value(t, len(conn.wire.exec_bufs[0]), 2)
+	testing.expect_value(t, conn.wire.exec_bufs[0][0], u8(3))
+	testing.expect_value(t, conn.wire.exec_bufs[0][1], u8(4))
 }
 
 @(test)
-test_exec_queue_after_send_advance_and_finish :: proc(t: ^testing.T) {
+test_conn_advance_exec_bufs_advance_and_finish :: proc(t: ^testing.T) {
+	conn: Connection
 	a := [3]u8{1, 2, 3}
 	b := [2]u8{4, 5}
 	c := [1]u8{6}
-	bufs := [][]u8{a[:], b[:], c[:]}
+	conn.wire.exec_bufs[0] = a[:]
+	conn.wire.exec_bufs[1] = b[:]
+	conn.wire.exec_bufs[2] = c[:]
+	conn.wire.exec_n = 3
+	conn.wire.exec_i = 0
 
 	// Full first buffer → move to second.
-	p1, i1, f1 := exec_queue_after_send(bufs, 0, 3, bufs[0], len(bufs[0]))
-	testing.expect(t, !f1)
-	testing.expect_value(t, i1, 1)
-	testing.expect_value(t, len(p1), 2)
-	testing.expect_value(t, p1[0], u8(4))
+	remain1 := _conn_advance_exec_bufs(&conn, len(a))
+	testing.expect(t, remain1)
+	testing.expect_value(t, conn.wire.exec_i, 1)
+	testing.expect_value(t, len(conn.wire.exec_bufs[1]), 2)
+	testing.expect_value(t, conn.wire.exec_bufs[1][0], u8(4))
 
 	// Full second → third.
-	p2, i2, f2 := exec_queue_after_send(bufs, i1, 3, p1, len(p1))
-	testing.expect(t, !f2)
-	testing.expect_value(t, i2, 2)
-	testing.expect_value(t, len(p2), 1)
-	testing.expect_value(t, p2[0], u8(6))
+	remain2 := _conn_advance_exec_bufs(&conn, 2)
+	testing.expect(t, remain2)
+	testing.expect_value(t, conn.wire.exec_i, 2)
+	testing.expect_value(t, len(conn.wire.exec_bufs[2]), 1)
+	testing.expect_value(t, conn.wire.exec_bufs[2][0], u8(6))
 
 	// Full last → finished.
-	p3, i3, f3 := exec_queue_after_send(bufs, i2, 3, p2, len(p2))
-	testing.expect(t, f3)
-	testing.expect_value(t, i3, 3)
-	testing.expect(t, p3 == nil)
+	remain3 := _conn_advance_exec_bufs(&conn, 1)
+	testing.expect(t, !remain3)
+	testing.expect(t, conn.wire.exec_i >= conn.wire.exec_n)
 }
 
 @(test)
-test_exec_queue_single_buffer_finish :: proc(t: ^testing.T) {
-	// exec_n == 0 or single buffer full → finished (matches materialize host path using exec_n=0).
+test_conn_advance_exec_bufs_single_and_empty_n :: proc(t: ^testing.T) {
+	// Single buffer full → finished.
+	conn: Connection
 	a := [4]u8{1, 2, 3, 4}
-	bufs := [][]u8{a[:]}
-	_, _, f := exec_queue_after_send(bufs, 0, 1, a[:], 4)
-	testing.expect(t, f)
+	conn.wire.exec_bufs[0] = a[:]
+	conn.wire.exec_n = 1
+	conn.wire.exec_i = 0
+	remain := _conn_advance_exec_bufs(&conn, 4)
+	testing.expect(t, !remain)
 
-	// exec_n == 0: treat as finished after full send of pending.
-	_, _, f0 := exec_queue_after_send(bufs, 0, 0, a[:], 4)
-	testing.expect(t, f0)
+	// exec_n == 0: no mem queue — advance leaves "no remain" for i>=n.
+	conn2: Connection
+	conn2.wire.exec_n = 0
+	conn2.wire.exec_i = 0
+	remain0 := _conn_advance_exec_bufs(&conn2, 4)
+	testing.expect(t, !remain0)
 }
 
 @(test)
-test_exec_queue_skip_empty_and_zero_progress :: proc(t: ^testing.T) {
+test_conn_advance_exec_bufs_skip_empty_and_zero_progress :: proc(t: ^testing.T) {
 	// Empty mid-queue slots must be skipped (empty pending + unfinished → CQE hang).
+	conn: Connection
 	a := [2]u8{1, 2}
 	empty: [0]u8
 	c := [1]u8{9}
-	bufs := [][]u8{a[:], empty[:], c[:]}
+	conn.wire.exec_bufs[0] = a[:]
+	conn.wire.exec_bufs[1] = empty[:]
+	conn.wire.exec_bufs[2] = c[:]
+	conn.wire.exec_n = 3
+	conn.wire.exec_i = 0
 
-	p, i, f := exec_queue_after_send(bufs, 0, 3, bufs[0], len(bufs[0]))
-	testing.expect(t, !f)
-	testing.expect_value(t, i, 2)
-	testing.expect_value(t, len(p), 1)
-	testing.expect_value(t, p[0], u8(9))
+	remain := _conn_advance_exec_bufs(&conn, len(a))
+	testing.expect(t, remain)
+	testing.expect_value(t, conn.wire.exec_i, 2)
+	testing.expect_value(t, len(conn.wire.exec_bufs[2]), 1)
+	testing.expect_value(t, conn.wire.exec_bufs[2][0], u8(9))
 
 	// Trailing empties → finished.
-	bufs2 := [][]u8{a[:], empty[:], empty[:]}
-	_, _, f2 := exec_queue_after_send(bufs2, 0, 3, bufs2[0], len(bufs2[0]))
-	testing.expect(t, f2)
+	conn2: Connection
+	conn2.wire.exec_bufs[0] = a[:]
+	conn2.wire.exec_bufs[1] = empty[:]
+	conn2.wire.exec_bufs[2] = empty[:]
+	conn2.wire.exec_n = 3
+	conn2.wire.exec_i = 0
+	remain2 := _conn_advance_exec_bufs(&conn2, len(a))
+	testing.expect(t, !remain2)
 
-	// Zero progress → finished (caller must not resubmit spin).
-	_, _, f0 := exec_queue_after_send(bufs, 0, 3, bufs[0], 0)
-	testing.expect(t, f0)
-	_, _, fneg := exec_queue_after_send(bufs, 0, 3, bufs[0], -1)
-	testing.expect(t, fneg)
+	// Zero / negative progress: do not spin (caller fails closed on zero-progress CQE).
+	// With sent<=0, remain reports whether queue still has slots from exec_i.
+	conn3 := conn
+	conn3.wire.exec_i = 0
+	conn3.wire.exec_bufs[0] = a[:]
+	conn3.wire.exec_bufs[1] = empty[:]
+	conn3.wire.exec_bufs[2] = c[:]
+	conn3.wire.exec_n = 3
+	remain0 := _conn_advance_exec_bufs(&conn3, 0)
+	testing.expect(t, remain0) // queue still has work; host_on_wire fails closed on result==0
+	remain_neg := _conn_advance_exec_bufs(&conn3, -1)
+	testing.expect(t, remain_neg)
 }
 
 @(test)
@@ -609,6 +659,86 @@ test_plan_is_sendfile_wire_gate :: proc(t: ^testing.T) {
 	mix := plan_body([]Response_Cmd{cmd_static(_big_body[:]), cmd_file(7, 0, 100)}, ctx)
 	testing.expect(t, _plan_is_sendfile_wire(mix))
 	testing.expect(t, !_plan_is_writev_wire(mix))
+}
+
+@(test)
+test_conn_advance_exec_bufs_partial :: proc(t: ^testing.T) {
+	// Single mem queue: three segments; short write into the middle of buf1.
+	conn: Connection
+	a := [4]u8{1, 2, 3, 4}
+	b := [6]u8{5, 6, 7, 8, 9, 10}
+	c := [3]u8{11, 12, 13}
+	conn.wire.exec_bufs[0] = a[:]
+	conn.wire.exec_bufs[1] = b[:]
+	conn.wire.exec_bufs[2] = c[:]
+	conn.wire.exec_n = 3
+	conn.wire.exec_i = 0
+
+	// Consume all of a (4) + 2 of b → remain b[2:] + c.
+	remain := _conn_advance_exec_bufs(&conn, 6)
+	testing.expect(t, remain)
+	testing.expect_value(t, conn.wire.exec_i, 1)
+	testing.expect_value(t, len(conn.wire.exec_bufs[1]), 4) // 6-2 left of b
+	testing.expect_value(t, len(conn.wire.exec_bufs[2]), 3)
+
+	// Finish rest in one go.
+	remain2 := _conn_advance_exec_bufs(&conn, 4+3)
+	testing.expect(t, !remain2)
+	testing.expect(t, conn.wire.exec_i >= conn.wire.exec_n)
+}
+
+@(test)
+test_conn_wire_in_flight :: proc(t: ^testing.T) {
+	conn: Connection
+	testing.expect(t, !_conn_wire_in_flight(&conn))
+
+	// pending_send alone is not in-flight; wire.kind must be set by submit.
+	pending := [2]u8{1, 2}
+	conn.wire.pending_send = pending[:]
+	testing.expect(t, !_conn_wire_in_flight(&conn))
+	conn.wire.pending_send = nil
+
+	conn.wire.kind = .Send
+	testing.expect(t, _conn_wire_in_flight(&conn))
+	conn.wire.kind = .None
+
+	conn.wire.kind = .Writev
+	testing.expect(t, _conn_wire_in_flight(&conn))
+	conn.wire.kind = .None
+
+	conn.wire.kind = .Sendfile
+	testing.expect(t, _conn_wire_in_flight(&conn))
+	conn.wire.kind = .None
+	testing.expect(t, !_conn_wire_in_flight(&conn))
+}
+
+@(test)
+test_conn_arm_and_clear_mem_queue :: proc(t: ^testing.T) {
+	conn: Connection
+	conn.wire.file_send_fd = 7
+	conn.wire.file_send_remaining = 100
+	h := [3]u8{1, 2, 3}
+	b1 := [2]u8{4, 5}
+	bodies := [][]u8{b1[:]}
+	ok := _conn_arm_mem_queue(&conn, h[:], bodies)
+	testing.expect(t, ok)
+	testing.expect_value(t, conn.wire.exec_n, 2)
+	testing.expect_value(t, conn.wire.exec_i, 0)
+	testing.expect_value(t, len(conn.wire.exec_bufs[0]), 3)
+	testing.expect_value(t, len(conn.wire.exec_bufs[1]), 2)
+
+	// clear mem preserves file_send_* and kind
+	conn.wire.kind = .Writev
+	_conn_clear_mem_queue(&conn)
+	testing.expect_value(t, conn.wire.exec_n, 0)
+	testing.expect(t, conn.wire.pending_send == nil)
+	testing.expect_value(t, conn.wire.kind, Wire_Kind.Writev)
+	testing.expect_value(t, conn.wire.file_send_fd, i32(7))
+	testing.expect_value(t, conn.wire.file_send_remaining, i64(100))
+
+	// empty arm
+	conn2: Connection
+	testing.expect(t, !_conn_arm_mem_queue(&conn2, nil, nil))
 }
 
 @(test)

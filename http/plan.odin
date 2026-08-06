@@ -80,9 +80,11 @@ plan_wire_prefer_kernel :: proc() -> bool {
 	return _plan_wire_prefer_kernel
 }
 
-// Kernel sendfile(2) is opt-in: PLAN_WIRE_SENDFILE=1|true|on.
-// Default off — soft_post + POLL path was unstable under high concurrency on bastion
-// (process death after file load). Code path exists for fidelity; chunked is default.
+// Kernel/BSD sendfile: default ON where implemented.
+//   Linux: sendfile(2) + io_uring soft_cq / POLL (requires PLAN_WIRE_MODE=kernel).
+//   Darwin: sendfile(2) + kqueue EVFILT_WRITE on EAGAIN (independent of WRITEV).
+// Disable with PLAN_WIRE_SENDFILE=0|false|off|chunked (forces copy_into / pread).
+// Hardened: SIGPIPE ignored, close deferred while wire == .Sendfile.
 @(private)
 _plan_wire_sendfile_inited: bool
 @(private)
@@ -91,18 +93,28 @@ _plan_wire_prefer_sendfile: bool
 plan_wire_prefer_sendfile :: proc() -> bool {
 	if !_plan_wire_sendfile_inited {
 		_plan_wire_sendfile_inited = true
-		_plan_wire_prefer_sendfile = false
-		when ODIN_OS == .Linux {
+		when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+			_plan_wire_prefer_sendfile = true
 			if v, ok := os.lookup_env("PLAN_WIRE_SENDFILE", context.allocator); ok {
 				defer delete(v, context.allocator)
 				switch v {
+				case "0", "false", "off", "chunked", "no":
+					_plan_wire_prefer_sendfile = false
 				case "1", "true", "on", "kernel":
 					_plan_wire_prefer_sendfile = true
 				}
 			}
+		} else {
+			_plan_wire_prefer_sendfile = false
 		}
 	}
-	return _plan_wire_prefer_sendfile && plan_wire_prefer_kernel()
+	when ODIN_OS == .Linux {
+		return _plan_wire_prefer_sendfile && plan_wire_prefer_kernel()
+	} else when ODIN_OS == .Darwin {
+		return _plan_wire_prefer_sendfile
+	} else {
+		return false
+	}
 }
 
 // Deprecated alias name — multi_send only (not kernel writev). Prefer plan_wire_load.
@@ -224,28 +236,55 @@ plan_context_default :: proc() -> Plan_Context {
 }
 
 // Handler-side bias over Plan_Context (POD).
-// Zero value: no materialize/gather bias (server copy_budget / max_iovecs stand);
-// prefer_sendfile is always opt-in (zero → sendfile_ok forced false even if platform allows).
-// Applied by plan_context / plan_context_apply_profile (same rules as comparisons/plan plan_ctx_for).
+// Zero value: no materialize/gather bias (server copy_budget / max_iovecs stand).
+//
+// sendfile (bastion: Sendfile ≫ chunked/materialize on file):
+//   - base.sendfile_ok must already be true (platform + Server_Opts.plan_sendfile_ok).
+//   - prefer_materialize always clears sendfile_ok.
+//   - When optimize is true (Server_Opts.plan_optimize or wire gate from prefer_*),
+//     base capability is kept — prefer_sendfile is NOT required.
+//   - When optimize is false, prefer_sendfile is the per-route opt-in (also enables
+//     optimize wire via prefer_sendfile alone).
+//   - Never promotes false→true.
+// Applied by plan_context / plan_context_apply_profile.
 Handler_Profile :: struct {
 	prefer_materialize: bool, // force huge copy budget → plan_body materializes memory bodies
 	prefer_gather:      bool, // use copy_budget for size gate (0 → disable size-based copy preference)
-	prefer_sendfile:    bool, // AND with platform/server sendfile_ok (cannot enable when base is false)
+	prefer_sendfile:    bool, // opt-in Sendfile when optimize is off; no-op if optimize already allows
 	copy_budget:        u32,  // with prefer_gather: preferred_copy_budget (0 disables size gate)
 }
 
 // Apply Handler_Profile bias onto a base Plan_Context (filled from server/conn).
-// Order matches comparisons/plan/server: prefer_gather first, prefer_materialize wins if both set.
-// sendfile_ok becomes base.sendfile_ok && profile.prefer_sendfile (opt-in; never promotes false→true).
-plan_context_apply_profile :: proc(base: Plan_Context, profile: Handler_Profile) -> Plan_Context {
+// Order: prefer_gather first, prefer_materialize wins if both set.
+// optimize: true when plan_optimize or per-request optimize wire (gather/sendfile bias).
+//   When true and !prefer_materialize, sendfile_ok follows base (measured default path).
+//   When false, prefer_sendfile is required to keep base.sendfile_ok.
+plan_context_apply_profile :: proc(
+	base: Plan_Context,
+	profile: Handler_Profile,
+	optimize := false,
+) -> Plan_Context {
 	ctx := base
 	if profile.prefer_gather {
 		ctx.preferred_copy_budget = profile.copy_budget
 	}
 	if profile.prefer_materialize {
 		ctx.preferred_copy_budget = max(u32)
+		ctx.sendfile_ok = false
+		return ctx
 	}
-	ctx.sendfile_ok = base.sendfile_ok && profile.prefer_sendfile
+	// Sendfile only when platform/server already allows.
+	if !base.sendfile_ok {
+		ctx.sendfile_ok = false
+		return ctx
+	}
+	// Optimize path: allow Sendfile by default (bastion file RPS).
+	// Non-optimize: prefer_sendfile (or prefer_gather as soft open) for per-route enable.
+	if optimize || profile.prefer_sendfile || profile.prefer_gather {
+		ctx.sendfile_ok = true
+	} else {
+		ctx.sendfile_ok = false
+	}
 	return ctx
 }
 
@@ -369,10 +408,14 @@ cmd_bytes :: proc(data: []u8, owned := true) -> Response_Cmd {
 	}
 }
 
-cmd_file :: proc(fd: i32, offset: i64, length: i64) -> Response_Cmd {
+// File region command. owned=true → host closes fd after materialize or file-region send.
+cmd_file :: proc(fd: i32, offset: i64, length: i64, owned := false) -> Response_Cmd {
 	flags: Body_Flags = {.Seekable, .Replayable}
 	if length >= 0 {
 		flags += {.Known_Length}
+	}
+	if owned {
+		flags += {.Owned}
 	}
 	return Response_Cmd {
 		kind   = .File,

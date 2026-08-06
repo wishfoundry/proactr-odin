@@ -364,10 +364,11 @@ submit_writev :: proc(
 }
 
 // submit_sendfile zero-copies file_fd[offset..offset+length) to sock_fd.
-// Linux: real sendfile(2); short transfers complete with bytes sent (host advances
-// and resubmits). EAGAIN arms POLL_ADD then retries before completing.
-// Non-Linux backends return .Unsupported (host should fall back to pread+send).
-// fixed_idx applies to the socket for poll/wait only; sendfile uses raw fds.
+// Linux: sendfile(2) + soft_cq / POLL_ADD on EAGAIN.
+// Darwin: sendfile(2) + kqueue EVFILT_WRITE on EAGAIN (kqueue façade).
+// Platform drives until progress cap / EAGAIN / done; host advances remainder.
+// Other backends return .Unsupported (host falls back to pread+send).
+// fixed_idx: Linux POLL socket slot only; sendfile always uses raw fds.
 submit_sendfile :: proc(
 	r: ^Ring,
 	sock_fd: i32,

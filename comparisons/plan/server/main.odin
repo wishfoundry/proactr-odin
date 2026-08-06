@@ -143,19 +143,21 @@ PROFILE_FILE :: Handler_Profile {
 }
 
 plan_ctx_for :: proc(profile: Handler_Profile) -> http.Plan_Context {
-	ctx := http.plan_context_default()
-	ctx.max_iovecs = g_max_iovecs
-	ctx.preferred_copy_budget = g_copy_budget
-	ctx.sendfile_ok = g_sendfile_ok && profile.prefer_sendfile
-	ctx.tls = false
+	// Mirror http.plan_context_apply_profile: base capability + optimize / prefer_* gates.
+	base := http.plan_context_default()
+	base.max_iovecs = g_max_iovecs
+	base.preferred_copy_budget = g_copy_budget
+	base.sendfile_ok = g_sendfile_ok
+	base.tls = false
 
-	if profile.prefer_gather {
-		ctx.preferred_copy_budget = profile.copy_budget
+	hp := http.Handler_Profile {
+		prefer_materialize = profile.prefer_materialize,
+		prefer_gather      = profile.prefer_gather,
+		prefer_sendfile    = profile.prefer_sendfile,
+		copy_budget        = profile.copy_budget,
 	}
-	if profile.prefer_materialize {
-		ctx.preferred_copy_budget = max(u32)
-	}
-	return ctx
+	// g_mode optimize → same as Server_Opts.plan_optimize (Sendfile without prefer_sendfile).
+	return http.plan_context_apply_profile(base, hp, g_mode == .Optimize)
 }
 
 run_shadow_plan :: proc(cmds: []http.Response_Cmd, profile: Handler_Profile) {
@@ -246,7 +248,7 @@ on_blob :: proc(req: ^http.Request, res: ^http.Response) {
 on_file :: proc(req: ^http.Request, res: ^http.Response) {
 	inc(&g_m.hit_file)
 	// Intent is File region. Shadow plan always uses File cmd.
-	// Optimize: body_file + prefer_sendfile → wire streams via chunked pread (Phase 4).
+	// Optimize: body_file under plan_optimize → Sendfile/chunked (prefer_sendfile not required).
 	// Materialize: preloaded bytes (same pattern as on-disk) so load does not
 	// open/read entire file into the request temp arena per hit.
 	cmds := []http.Response_Cmd{http.cmd_file(g_file_fd >= 0 ? g_file_fd : 3, 0, g_file_len)}
@@ -258,7 +260,6 @@ on_file :: proc(req: ^http.Request, res: ^http.Response) {
 	http.headers_set_content_type(&res.headers, "text/plain")
 
 	if g_mode == .Optimize && g_file_fd >= 0 {
-		http.response_set_profile(res, http.Handler_Profile{prefer_sendfile = true})
 		http.headers_set(&res.headers, "x-plan-wire", "body_file")
 		http.body_file(res, g_file_fd, 0, g_file_len)
 		http.respond(res)

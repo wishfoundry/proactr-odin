@@ -190,28 +190,27 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 			chunk[i].fixed_idx = -1
 			chunk[i].reg_buf_index = -1
 			chunk[i].temp_slot = -1
-			chunk[i].file_send_fd = -1
+			chunk[i].wire.file_send_fd = -1
 			append(&td.conn_free, &chunk[i])
 		}
 		c = &chunk[0]
 		c.fixed_idx = -1
 		c.reg_buf_index = -1
 		c.temp_slot = -1
-		c.file_send_fd = -1
+		c.wire.file_send_fd = -1
 	}
 
 	c.server = s
 	c.socket = {}
 	c.state = .Pending
-	c.pending_send = nil
-	c.exec_i = 0
-	c.exec_n = 0
-	c.iov_count = 0
-	c.kernel_writev_active = false
-	c.kernel_sendfile_active = false
-	c.file_send_fd = -1
-	c.file_send_off = 0
-	c.file_send_remaining = 0
+	c.wire.pending_send = nil
+	c.wire.exec_i = 0
+	c.wire.exec_n = 0
+	c.wire.iov_count = 0
+	c.wire.kind = .None
+	c.wire.file_send_fd = -1
+	c.wire.file_send_off = 0
+	c.wire.file_send_remaining = 0
 	// file_send_buf retained across free-list reuse (allocated lazily).
 	c.close_pending = false
 	c.close_on_io = false
@@ -238,18 +237,17 @@ connection_destroy :: proc(c: ^Connection) {
 	}
 	c.socket = {}
 	// Drop multi-buffer queue + pending + file-send cursor (keep free-list clean).
-	c.pending_send = nil
-	c.exec_i = 0
-	c.exec_n = 0
-	c.iov_count = 0
-	c.kernel_writev_active = false
-	c.kernel_sendfile_active = false
-	for i in 0 ..< len(c.exec_bufs) {
-		c.exec_bufs[i] = nil
+	c.wire.pending_send = nil
+	c.wire.exec_i = 0
+	c.wire.exec_n = 0
+	c.wire.iov_count = 0
+	c.wire.kind = .None
+	for i in 0 ..< len(c.wire.exec_bufs) {
+		c.wire.exec_bufs[i] = nil
 	}
-	c.file_send_fd = -1
-	c.file_send_off = 0
-	c.file_send_remaining = 0
+	c.wire.file_send_fd = -1
+	c.wire.file_send_off = 0
+	c.wire.file_send_remaining = 0
 	// Keep file_send_buf allocation for reuse.
 	c.close_pending = false
 	c.close_on_io = false
@@ -275,13 +273,13 @@ connection_destroy :: proc(c: ^Connection) {
 			delete(c.resp_buf)
 			c.resp_buf = nil
 		}
-		if c.file_send_buf != nil {
+		if c.wire.file_send_buf != nil {
 			if c.server != nil {
-				delete(c.file_send_buf, c.server.conn_allocator)
+				delete(c.wire.file_send_buf, c.server.conn_allocator)
 			} else {
-				delete(c.file_send_buf)
+				delete(c.wire.file_send_buf)
 			}
-			c.file_send_buf = nil
+			c.wire.file_send_buf = nil
 		}
 		free(c, c.server.conn_allocator)
 	}
@@ -311,14 +309,14 @@ _server_thread_free_slab :: proc(t: ^Server_Thread) {
 				delete(c.resp_buf)
 				c.resp_buf = nil
 			}
-			if c.file_send_buf != nil {
+			if c.wire.file_send_buf != nil {
 				// Allocated with server.conn_allocator (see _conn_ensure_file_send_buf).
 				if c.server != nil {
-					delete(c.file_send_buf, c.server.conn_allocator)
+					delete(c.wire.file_send_buf, c.server.conn_allocator)
 				} else {
-					delete(c.file_send_buf)
+					delete(c.wire.file_send_buf)
 				}
-				c.file_send_buf = nil
+				c.wire.file_send_buf = nil
 			}
 			c.loop.res._buf = {}
 			c.temp_slot = -1

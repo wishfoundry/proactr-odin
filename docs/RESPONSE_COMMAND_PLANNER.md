@@ -280,7 +280,7 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 - [x] Fill `Plan_Context` from server/conn/backend (`ring_has_fixed_files`, TLS flag placeholder, iovec max / copy budget from `Server_Opts`, sendfile on Linux/Darwin plain TCP)
 - [x] Optional `plan_context(res)` / `plan_context_for(conn)` for advanced handlers; `response_plan_preview` runs optimize `plan_body` (wire still materialize-only)
 - [x] Middleware hook: `Body_Middleware` on Response (`response_body_middleware`); identity + `body_mw_drop_empty_static`; applied before materialize on send
-- [x] `Handler_Profile` + `response_set_profile` (prefer_materialize / gather / sendfile bias; zero = defaults, prefer_sendfile opt-in)
+- [x] `Handler_Profile` + `response_set_profile` (prefer_materialize / gather / sendfile bias; zero + plan_optimize keeps platform sendfile)
 - [x] `Server_Opts`: `plan_copy_budget` (0 → default 4096), `plan_max_iovecs` (0 → 1024), `plan_sendfile_ok` (default true)
 
 **Exit:** handlers can read constraints; middleware can rewrite cmds without touching executor. ✅
@@ -426,6 +426,7 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | `body_reserve` / chunked `response_writer` stay special-cased (heading early) | Not rewritten as cmds yet; avoid breaking Fortunes / JSON writer paths |
 | 2026-08-05 | Phase 2: `plan_context` fills from `Server_Opts` + worker ring; wire still `plan_body_materialize_only` | Structure for constraints/middleware without mechanism change |
 | 2026-08-05 | `Handler_Profile.prefer_sendfile` is opt-in (`sendfile_ok &= prefer_sendfile`) | Matches `comparisons/plan` plan_ctx_for; zero profile keeps conservative optimize preview |
+| 2026-08-05 | `plan_optimize` keeps base `sendfile_ok` without `prefer_sendfile` | Bastion: Sendfile ≫ chunked/materialize; prefer_sendfile only when optimize is off |
 | 2026-08-05 | Body middleware on Response (`_body_mw`), not global Server hook | Per-request; cleared in `response_init`; toy `body_mw_drop_empty_static` only |
 | 2026-08-05 | Body middleware must rewrite in place (same `raw_data`); no post-return host copy | External/stack returns would be UAF; `body_middleware_apply` asserts contract |
 | 2026-08-05 | `response_plan_preview` applies middleware on a cmd snapshot (no Response mutate) | Matches send intent without double-apply at wire |
@@ -459,8 +460,9 @@ Track answers here as the experiment proceeds.
 | `http/plan.odin` | Types + pure `plan_body` (optimize policy) + `plan_body_materialize_only` + wire counters |
 | `http/plan_test.odin` | Table tests: cmds + context → exec op sequence; multi-op advance; file remaining math |
 | `http/response.odin` | Emit cmds; plan+execute (materialize, Writev, file-region); Phase 5 `Response_Stream` |
-| `http/server.odin` | Multi-buffer + file_send executor in `host_on_send`; `plan_optimize` opt |
-| `proactr/*` | Future: kernel sendfile / true writev submit if needed |
+| `http/server.odin` | Ring loop, accept/recv/close, connection lifecycle; `host_dispatch` → wire |
+| `http/wire.odin` | Wire executor: Send / WRITEV / sendfile+chunked; `Wire_Kind`; `host_on_wire` |
+| `proactr/*` | Linux sendfile soft_cq + POLL_ADD façade; WRITEV submit |
 
 ---
 

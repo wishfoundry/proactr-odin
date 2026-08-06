@@ -37,12 +37,13 @@ laytan/odin-http (and `core:nbio`) already use io_uring on Linux, but the progra
 ```
 proactr/                 # Proactor I/O core (io_uring-first)
 http/                    # HTTP/1.1 server+types on proactr (fork of laytan APIs)
+  middleware/            # Static file server (see docs/STATIC.md)
 vendor/laytan/odin-http  # Unmodified upstream for baseline benches
 third_party/             # Peer frameworks (git submodules)
   ntex/  drogon/  asio/  seastar/  compio/  envoy/
 comparisons/             # Peer microservers + harness
 benchmarks/              # Published numbers + methodology
-docs/                    # Architecture notes
+docs/                    # Architecture notes (STATIC.md = static middleware guide)
 ```
 
 ## Status

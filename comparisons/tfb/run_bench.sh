@@ -412,9 +412,11 @@ start_peer() {
       if [[ ! -x proactr/tfb-proactr.bin ]]; then
         (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
       fi
+      # Linux default: kernel WRITEV + sendfile(2). Override PLAN_WIRE_SENDFILE=0 for chunked.
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
         PLAN_MODE=optimize PLAN_WIRE_MODE="${PLAN_WIRE_MODE:-kernel}" \
+        PLAN_WIRE_SENDFILE="${PLAN_WIRE_SENDFILE:-}" \
         PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt.server.log" 2>&1 &
       ;;
@@ -424,9 +426,31 @@ start_peer() {
       fi
       env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
         FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
-        PLAN_MODE=optimize PLAN_WIRE_MODE=fallback \
+        PLAN_MODE=optimize PLAN_WIRE_MODE=fallback PLAN_WIRE_SENDFILE=0 \
         PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
         ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt-fallback.server.log" 2>&1 &
+      ;;
+    proactr-opt-chunked)
+      # Kernel WRITEV + file_chunked (sendfile off) — A/B vs default sendfile.
+      if [[ ! -x proactr/tfb-proactr.bin ]]; then
+        (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
+      fi
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
+        PLAN_MODE=optimize PLAN_WIRE_MODE=kernel PLAN_WIRE_SENDFILE=0 \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
+        ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt-chunked.server.log" 2>&1 &
+      ;;
+    proactr-opt-sendfile)
+      # Explicit kernel WRITEV + sendfile(2) (same as proactr-opt default on Linux).
+      if [[ ! -x proactr/tfb-proactr.bin ]]; then
+        (cd proactr && odin build . -out:tfb-proactr.bin -o:speed) || return 1
+      fi
+      env DATABASE_PATH="$DATABASE_PATH" PORT="$PORT" WORKERS="$WORKERS" \
+        FORTUNES_MODE=sync FORTUNES_SYNC_SHARED="${FORTUNES_SYNC_SHARED:-0}" \
+        PLAN_MODE=optimize PLAN_WIRE_MODE=kernel PLAN_WIRE_SENDFILE=1 \
+        PLAN_FILE_PATH="${PLAN_FILE_PATH:-/tmp/proactr-profile-file-1m.bin}" \
+        ./proactr/tfb-proactr.bin >"$LOGDIR/proactr-opt-sendfile.server.log" 2>&1 &
       ;;
     proactr-async)
       if [[ ! -x proactr/tfb-proactr.bin ]]; then

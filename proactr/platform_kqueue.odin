@@ -215,7 +215,7 @@ _submit_close :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .None
 }
 
-// Kernel WRITEV / sendfile: not on kqueue façade (host falls back to multi-send / pread).
+// Kernel WRITEV: not on kqueue façade (host falls back to multi-send).
 _submit_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	_ = r
 	_ = id
@@ -223,11 +223,144 @@ _submit_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .Unsupported
 }
 
-_submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
-	_ = r
-	_ = id
-	_ = op
-	return .Unsupported
+// --- Darwin sendfile(2) -------------------------------------------------------
+// macOS: sendfile(fd, s, offset, *len, hdtr, flags) — file→socket zero-copy.
+// FreeBSD/others: leave Unsupported (different sendfile ABI); host uses pread+send.
+// Lifecycle mirrors Linux: drive with cap, soft-complete progress, EVFILT_WRITE on EAGAIN.
+
+when ODIN_OS == .Darwin {
+	foreign import _darwin_libSystem "system:System"
+
+	@(default_calling_convention = "c")
+	foreign _darwin_libSystem {
+		// int sendfile(int fd, int s, off_t offset, off_t *len, struct sf_hdtr *hdtr, int flags);
+		@(link_name = "sendfile")
+		darwin_sendfile :: proc(
+			fd:     c.int,
+			s:      c.int,
+			offset: i64,
+			len:    ^i64,
+			hdtr:   rawptr,
+			flags:  c.int,
+		) -> c.int ---
+	}
+
+	SENDFILE_DRIVE_CAP :: u64(1 << 20) // 1 MiB per soft completion
+
+	// One Darwin sendfile attempt. Advances op.offset / op.nbytes on progress.
+	// Darwin advances *len only; offset is not an in-out kernel cursor — we bump it.
+	// EAGAIN may still report partial bytes in *len (non-blocking socket).
+	_sendfile_once :: proc(op: ^Operation) -> (n: i32, again: bool) {
+		if op.nbytes == 0 {
+			return 0, false
+		}
+		want := i64(op.nbytes)
+		if u64(want) > SENDFILE_DRIVE_CAP {
+			want = i64(SENDFILE_DRIVE_CAP)
+		}
+		len_io := want
+		rc := darwin_sendfile(c.int(op.file_fd), c.int(op.fd), op.offset, &len_io, nil, 0)
+		if rc == 0 {
+			// Success: *len = bytes sent (0 ⇒ EOF / nothing left at offset).
+			if len_io <= 0 {
+				return 0, false
+			}
+			got := u64(len_io)
+			if got > op.nbytes {
+				got = op.nbytes
+			}
+			op.offset += i64(got)
+			op.nbytes -= got
+			return i32(got), false
+		}
+		e := posix.errno()
+		// Partial send then would-block: bytes already in *len.
+		if (e == .EAGAIN || e == .EWOULDBLOCK) && len_io > 0 {
+			got := u64(len_io)
+			if got > op.nbytes {
+				got = op.nbytes
+			}
+			op.offset += i64(got)
+			op.nbytes -= got
+			return i32(got), false
+		}
+		if e == .EAGAIN || e == .EWOULDBLOCK {
+			return 0, true
+		}
+		if e == .EINTR {
+			// No progress committed; drive loop retries.
+			return 0, false
+		}
+		if e == .NONE {
+			return -_EINVAL, false
+		}
+		return -i32(e), false
+	}
+
+	_sendfile_drive :: proc(op: ^Operation) -> (result: i32, need_poll: bool) {
+		total: i32 = 0
+		for _ in 0 ..< 64 {
+			if op.nbytes == 0 {
+				return total, false
+			}
+			if total > 0 && u64(total) >= SENDFILE_DRIVE_CAP {
+				return total, false
+			}
+			n, again := _sendfile_once(op)
+			if again {
+				if total > 0 {
+					return total, false
+				}
+				return 0, true
+			}
+			if n < 0 {
+				if total > 0 {
+					return total, false
+				}
+				return n, false
+			}
+			if n == 0 {
+				return total, false
+			}
+			total += n
+		}
+		return total, false
+	}
+
+	_submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+		if !r.impl.active {
+			return .Unsupported
+		}
+		n, need_poll := _sendfile_drive(op)
+		if need_poll {
+			op.awaiting_poll = true
+			_kq_arm(r, op.fd, .Write, id)
+			return .None
+		}
+		op.awaiting_poll = false
+		_kq_post(r, id, n)
+		return .None
+	}
+
+	// Writable again after EAGAIN: drive sendfile; re-arm Write or complete.
+	_kq_sendfile_on_writable :: proc(r: ^Ring, op_id: u32, op: ^Operation) {
+		op.awaiting_poll = false
+		n, need_poll := _sendfile_drive(op)
+		if need_poll {
+			op.awaiting_poll = true
+			_kq_arm(r, op.fd, .Write, op_id)
+			return
+		}
+		_kq_post(r, op_id, n)
+	}
+} else {
+	// FreeBSD/OpenBSD/NetBSD: different sendfile ABIs; keep pread+send host fallback.
+	_submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
+		_ = r
+		_ = id
+		_ = op
+		return .Unsupported
+	}
 }
 
 _ring_submit :: proc(r: ^Ring) -> Error {
@@ -286,9 +419,16 @@ _kq_handle_event :: proc(r: ^Ring, ev: kqueue.KEvent) {
 	case .Nop, .Close, .Timeout:
 		// Not kevent-driven (Timeout is software).
 		_kq_post(r, op_id, 0)
-	case .Writev, .Sendfile:
+	case .Writev:
 		// Never armed on kqueue (submit returns Unsupported).
 		_kq_post(r, op_id, -_EINVAL)
+	case .Sendfile:
+		when ODIN_OS == .Darwin {
+			// EVFILT_WRITE after sendfile EAGAIN.
+			_kq_sendfile_on_writable(r, op_id, op)
+		} else {
+			_kq_post(r, op_id, -_EINVAL)
+		}
 	}
 }
 

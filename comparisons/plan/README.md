@@ -56,6 +56,7 @@ So A/B shows:
 | `PLAN_MAX_IOVECS` | `1024` | Gather budget |
 | `PLAN_DATA_DIR` | `/tmp/proactr-plan-bench` | Generated `file-1m.bin` |
 | `PLAN_WIRE_MODE` | `kernel` (Linux) | `kernel` → IORING_OP_WRITEV + sendfile(2); `fallback` → multi_send + chunked pread. Non-Linux always fallback. |
+| `PLAN_WIRE_SENDFILE` | `1` (Linux kernel) | `0`/`chunked` forces pread+send; default on with kernel mode after SIGPIPE/lifecycle hardening. |
 
 ## Build & manual smoke
 

@@ -27,6 +27,7 @@ proactr/                    # standalone proactor (compare vs nbio later)
 
 http/
   # Protocol + host; driven by proactr completions
+  middleware/           # Static files etc. (import as middleware; see docs/STATIC.md)
 ```
 
 ## Completion loop (target)

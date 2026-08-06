@@ -543,29 +543,84 @@ _prep_poll_out :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .None
 }
 
-// One sendfile(2) attempt. Returns (bytes, again=EAGAIN) or (-errno, false).
-// Does not update op.offset/nbytes — host owns Connection progress; result is bytes transferred.
+// Max bytes / soft completion for one Sendfile drive. Bounds worker monopolization
+// on large regions while still batching short transfers before soft_cq post.
+SENDFILE_DRIVE_CAP :: u64(1 << 20) // 1 MiB
+
+// One sendfile(2) attempt. Updates op.offset and op.nbytes on progress.
+// Returns (bytes, again=EAGAIN) or (-errno, false). again with n=0.
 _sendfile_once :: proc(op: ^Operation) -> (n: i32, again: bool) {
 	if op.nbytes == 0 {
 		return 0, false
 	}
 	off := op.offset
-	ret, errno := linux.sendfile(linux.Fd(op.fd), linux.Fd(op.file_fd), &off, uint(op.nbytes))
+	want := op.nbytes
+	if want > SENDFILE_DRIVE_CAP {
+		want = SENDFILE_DRIVE_CAP
+	}
+	ret, errno := linux.sendfile(linux.Fd(op.fd), linux.Fd(op.file_fd), &off, uint(want))
 	if errno == .EAGAIN {
 		return 0, true
 	}
 	if errno != .NONE {
 		return -i32(errno), false
 	}
-	// Kernel advances *offset on success; keep op.offset in sync for any platform re-try.
+	// Kernel advances *offset on success; shrink remaining for multi-call drive.
 	op.offset = off
-	return i32(ret), false
+	if ret > 0 {
+		got := u64(ret)
+		if got > op.nbytes {
+			got = op.nbytes
+		}
+		op.nbytes -= got
+		return i32(got), false
+	}
+	return 0, false
+}
+
+// Drive sendfile until: error, EAGAIN with no progress, full region done, or
+// SENDFILE_DRIVE_CAP bytes transferred this issue (yield via soft_cq so host
+// can advance and the ring can service other conns).
+// Returns (total_bytes_or_neg_errno, need_poll).
+_sendfile_drive :: proc(op: ^Operation) -> (result: i32, need_poll: bool) {
+	total: i32 = 0
+	// Cap iterations so a pathological partial-1-byte loop cannot spin forever.
+	for _ in 0 ..< 64 {
+		if op.nbytes == 0 {
+			return total, false
+		}
+		// Stop this drive once we have transferred a full cap (host resubmits).
+		if total > 0 && u64(total) >= SENDFILE_DRIVE_CAP {
+			return total, false
+		}
+		n, again := _sendfile_once(op)
+		if again {
+			if total > 0 {
+				// Progress then EAGAIN: complete with progress; host resubmits.
+				return total, false
+			}
+			return 0, true
+		}
+		if n < 0 {
+			if total > 0 {
+				// Prefer reporting progress already on the wire over the error.
+				return total, false
+			}
+			return n, false
+		}
+		if n == 0 {
+			// EOF / no progress with remaining — surface 0 to host.
+			return total, false
+		}
+		total += n
+	}
+	return total, false
 }
 
 // Issue sendfile: soft-complete on progress/error, or arm POLL_ADD on EAGAIN.
 _sendfile_issue :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
-	n, again := _sendfile_once(op)
-	if again {
+	n, need_poll := _sendfile_drive(op)
+	if need_poll {
 		op.awaiting_poll = true
 		return _prep_poll_out(r, id, op)
 	}
@@ -704,32 +759,14 @@ _copy_cqes_ready :: proc(r: ^Ring, out: []Completion) -> int {
 		result := cqe.res
 		flags := transmute(u32)cqe.flags
 
-		// Sendfile EAGAIN path: POLL_ADD CQE → retry sendfile (do not surface poll mask).
-		if int(op_id) < len(r.ops) {
-			op := &r.ops[op_id]
-			if op.kind == .Sendfile && op.status == .Submitted && op.awaiting_poll {
-				op.awaiting_poll = false
-				if result < 0 {
-					out[out_n] = Completion{op_id = op_id, result = result, flags = flags}
-					out_n += 1
-					continue
-				}
-				n, again := _sendfile_once(op)
-				if again {
-					// Still not writable — re-arm POLL without completing the op.
-					op.awaiting_poll = true
-					if perr := _prep_poll_out(r, op_id, op); perr != .None {
-						op.awaiting_poll = false
-						out[out_n] = Completion{op_id = op_id, result = -i32(11), flags = 0} // -EAGAIN
-						out_n += 1
-					}
-					// else: no completion this round; SQE pending for next enter
-					continue
-				}
-				out[out_n] = Completion{op_id = op_id, result = n, flags = 0}
+		// Sendfile EAGAIN path: POLL_ADD CQE → drive sendfile (do not surface poll mask).
+		if handled, emit, sc := _sendfile_on_poll_cqe(r, op_id, result, flags); handled {
+			if emit {
+				out[out_n] = sc
 				out_n += 1
-				continue
 			}
+			// else: re-armed POLL without completing this round
+			continue
 		}
 
 		out[out_n] = Completion {
@@ -741,6 +778,44 @@ _copy_cqes_ready :: proc(r: ^Ring, out: []Completion) -> int {
 	}
 	sync.atomic_store_explicit(r.impl.cq_head, head + consumed, .Release)
 	return out_n
+}
+
+// _sendfile_on_poll_cqe handles a POLL_ADD CQE for an in-flight Sendfile after EAGAIN.
+// handled=false → not a sendfile poll wait (caller treats as normal CQE).
+// handled+emit → surface `sc` to host; handled+!emit → POLL re-armed, no completion.
+_sendfile_on_poll_cqe :: proc(
+	r: ^Ring,
+	op_id: u32,
+	result: i32,
+	flags: u32,
+) -> (
+	handled: bool,
+	emit: bool,
+	sc: Completion,
+) {
+	if int(op_id) >= len(r.ops) {
+		return false, false, {}
+	}
+	op := &r.ops[op_id]
+	if op.kind != .Sendfile || op.status != .Submitted || !op.awaiting_poll {
+		return false, false, {}
+	}
+	op.awaiting_poll = false
+	if result < 0 {
+		return true, true, Completion{op_id = op_id, result = result, flags = flags}
+	}
+	n, need_poll := _sendfile_drive(op)
+	if need_poll {
+		// Still not writable — re-arm POLL without completing the op.
+		op.awaiting_poll = true
+		if perr := _prep_poll_out(r, op_id, op); perr != .None {
+			op.awaiting_poll = false
+			return true, true, Completion{op_id = op_id, result = -i32(11), flags = 0} // -EAGAIN
+		}
+		return true, false, {}
+	}
+	// Drive finished with progress/error/EOF — surface once to host.
+	return true, true, Completion{op_id = op_id, result = n, flags = 0}
 }
 
 _ring_wait :: proc(

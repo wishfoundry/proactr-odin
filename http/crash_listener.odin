@@ -40,11 +40,30 @@ server_shutdown :: proc(s: ^Server) {
 @(private)
 crash_listener_server: ^Server
 
+// POSIX SIGPIPE (not in core:c/libc constants). Value is portable on Linux/BSD/Darwin.
+when ODIN_OS != .Windows {
+	_SIGPIPE :: 13
+}
+
+// server_ignore_sigpipe discards SIGPIPE so broken-pipe writes return EPIPE
+// instead of killing the process. Required for kernel sendfile(2) and any
+// non-MSG_NOSIGNAL write path when clients disconnect mid-response.
+// Safe to call multiple times; install once before serve.
+server_ignore_sigpipe :: proc() {
+	when ODIN_OS != .Windows {
+		// SIG_IGN is rawptr(1); match crash-listener handler type (cdecl/i32).
+		ign := transmute(proc "cdecl" (i32))libc.SIG_IGN
+		_ = libc.signal(_SIGPIPE, ign)
+	}
+}
+
 // server_shutdown_on_interrupt installs a minimal crash listener:
 // SIGINT and SIGTERM → server_request_shutdown only.
+// Also ignores SIGPIPE (see server_ignore_sigpipe).
 // Workers reap on the cold path (close listen, drain conns).
 server_shutdown_on_interrupt :: proc(s: ^Server) {
 	crash_listener_server = s
+	server_ignore_sigpipe()
 	_ = libc.signal(libc.SIGINT, _crash_listener_on_signal)
 	_ = libc.signal(libc.SIGTERM, _crash_listener_on_signal)
 }
