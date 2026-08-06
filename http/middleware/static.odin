@@ -10,7 +10,7 @@ package middleware
 //   Elite path is POSIX (Linux/Darwin): open + fstat + http.body_file(owned) + prefer_sendfile.
 //   Windows: best-effort full-read, limited Range/validators (no sendfile host path).
 //
-// See docs/STATIC.md for full usage.
+// See STATIC.md in this package for full usage.
 
 import "core:fmt"
 import http ".."
