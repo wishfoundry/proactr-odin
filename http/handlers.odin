@@ -36,6 +36,51 @@ middleware_proc :: proc(next: Maybe(^Handler), handle: Handler_Proc) -> Handler 
 	return h
 }
 
+// Invoke h.next if present. No-op when next is nil (terminal layer without child).
+handler_call_next :: proc(h: ^Handler, req: ^Request, res: ^Response) {
+	if n, ok := h.next.?; ok && n != nil {
+		n.handle(n, req, res)
+	}
+}
+
+/*
+Wrap a (req, res, next) function as a Handler. next is stored by pointer — caller
+must keep it alive (e.g. chain nodes, static storage).
+
+	inner := http.handler(app)
+	outer := http.from_fn(proc(req: ^Request, res: ^Response, next: ^Handler) {
+		// before
+		next.handle(next, req, res)
+		// after only if next responded synchronously
+	}, &inner)
+
+Prefer package middleware for stock layers and chain builders.
+*/
+from_fn :: proc(
+	f: proc(req: ^Request, res: ^Response, next: ^Handler),
+	next: ^Handler,
+	allocator := context.allocator,
+) -> Handler {
+	assert(f != nil)
+	assert(next != nil)
+	state := new(From_Fn_State, allocator)
+	state.f = f
+	state.next = next
+	h: Handler
+	h.user_data = state
+	h.next = next
+	h.handle = proc(h: ^Handler, req: ^Request, res: ^Response) {
+		st := (^From_Fn_State)(h.user_data)
+		st.f(req, res, st.next)
+	}
+	return h
+}
+
+From_Fn_State :: struct {
+	f:    proc(req: ^Request, res: ^Response, next: ^Handler),
+	next: ^Handler,
+}
+
 Rate_Limit_On_Limit :: struct {
 	user_data: rawptr,
 	on_limit:  proc(req: ^Request, res: ^Response, user_data: rawptr),
@@ -93,14 +138,17 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 			data.next_sweep = time.time_add(time.now(), data.opts.window)
 		}
 
+		// Count this request; limit when count would exceed max (allows exactly max).
+		// max <= 0 → every request is limited.
 		hits := data.hits[req.client.address]
-		data.hits[req.client.address] = hits + 1
-		sync.unlock(&data.mu)
-
-		if hits > data.opts.max {
+		if data.opts.max <= 0 || hits >= data.opts.max {
+			sync.unlock(&data.mu)
 			res.status = .Too_Many_Requests
 
 			retry_dur := i64(time.diff(time.now(), data.next_sweep) / time.Second)
+			if retry_dur < 0 {
+				retry_dur = 0
+			}
 			buf := make([]byte, 32, context.temp_allocator)
 			retry_str := strconv.write_int(buf, retry_dur, 10)
 			headers_set_unsafe(&res.headers, "retry-after", retry_str)
@@ -112,6 +160,8 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 			}
 			return
 		}
+		data.hits[req.client.address] = hits + 1
+		sync.unlock(&data.mu)
 
 		next := h.next.(^Handler)
 		next.handle(next, req, res)

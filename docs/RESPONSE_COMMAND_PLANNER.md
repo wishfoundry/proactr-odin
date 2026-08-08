@@ -1,7 +1,7 @@
 # Experiment: Response as Command Buffer + Transport Planner
 
 **Branch:** `exp/response-command-planner`  
-**Status:** Phase 5 wired (Response_Stream API; pragmatic one-shot chunked send)  
+**Status:** Phase 5 progressive Stream multi-CQE + Session/SSE (`docs/SESSION_SSE.md`); oneshot `stream_end` still works  
 
 **Related:** `docs/ARCHITECTURE.md`, `http/response.odin`, `proactr/`, **`comparisons/plan/`** (A/B harness)
 
@@ -320,7 +320,7 @@ Do not skip the “structure first” phases. Optimizations only after the comma
 
 **Exit:** SSE-style sketch without poisoning the static planner. ✅
 
-**Phase 5 limitation (documented):** `stream_flush` is a no-op coalesce point; there is no mid-body CQE / continuous flush-to-wire yet. Chunks accumulate in `resp_buf` and `stream_end` submits once (same family as `Response_Writer` / body_reserve). True multi-CQE streaming is a follow-up.
+**Phase 5 → progressive Stream (updated):** `stream_flush` / session effects now submit mid-body via `Wire_Kind.Stream` (copy to `stream_send_buf`, multi-CQE). Oneshot path still works (`stream_end` without mid-flush). Long-lived SSE uses `sse_start` + effects (`docs/SESSION_SSE.md`). Planner `Response_Cmd` is still not used for streams (G5 holds).
 
 ---
 
@@ -443,6 +443,7 @@ Track answers here as the experiment proceeds.
 | 2026-08-05 | Mutual exclusion: stream vs body cmds / body_reserve / response_writer | Single body path per response; heading freezes at begin_stream |
 | 2026-08-05 | Body middleware does not run on stream data | Middleware rewrites cmds; stream has none — set headers before begin |
 | 2026-08-05 | Pragmatic stream wire: chunk into `resp_buf`, flush no-op, end single `submit_send` | Continuous mid-body CQE flush needs conn streaming state — follow-up |
+| 2026-08-08 | Progressive Stream: `Wire_Kind.Stream`, copy to `stream_send_buf`, multi-CQE; `sse_start` + effects for long-lived SSE | Supersedes flush-noop wire; G5 still holds (no Stream `Response_Cmd`); A/B pool/PIN/eventfd still follow-ups |
 | 2026-08-05 | `stream_responses_total` separate from `plan_wire_*` | Honest counters; streams are not materialize/writev/sendfile |
 | 2026-08-05 | Shared `_http_write_chunk` for Stream + Response_Writer | One framing implementation; Writer remains for JSON buffer path |
 | 2026-08-05 | Phase 5 review: force TE=chunked + drop Content-Length on begin_stream / response_writer_init | Prior TE other than chunked would mislabel body; dual CL+TE risks keep-alive desync (RFC 9112 §6.1) |

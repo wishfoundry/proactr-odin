@@ -5,17 +5,20 @@ package http
 import "core:c"
 import "core:log"
 import "core:mem/virtual"
+import "core:sync"
 import "core:sys/posix"
 
 import proactr "../proactr"
 
 // In-flight wire op. Exactly one of these is outstanding per connection (or None).
 // Replaces parallel kernel_writev_active / kernel_sendfile_active + pending_send emptiness.
+// Stream = progressive multi-CQE mid-body send (D0); completion routes via host_on_wire .Stream.
 Wire_Kind :: enum u8 {
 	None,
 	Send,
 	Writev,
 	Sendfile,
+	Stream,
 }
 
 // First-arm mem-queue mechanism (counter bookkeeping for plan_wire_inc_*).
@@ -73,6 +76,8 @@ _conn_wire_in_flight :: proc(c: ^Connection) -> bool {
 @(private)
 _wire_fail :: proc(conn: ^Connection, msg: string, args: ..any) {
 	log.errorf(msg, ..args)
+	// Always return Stream pool slabs (error CQEs never reach _host_on_wire_stream).
+	_stream_pool_abandon(conn)
 	_conn_clear_exec(conn)
 	connection_close(conn)
 }
@@ -500,6 +505,9 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 	// Deferred close while a wire SQE was outstanding: account for this CQE first.
 	// Mid multi-buffer / file stream: abort remaining queue (partial response on wire).
 	if conn.close_on_io {
+		if kind == .Stream || conn.stream_send_slab != nil {
+			_stream_pool_abandon(conn)
+		}
 		_conn_clear_exec(conn)
 		conn.close_on_io = false
 		if conn.state < .Closing {
@@ -509,6 +517,11 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 	}
 
 	if result < 0 {
+		// Stream/session peer death: notify session before teardown when possible.
+		if (kind == .Stream || conn.stream_open) && conn.session != nil {
+			sync.atomic_add(&session_metrics_client_gone, 1)
+			_session_drive(conn, Session_Event{kind = .Client_Gone})
+		}
 		_wire_fail(conn, "wire %v error fd=%v res=%d", kind, conn.socket, result)
 		return
 	}
@@ -521,6 +534,12 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 			return
 		}
 		_host_on_wire_send(conn, int(result))
+	case .Stream:
+		if result == 0 && len(conn.wire.pending_send) > 0 {
+			_wire_fail(conn, "stream send zero-length fd=%v pending=%d stream_sent=%d", conn.socket, len(conn.wire.pending_send), conn.stream_sent)
+			return
+		}
+		_host_on_wire_stream(conn, int(result))
 	case .Writev:
 		if result == 0 && conn.wire.exec_i < conn.wire.exec_n {
 			_wire_fail(conn, "writev zero-length fd=%v exec_i=%d exec_n=%d", conn.socket, conn.wire.exec_i, conn.wire.exec_n)
@@ -537,6 +556,78 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 		// Should not be dispatched.
 		_ = result
 	}
+}
+
+// Progressive Stream send CQE: partial advance within pool slab; on full arm delivered
+// advance stream_sent, return slab, reflush or finish or arm PIN.
+// pending_send always aliases stream_send_slab (never resp_buf).
+@(private)
+_host_on_wire_stream :: proc(conn: ^Connection, n: int) {
+	conn.wire.kind = .None
+
+	if n < 0 {
+		_stream_pool_abandon(conn)
+		_wire_fail(conn, "stream send error fd=%v n=%d", conn.socket, n)
+		return
+	}
+
+	// Partial within current slab copy.
+	if n < len(conn.wire.pending_send) {
+		conn.wire.pending_send = conn.wire.pending_send[n:]
+		if len(conn.wire.pending_send) == 0 {
+			_stream_pool_abandon(conn)
+			_wire_fail(conn, "stream partial emptied pending fd=%v", conn.socket)
+			return
+		}
+		if err := host_submit_send(conn); err != .None {
+			_stream_pool_abandon(conn)
+			_wire_fail(conn, "submit_send (stream partial) failed: %v", err)
+			return
+		}
+		conn.wire.kind = .Stream
+		return
+	}
+
+	// Full arm delivered (stream_send_len is original copy size for this arm).
+	delivered := conn.stream_send_len
+	if delivered <= 0 {
+		delivered = len(conn.wire.pending_send)
+	}
+	conn.stream_sent += delivered
+	conn.wire.pending_send = nil
+	_stream_pool_abandon(conn)
+
+	// Compact when wire idle so long sessions reclaim RSS.
+	_stream_compact_delivered(conn)
+
+	if conn.session != nil {
+		_session_on_writable(conn)
+	}
+
+	more := len(conn.resp_buf) > conn.stream_sent
+	if more || conn.stream_flush_pending || conn.stream_ending {
+		conn.stream_flush_pending = false
+		if more || conn.stream_ending {
+			_stream_try_submit(conn)
+			return
+		}
+	}
+
+	if conn.stream_ending && conn.stream_sent >= len(conn.resp_buf) {
+		_stream_finish(conn)
+		return
+	}
+	// Mid-session idle: arm PIN hangup watch (no concurrent send).
+	_stream_pin_arm(conn)
+}
+
+@(private)
+_stream_pool_abandon :: proc(conn: ^Connection) {
+	if conn.stream_send_slab != nil {
+		stream_pool_put(conn.stream_send_slab)
+		conn.stream_send_slab = nil
+	}
+	conn.stream_send_len = 0
 }
 
 // Kernel WRITEV completion: advance exec_bufs on short write; then file region or finish.

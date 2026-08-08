@@ -16,6 +16,8 @@ import "core:time"
 
 import proactr "../proactr"
 
+// virtual used for session_scratch arena on Server_Thread.
+
 Server_Opts :: struct {
 	// Whether the server should accept every request that sends a "Expect: 100-continue" header automatically.
 	// Defaults to true.
@@ -79,6 +81,15 @@ Server_Opts :: struct {
 	// Also enabled per-request via prefer_gather / prefer_sendfile.
 	// PLAN_WIRE_MODE=fallback forces multi_send/copy_into on Linux.
 	plan_optimize:        bool,
+	// D2 Session caps (0 → session.odin defaults).
+	max_sessions_per_worker: int,
+	max_stream_buffer:       int, // unreclaimed stream bytes per session
+	max_stream_bytes_total:  int, // worker Stream_Buf_Pool admitted cap (0 → 64 MiB)
+	stream_buf_size:         int, // Stream_Buf_Pool slab (0 → 8 KiB)
+	stream_idle_timeout_ms:  int,
+	stream_mailbox_depth:    int,
+	// After sse_start: shrink permanent resp_buf capacity (0 → 16 KiB).
+	stream_resp_shrink_cap:  int,
 }
 
 // Zero-valued sizing fields mean “use host product defaults” (resolved in listen).
@@ -167,6 +178,13 @@ Server_Thread :: struct {
 	temp_slot_size:     int,
 	// Max slots for this worker; 0 means unlimited growth.
 	temp_slots_max:     int,
+	// Fixed Stream send slab pool (progressive Stream / Session).
+	stream_pool:        Stream_Buf_Pool,
+	// Mailbox pending for this worker (wake short-circuit for ring_wait).
+	mail_pending:       i64, // atomic
+	// Small scrap for session effect framing after request temp detach (not 4.5 MiB slot).
+	session_scratch:       virtual.Arena,
+	session_scratch_block: []u8,
 }
 
 @(private, disabled = ODIN_DISABLE_ASSERT)
@@ -449,6 +467,30 @@ Connection :: struct {
 	loop:           Loop,
 	// Nested wire bag: mem queue, iovecs, file region, in-flight kind (see Wire_State).
 	wire:           Wire_State,
+	// Progressive multi-CQE stream (D0). Body mid-stream: do not clean_request_loop
+	// until stream_ending and all bytes delivered (or session Closed).
+	stream_open:           bool,
+	stream_ending:         bool,
+	stream_sent:           int,  // bytes of resp_buf fully delivered to peer
+	stream_flush_pending:  bool, // reflush after in-flight Stream CQE
+	stream_respond_fired:  bool, // on_respond once at first successful flush
+	// In-flight Stream send slab from stream_pool (len==slot_size capacity).
+	// pending_send aliases slab[:stream_send_len] during wire.kind==.Stream.
+	stream_send_slab:      []u8,
+	stream_send_len:       int, // bytes copied into slab for this arm
+	// Owning worker index (for mailbox affinity); set on accept.
+	worker_index:          int,
+	// PIN hangup: 1-byte recv when wire idle + only Idle timer (no concurrent send).
+	stream_pin_armed:      bool,
+	stream_pin_gen:        u32,
+	stream_pin_byte:       [1]u8,
+	// Effect-based Session (D1). Nil until sse_start / attach.
+	session:               ^Session_State,
+	// Monotonic epoch for Session.id / mailbox gen (survives free-list reuse).
+	session_epoch:         u32,
+	// Pad from sse_alloc before/during session life (conn_allocator); freed after on_close.
+	session_pad:           rawptr,
+	session_pad_size:      int,
 	// True while a close SQE is outstanding.
 	close_pending:  bool,
 	// Set on shutdown for Idle/New conns that still have a pending Recv; close on that CQE.
@@ -560,7 +602,14 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 				break
 			}
 
-			n, werr := proactr.ring_wait(&td.ring, completions[:], min_complete, wait_ms)
+			// Mailbox wake: if external posts are pending for this worker, do not
+			// block up to wait_timeout_ms (follow-up pin without eventfd).
+			loop_wait := wait_ms
+			if sync.atomic_load(&td.mail_pending) > 0 {
+				loop_wait = 0
+				min_complete = 0
+			}
+			n, werr := proactr.ring_wait(&td.ring, completions[:], min_complete, loop_wait)
 			if werr != .None {
 				log.errorf("ring_wait error: %v", werr)
 				// Soft-fail: continue so closing can progress; hard-fail only if not shutting down.
@@ -590,7 +639,8 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 				host_try_rearm_accept(s)
 			}
 
-			// Deferred handler completions (e.g. async DB work → respond on this worker).
+			// Session external mailbox (D2) then app tick (e.g. async DB → respond).
+			session_mailbox_drain()
 			if s.opts.on_worker_tick != nil {
 				s.opts.on_worker_tick(s.opts.worker_tick_user)
 			}
@@ -728,7 +778,13 @@ host_dispatch :: proc(s: ^Server, op: ^proactr.Operation, c: proactr.Completion)
 		kind: Wire_Kind
 		switch op.kind {
 		case .Send:
-			kind = .Send
+			// Progressive stream submits via proactr Send but stores wire.kind=.Stream.
+			// Route completion using the in-flight kind, not the op kind alone.
+			if conn.wire.kind == .Stream {
+				kind = .Stream
+			} else {
+				kind = .Send
+			}
 		case .Writev:
 			kind = .Writev
 		case .Sendfile:
@@ -743,8 +799,10 @@ host_dispatch :: proc(s: ^Server, op: ^proactr.Operation, c: proactr.Completion)
 			return
 		}
 		host_on_close(conn)
-	case .Timeout, .Nop:
-		// Host does not arm per-conn timers; software timeouts are for ring_smoke / apps.
+	case .Timeout:
+		// Session timers (effect_arm) post soft_cq Timeout with user = Session_State*.
+		_session_on_timeout_cqe(op.user, op.result, c.op_id)
+	case .Nop:
 		_ = op
 		_ = c
 	}
@@ -848,6 +906,7 @@ host_on_accept :: proc(s: ^Server, result: i32, cqe_flags: u32) {
 		}
 	}
 
+	c.worker_index = td.index
 	td.conns[c.socket] = c
 	log.debugf("accepted fd=%v fixed=%v conns=%d", c.socket, c.fixed_idx, len(td.conns))
 	conn_handle_reqs(c)
@@ -865,6 +924,42 @@ host_on_recv :: proc(conn: ^Connection, result: i32) {
 		return
 	}
 
+	// Stream PIN hangup (1-byte recv while long-lived stream is idle).
+	if conn.stream_pin_armed {
+		conn.stream_pin_armed = false
+		if result <= 0 {
+			if conn.session != nil {
+				sync.atomic_add(&session_metrics_client_gone, 1)
+				_session_drive(conn, Session_Event{kind = .Client_Gone})
+				if conn.session != nil {
+					_session_abort(conn)
+				}
+			} else if conn.stream_open {
+				connection_close(conn)
+			}
+			return
+		}
+		// Unexpected data on PIN: treat as client gone for sessions.
+		if conn.session != nil {
+			sync.atomic_add(&session_metrics_client_gone, 1)
+			_session_drive(conn, Session_Event{kind = .Client_Gone})
+			if conn.session != nil {
+				_session_abort(conn)
+			}
+			return
+		}
+	} else if conn.stream_open && conn.session != nil {
+		// Stale PIN CQE after disarm for send: ignore body, resume flush if needed.
+		if conn.stream_flush_pending {
+			_stream_try_submit(conn)
+		}
+		return
+	}
+
+	// Detached temp: re-attach scrap for normal request parse if needed.
+	if conn.temp_slot < 0 {
+		_ = conn_temp_attach(conn)
+	}
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	if result < 0 {
@@ -910,6 +1005,20 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 		c.close_on_io = true
 		return
 	}
+
+	// Session teardown before close (Client_Gone path may have already destroyed).
+	if c.session != nil {
+		_session_destroy(c, after_wire = false)
+	}
+	// Clear progressive stream markers so free-list reuse is clean.
+	c.stream_open = false
+	c.stream_ending = false
+	c.stream_sent = 0
+	c.stream_flush_pending = false
+	c.stream_respond_fired = false
+	// Return any in-flight Stream slab before forgetting the pointer.
+	_stream_pool_abandon(c)
+	c.stream_pin_armed = false
 
 	log.debugf("closing connection: %i", c.socket)
 	c.state = .Closing

@@ -41,6 +41,14 @@ _server_thread_init_temp :: proc(t: ^Server_Thread, s: ^Server) {
 	t.temp_chunks = make([dynamic][]u8, 0, 4, s.conn_allocator)
 	t.temp_regions = make([dynamic][]u8, 0, chunk_n, s.conn_allocator)
 	t.temp_free = make([dynamic]int, 0, chunk_n, s.conn_allocator)
+	// Stream send slab pool (8 KiB default; worker total cap).
+	_stream_pool_init(
+		&t.stream_pool,
+		s.opts.stream_buf_size,
+		s.opts.max_stream_bytes_total,
+		s.conn_allocator,
+	)
+	t.mail_pending = 0
 }
 
 // conn_temp_grow appends one chunk of buffer slots and pushes indices onto temp_free.
@@ -99,6 +107,24 @@ conn_temp_reset :: proc(c: ^Connection) {
 	}
 	a.curr_block.used = 0
 	a.total_used = 0
+}
+
+// conn_temp_detach returns the temp slot to the worker free pool and clears the arena.
+// Used after long-lived session attach so idle SSE does not hold ~4.5 MiB scrap.
+// Safe only when no live pointers into the scrap remain (heading already in resp_buf).
+@(private)
+conn_temp_detach :: proc(c: ^Connection) {
+	assert_has_td()
+	if c.temp_slot < 0 {
+		return
+	}
+	conn_temp_reset(c)
+	// Drop arena binding so no accidental use of detached region.
+	c.temp_allocator = {}
+	if td != nil && c.temp_slot < len(td.temp_regions) {
+		append(&td.temp_free, c.temp_slot)
+	}
+	c.temp_slot = -1
 }
 
 // conn_temp_attach binds c.temp_allocator to a buffer slot for this worker.
@@ -212,6 +238,19 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.wire.file_send_off = 0
 	c.wire.file_send_remaining = 0
 	// file_send_buf retained across free-list reuse (allocated lazily).
+	// Progressive stream + session: reset; pool slabs returned via stream_pool_put.
+	c.stream_open = false
+	c.stream_ending = false
+	c.stream_sent = 0
+	c.stream_flush_pending = false
+	c.stream_respond_fired = false
+	c.stream_send_slab = nil
+	c.stream_send_len = 0
+	c.stream_pin_armed = false
+	c.worker_index = -1
+	c.session = nil
+	c.session_pad = nil
+	c.session_pad_size = 0
 	c.close_pending = false
 	c.close_on_io = false
 	c.fixed_idx = -1
@@ -249,6 +288,18 @@ connection_destroy :: proc(c: ^Connection) {
 	c.wire.file_send_off = 0
 	c.wire.file_send_remaining = 0
 	// Keep file_send_buf allocation for reuse.
+	// Session must already be destroyed (stream_finish / connection_close path).
+	c.stream_open = false
+	c.stream_ending = false
+	c.stream_sent = 0
+	c.stream_flush_pending = false
+	c.stream_respond_fired = false
+	c.stream_send_slab = nil
+	c.stream_send_len = 0
+	c.stream_pin_armed = false
+	c.session = nil
+	c.session_pad = nil
+	c.session_pad_size = 0
 	c.close_pending = false
 	c.close_on_io = false
 	// Capture any growth from the last Response binding; keep capacity on free list.
@@ -281,6 +332,7 @@ connection_destroy :: proc(c: ^Connection) {
 			}
 			c.wire.file_send_buf = nil
 		}
+		c.stream_send_slab = nil
 		free(c, c.server.conn_allocator)
 	}
 }
@@ -288,6 +340,13 @@ connection_destroy :: proc(c: ^Connection) {
 // _server_thread_free_slab releases conn chunks, scanners, resp_buf, and temp pool after workers exit.
 @(private)
 _server_thread_free_slab :: proc(t: ^Server_Thread) {
+	// Stream slab pool + session framing scrap.
+	_stream_pool_destroy(&t.stream_pool, t.server.conn_allocator if t.server != nil else context.allocator)
+	if t.session_scratch_block != nil {
+		delete(t.session_scratch_block, t.server.conn_allocator if t.server != nil else context.allocator)
+		t.session_scratch_block = nil
+		t.session_scratch = {}
+	}
 	// Tear down scanners / permanent response buffers before freeing chunks
 	// (dynamic owns buf; pooled scanner points into ring pool).
 	for chunk in t.conn_chunks {
@@ -318,6 +377,7 @@ _server_thread_free_slab :: proc(t: ^Server_Thread) {
 				}
 				c.wire.file_send_buf = nil
 			}
+			c.stream_send_slab = nil
 			c.loop.res._buf = {}
 			c.temp_slot = -1
 			c.temp_allocator = {}

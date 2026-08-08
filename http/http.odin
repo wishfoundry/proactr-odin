@@ -377,11 +377,15 @@ write_padded_int :: proc(w: io.Writer, i: int) -> io.Error {
 }
 
 @(private)
+// Escape CR/LF in header values so reflected client input cannot inject headers.
 write_escaped_newlines :: proc(w: io.Writer, v: string) -> io.Error {
 	for c in v {
-		if c == '\n' {
+		switch c {
+		case '\n':
 			io.write_string(w, "\\n") or_return
-		} else {
+		case '\r':
+			io.write_string(w, "\\r") or_return
+		case:
 			io.write_rune(w, c) or_return
 		}
 	}

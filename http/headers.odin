@@ -114,6 +114,7 @@ headers_set_close :: #force_inline proc(h: ^Headers) {
 Escapes any newlines and converts ASCII to lowercase.
 */
 @(private="package")
+// Lowercase key; strip CR/LF so untrusted keys cannot inject header lines.
 sanitize_key :: proc(h: Headers, k: string) -> string {
 	allocator := h._kv.allocator if h._kv.allocator.procedure != nil else context.temp_allocator
 
@@ -123,6 +124,7 @@ sanitize_key :: proc(h: Headers, k: string) -> string {
 		switch c {
 		case 'A'..='Z': strings.write_rune(&b, c + 32)
 		case '\n':      strings.write_string(&b, "\\n")
+		case '\r':      strings.write_string(&b, "\\r")
 		case:           strings.write_rune(&b, c)
 		}
 	}

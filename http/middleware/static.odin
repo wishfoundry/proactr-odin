@@ -50,6 +50,9 @@ Static_Opts :: struct {
 	disable_ranges:         bool,
 	disable_etag:           bool,
 	disable_last_modified:  bool,
+	// Optional extension overrides (ext lowercase with leading '.', e.g. ".gltf").
+	// Matched before builtin mime table. Content-Type may include charset.
+	extra_mimes: []http.Mime_Extra,
 }
 
 // Resolved once when building a handler/middleware.
@@ -613,8 +616,10 @@ _static_prepare_file :: proc(st: ^Static_State, req: ^http.Request, res: ^http.R
 		if err != nil {
 			return false
 		}
-		mime := http.mime_from_extension(path)
-		http.headers_set_content_type(&res.headers, http.mime_to_content_type(mime))
+		http.headers_set_content_type(
+			&res.headers,
+			http.mime_content_type_for_path_extra(path, st.opts.extra_mimes),
+		)
 		_static_set_cache_headers(st, res)
 		res.status = .OK
 		if !is_head {
@@ -662,8 +667,10 @@ _static_prepare_file :: proc(st: ^Static_State, req: ^http.Request, res: ^http.R
 
 		_static_set_cache_headers(st, res)
 
-		mime := http.mime_from_extension(path)
-		http.headers_set_content_type(&res.headers, http.mime_to_content_type(mime))
+		http.headers_set_content_type(
+			&res.headers,
+			http.mime_content_type_for_path_extra(path, st.opts.extra_mimes),
+		)
 
 		// Conditional GET: If-None-Match priority over If-Modified-Since.
 		if inm, has := http.headers_get_unsafe(req.headers, "if-none-match"); has && !st.opts.disable_etag {

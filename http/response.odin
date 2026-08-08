@@ -8,6 +8,7 @@ import "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 
 import proactr "../proactr"
@@ -46,6 +47,16 @@ Response :: struct {
 	// Body middleware does NOT run on stream data; rewrite headers before begin_stream.
 	_streaming:       bool,
 	_stream_ended:    bool,
+	// D1: Session owns the wire after sse_start; respond/stream_* assert if set.
+	_session_attached: bool,
+	// Middleware respond hooks (fixed slots; zero alloc). Fired LIFO at respond
+	// before wire assembly. See response_on_respond. Not a public "resume" API —
+	// only the host calls these when respond runs.
+	_on_respond:      [RESPOND_HOOKS_MAX]Respond_Hook_Entry,
+	_on_respond_n:    u8,
+	// Fired LIFO at clean_request_loop start (wire done, before arena reset).
+	_on_complete:     [RESPOND_HOOKS_MAX]Respond_Hook_Entry,
+	_on_complete_n:   u8,
 }
 
 // response_init binds r to c.resp_buf (permanent, conn_allocator). Request temp
@@ -65,6 +76,9 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 	r._body_mw_user = nil
 	r._streaming = false
 	r._stream_ended = false
+	r._session_attached = false
+	r._on_respond_n = 0
+	r._on_complete_n = 0
 	r._conn = c
 	r.cookies = {}
 	r.cookies.allocator = allocator
@@ -112,6 +126,84 @@ response_set_profile :: proc(r: ^Response, p: Handler_Profile) {
 response_body_middleware :: proc(r: ^Response, mw: Body_Middleware, user: rawptr = nil) {
 	r._body_mw = mw
 	r._body_mw_user = user
+}
+
+// Max respond/complete hooks per request (fixed array; no heap). Outer middleware
+// registers first → LIFO fire so onion "after" order is correct.
+RESPOND_HOOKS_MAX :: 4
+
+// Invoked by the host only. Must not call respond/stream_end (would re-enter).
+// May read req/res; may set headers only if heading not yet written.
+Respond_Hook :: #type proc(req: ^Request, res: ^Response, user: rawptr)
+
+Respond_Hook_Entry :: struct {
+	cb:   Respond_Hook,
+	user: rawptr,
+}
+
+/*
+Register a hook that runs once status is final and the body is ready to send
+(inside response_send_got_body — after optional request-body discard may adjust
+status). Before wire plan/send.
+
+Use for access logs (status + duration), metrics. user should live in the request
+allocator (or static). Prefer not mutating headers if heading may already be written
+(body_reserve / stream).
+
+LIFO: last registered runs first (inner layers before outer). Max RESPOND_HOOKS_MAX.
+Not for scheduling work — submit proactr ops; the runtime delivers completions.
+*/
+response_on_respond :: proc(r: ^Response, user: rawptr, cb: Respond_Hook, loc := #caller_location) {
+	assert(cb != nil, "nil respond hook", loc)
+	assert(!r.sent, "response already sent; cannot register on_respond", loc)
+	assert(r._on_respond_n < u8(RESPOND_HOOKS_MAX), "too many on_respond hooks", loc)
+	r._on_respond[r._on_respond_n] = Respond_Hook_Entry{cb = cb, user = user}
+	r._on_respond_n += 1
+}
+
+/*
+Register a hook that runs after the response is fully written (clean_request_loop),
+before the request arena is reset. LIFO. Max RESPOND_HOOKS_MAX.
+
+Prefer on_respond for status/logging; use on_complete for post-wire metrics only.
+user must still be valid (request arena is not reset until after these hooks).
+*/
+response_on_complete :: proc(r: ^Response, user: rawptr, cb: Respond_Hook, loc := #caller_location) {
+	assert(cb != nil, "nil complete hook", loc)
+	assert(!r.sent, "response already sent; cannot register on_complete", loc)
+	assert(r._on_complete_n < u8(RESPOND_HOOKS_MAX), "too many on_complete hooks", loc)
+	r._on_complete[r._on_complete_n] = Respond_Hook_Entry{cb = cb, user = user}
+	r._on_complete_n += 1
+}
+
+@(private)
+_response_fire_respond_hooks :: proc(r: ^Response) {
+	n := int(r._on_respond_n)
+	if n == 0 {
+		return
+	}
+	req := &r._conn.loop.req
+	// LIFO onion.
+	for i := n - 1; i >= 0; i -= 1 {
+		e := r._on_respond[i]
+		e.cb(req, r, e.user)
+	}
+	// One-shot: avoid re-entry if a hook somehow nested (should not call respond).
+	r._on_respond_n = 0
+}
+
+@(private)
+_response_fire_complete_hooks :: proc(r: ^Response) {
+	n := int(r._on_complete_n)
+	if n == 0 {
+		return
+	}
+	req := &r._conn.loop.req
+	for i := n - 1; i >= 0; i -= 1 {
+		e := r._on_complete[i]
+		e.cb(req, r, e.user)
+	}
+	r._on_complete_n = 0
 }
 
 // Base Plan_Context from connection/server/backend (no handler profile).
@@ -434,7 +526,7 @@ _http_write_chunk_end :: proc(b: ^bytes.Buffer) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5: Response_Stream — SSE / long-lived chunked bodies (NOT Response_Cmd)
+// Phase 5 + D0: Response_Stream — chunked bodies with progressive multi-CQE flush
 // ---------------------------------------------------------------------------
 //
 // Streaming is a different lifetime from the body command planner (G5):
@@ -446,14 +538,16 @@ _http_write_chunk_end :: proc(b: ^bytes.Buffer) {
 //
 // Mutual exclusion with body_set / body_* cmds / body_reserve / response_writer.
 //
-// Pragmatic Phase 5 wire model:
+// D0 wire model:
 //   - Transfer-Encoding: chunked; heading written once at begin
-//   - stream_write appends framed chunks into resp_buf
-//   - stream_flush is a no-op coalesce point (no mid-body CQE submit yet)
-//   - stream_end writes the final 0-chunk and submit_send once (same single-shot
-//     path as body_reserve / Response_Writer)
-// True continuous flush-to-wire / multi-CQE mid-body is a follow-up.
+//   - stream_write appends framed chunks into resp_buf (may run while a Stream
+//     send is in flight — flush always copies to stream_send_buf)
+//   - stream_flush submits unsent bytes as Wire_Kind.Stream when wire idle
+//   - stream_end writes the final 0-chunk, sets stream_ending, flushes; clean
+//     only after the last Stream CQE (not the oneshot respond path)
+// Oneshot still works: never mid-flush → stream_end ending+flush all at once.
 // plan_wire_* counters are not incremented; stream_responses_total is.
+// Session (D1) owns the wire after sse_start — public stream_* assert if attached.
 
 Response_Stream :: struct {
 	r:     ^Response,
@@ -468,10 +562,11 @@ response_writer.
 Body middleware is not applied to stream bytes — set headers before calling.
 
 Call stream_write / stream_flush as needed, then stream_end (sends the response).
-Do not call body_set after begin_stream. stream_end calls respond — do not respond again.
+Do not call body_set after begin_stream. stream_end owns the send — do not respond again.
 */
 response_begin_stream :: proc(r: ^Response, loc := #caller_location) -> Response_Stream {
 	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._session_attached, "session attached; cannot begin_stream", loc)
 	assert(!r._streaming, "response stream already started", loc)
 	assert(!r._heading_written, "heading already written; cannot begin_stream", loc)
 	assert(r._cmd_count == 0, "body cmds already set; cannot begin_stream", loc)
@@ -500,8 +595,10 @@ response_begin_stream :: proc(r: ^Response, loc := #caller_location) -> Response
 begin_stream :: response_begin_stream
 
 // Append data as one HTTP chunk into the response wire buffer. Empty data is a no-op.
+// Safe while a progressive Stream send is in flight (append-only past stream_sent).
 stream_write :: proc(s: ^Response_Stream, data: []byte, loc := #caller_location) {
 	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
+	assert(!s.r._session_attached, "session owns stream; use effects", loc)
 	assert(!s.ended && !s.r._stream_ended, "stream already ended", loc)
 	assert(s.r._streaming, "stream not started", loc)
 	assert(!s.r.sent, "response has already been sent", loc)
@@ -509,50 +606,276 @@ stream_write :: proc(s: ^Response_Stream, data: []byte, loc := #caller_location)
 		return
 	}
 	_http_write_chunk(&s.r._buf, data)
+	// Keep Connection.resp_buf in sync with any reallocation.
+	if s.r._conn != nil {
+		s.r._conn.resp_buf = s.r._buf.buf
+	}
 }
 
 /*
-Flush checkpoint for streaming.
+Flush unsent stream bytes to the wire (progressive multi-CQE).
 
-Phase 5 pragmatic: no-op. Chunks already live in resp_buf; stream_end submits
-once. Future: may submit pending_send of current buffer when nothing in-flight.
+When the wire is free, copies resp_buf[stream_sent:] into stream_send_buf and
+submits Wire_Kind.Stream. When a Stream send is already in flight, sets
+stream_flush_pending (CQE reflush). Without a worker (unit tests), coalesce only.
 */
 stream_flush :: proc(s: ^Response_Stream, loc := #caller_location) {
 	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
+	assert(!s.r._session_attached, "session owns stream; use effects", loc)
 	assert(!s.ended && !s.r._stream_ended, "stream already ended", loc)
 	assert(s.r._streaming, "stream not started", loc)
 	assert(!s.r.sent, "response has already been sent", loc)
-	// Coalesce only — no mid-body CQE submit in Phase 5.
+	_stream_flush_response(s.r, loc)
 }
 
 /*
-Finish the stream: final 0-chunk, then respond (single-buffer send).
+Finish the stream: final 0-chunk, stream_ending, progressive flush.
 
 stream_end *is* the send — do not call respond again (second respond asserts).
 A second stream_end asserts on s.ended / r._stream_ended.
 
-HEAD: body bytes may already be in the buffer; response_send strips them and
-keeps the heading (same as Response_Writer / body_reserve).
+HEAD: body bytes may already be in the buffer; stripped before flush (same as
+Response_Writer / body_reserve).
 
 Increments stream_responses_total (not plan_wire_*) once per successful end.
+Does not use the oneshot respond() path — clean_request_loop runs after the
+last Stream CQE when stream_ending and all bytes are delivered.
 */
 stream_end :: proc(s: ^Response_Stream, loc := #caller_location) {
 	assert(s != nil && s.r != nil, "nil Response_Stream", loc)
+	assert(!s.r._session_attached, "session owns stream; use effects / effect_end", loc)
 	assert(!s.ended && !s.r._stream_ended, "stream already ended", loc)
 	assert(s.r._streaming, "stream not started", loc)
 	assert(!s.r.sent, "response has already been sent", loc)
 
-	_http_write_chunk_end(&s.r._buf)
-	// Mark ended before respond so a re-entrant / mistaken second end fails
-	// closed, and so response_send_got_body sees _stream_ended.
+	r := s.r
+	conn := r._conn
+	assert(conn != nil, "stream_end without connection", loc)
+
+	_http_write_chunk_end(&r._buf)
 	s.ended = true
-	s.r._stream_ended = true
+	r._stream_ended = true
 	stream_inc_responses()
-	respond(s.r, loc)
+
+	// HEAD: drop body, keep heading (same as response_send_got_body).
+	if _response_is_head(conn) {
+		_response_strip_body_keep_heading(r)
+	}
+
+	// Progressive terminal path (oneshot = ending+flush with no prior mid-flush).
+	r.sent = true
+	conn.stream_open = true
+	conn.stream_ending = true
+	// D0 default: stream end → Will_Close (no keep-alive reuse of stream conns).
+	headers_set_close(&r.headers)
+	_ = connection_set_state(conn, .Will_Close)
+
+	conn.resp_buf = r._buf.buf
+	_stream_flush_response(r, loc)
 }
 
 // stream_close is an alias for stream_end.
 stream_close :: stream_end
+
+// Host: flush progressive stream for r (public stream_flush or session apply).
+// Copies unsent resp_buf into stream_send_buf before submit (never alias resp_buf).
+@(private)
+_stream_flush_response :: proc(r: ^Response, loc := #caller_location) {
+	conn := r._conn
+	if conn == nil {
+		return
+	}
+	// Sync growth of the response buffer header copy.
+	conn.resp_buf = r._buf.buf
+
+	// Unit tests without a worker thread: coalesce only.
+	if td == nil {
+		return
+	}
+	assert_has_td(loc)
+	_stream_try_submit(conn)
+}
+
+// Submit unsent stream bytes if wire idle; else mark flush_pending.
+// On first successful arm, fire on_respond once (TTFB / access log).
+@(private)
+_stream_try_submit :: proc(conn: ^Connection) {
+	assert_has_td()
+	if conn.state >= .Closing {
+		return
+	}
+
+	// Keep resp_buf synced from response binding when present.
+	r := &conn.loop.res
+	if r._buf.buf != nil {
+		conn.resp_buf = r._buf.buf
+	}
+
+	unsent := len(conn.resp_buf) - conn.stream_sent
+	if unsent <= 0 {
+		if conn.stream_ending {
+			_stream_finish(conn)
+		}
+		return
+	}
+
+	if conn.wire.kind != .None {
+		conn.stream_flush_pending = true
+		return
+	}
+
+	conn.stream_open = true
+
+	// First flush: on_respond once (heading final, body may still be streaming).
+	if !conn.stream_respond_fired {
+		conn.stream_respond_fired = true
+		_response_fire_respond_hooks(r)
+	}
+
+	// Copy next chunk into a fixed pool slab (never alias resp_buf).
+	// Cap per CQE at STREAM_BUF_SIZE so large bodies are multi-CQE by design.
+	to_send := conn.resp_buf[conn.stream_sent:]
+	slab := stream_pool_take()
+	if slab == nil {
+		// Admission fail: keep data, mark pending, try later.
+		conn.stream_flush_pending = true
+		sync.atomic_add(&session_metrics_backpressure, 1)
+		return
+	}
+	n := min(len(to_send), len(slab))
+	copy(slab[:n], to_send[:n])
+	conn.stream_send_slab = slab
+	conn.stream_send_len = n
+
+	// Explicitly inactive multi-op queue so a prior path cannot leak exec_n.
+	conn.wire.exec_i = 0
+	conn.wire.exec_n = 0
+	conn.wire.pending_send = slab[:n]
+	if len(conn.wire.pending_send) == 0 {
+		stream_pool_put(slab)
+		conn.stream_send_slab = nil
+		conn.stream_send_len = 0
+		return
+	}
+	if err := host_submit_send(conn); err != .None {
+		stream_pool_put(slab)
+		conn.stream_send_slab = nil
+		conn.stream_send_len = 0
+		conn.wire.pending_send = nil
+		_wire_fail(conn, "submit_send (stream) failed: %v", err)
+		return
+	}
+	// host_submit_send sets .Send; progressive completion routes on .Stream.
+	conn.wire.kind = .Stream
+}
+
+// Drop fully delivered prefix from resp_buf so long sessions do not retain history.
+// Only when wire is idle (no Stream pending).
+@(private)
+_stream_compact_delivered :: proc(conn: ^Connection) {
+	if conn.wire.kind != .None {
+		return
+	}
+	if conn.stream_sent <= 0 {
+		return
+	}
+	// Compact when any prefix is delivered (sessions should not keep history).
+	// Non-session progressive streams still thrash less: only if >= 1 KiB or ending.
+	if conn.session == nil && conn.stream_sent < 1024 && !conn.stream_ending {
+		return
+	}
+	n := len(conn.resp_buf)
+	if conn.stream_sent >= n {
+		clear(&conn.resp_buf)
+		conn.stream_sent = 0
+	} else {
+		// memmove unsent to front
+		unsent := n - conn.stream_sent
+		copy(conn.resp_buf[:unsent], conn.resp_buf[conn.stream_sent:][:unsent])
+		resize(&conn.resp_buf, unsent)
+		conn.stream_sent = 0
+	}
+	// Sync Response buffer view.
+	r := &conn.loop.res
+	if r._buf.buf.allocator.procedure != nil {
+		r._buf.buf = conn.resp_buf
+	}
+	// Soft shrink oversized capacity for session streams (target ≤ 64 KiB).
+	if conn.session != nil && cap(conn.resp_buf) > 64 * 1024 && len(conn.resp_buf) < 16 * 1024 {
+		// Reallocate smaller (keep content).
+		small := make([dynamic]u8, len(conn.resp_buf), 16 * 1024, conn.server.conn_allocator)
+		copy(small[:], conn.resp_buf[:])
+		delete(conn.resp_buf)
+		conn.resp_buf = small
+		r._buf.buf = conn.resp_buf
+	}
+}
+
+// After last stream byte delivered (and stream_ending): tear down session if any, clean.
+@(private)
+_stream_finish :: proc(conn: ^Connection) {
+	// Session terminal path may still need destroy (End already set ending).
+	if conn.session != nil {
+		_session_destroy(conn, after_wire = true)
+	}
+	_stream_pin_disarm(conn)
+	conn.stream_open = false
+	conn.stream_ending = false
+	conn.stream_sent = 0
+	conn.stream_flush_pending = false
+	conn.stream_respond_fired = false
+	_stream_pool_abandon(conn)
+	conn.wire.pending_send = nil
+	conn.wire.kind = .None
+	clean_request_loop(conn)
+}
+
+// Soft shrink permanent resp_buf after session heading is in place (follow-up pin).
+@(private)
+_stream_shrink_resp_for_session :: proc(conn: ^Connection) {
+	if conn == nil || conn.server == nil {
+		return
+	}
+	cap_target := conn.server.opts.stream_resp_shrink_cap
+	if cap_target <= 0 {
+		cap_target = 16 * 1024
+	}
+	n := len(conn.resp_buf)
+	if cap(conn.resp_buf) <= cap_target {
+		return
+	}
+	// Keep content; reduce capacity to max(cap_target, n).
+	want := max(cap_target, n)
+	if want >= cap(conn.resp_buf) {
+		return
+	}
+	small := make([dynamic]u8, n, want, conn.server.conn_allocator)
+	if n > 0 {
+		copy(small[:], conn.resp_buf[:n])
+	}
+	delete(conn.resp_buf)
+	conn.resp_buf = small
+	r := &conn.loop.res
+	if r._buf.buf.allocator.procedure != nil {
+		r._buf.buf = conn.resp_buf
+	}
+}
+
+// PIN hangup: intentionally disabled without portable recv cancel.
+// Arming a 1-byte recv while waiting for External/Timer creates a hang (cannot send
+// until peer activity, and peer data becomes Client_Gone). Peer death is detected via:
+//   - stream send error (Client_Gone)
+//   - Idle_Timeout watchdog
+// Re-enable only with IORING_ASYNC_CANCEL (or equivalent) to drop PIN before send.
+@(private)
+_stream_pin_arm :: proc(conn: ^Connection) {
+	_ = conn
+}
+
+@(private)
+_stream_pin_disarm :: proc(conn: ^Connection) {
+	conn.stream_pin_armed = false
+}
 
 Response_Writer :: struct {
 	r:     ^Response,
@@ -780,6 +1103,10 @@ _response_format_heading_ex :: proc(
 @(private)
 response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) {
 	assert(!r.sent, "response has already been sent", loc)
+	assert(!r._session_attached && conn.session == nil, "session attached; cannot respond", loc)
+	assert(!conn.stream_open || r._stream_ended, "progressive stream open; use stream_end", loc)
+	// Note: on_respond hooks fire in response_send_got_body after body discard
+	// may adjust status — so access logs see the status that will hit the wire.
 	r.sent = true
 
 	check_body :: proc(res: rawptr, body: Body, err: Body_Error) {
@@ -1425,6 +1752,10 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if !connection_set_state(r._conn, .Will_Close) { return }
 	}
 
+	// Middleware on_respond (LIFO): status is final (including body-discard errors).
+	// Hooks must not call respond. One-shot clear inside fire.
+	_response_fire_respond_hooks(r)
+
 	// Wire assembly (Phase 3–5):
 	//  1) Heading already written (body_reserve / Response_Writer / Response_Stream)
 	//     → single-buffer send as-is (stream path does not use plan_body).
@@ -1512,14 +1843,32 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	}
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
+	// Middleware on_complete (LIFO): wire done, request arena still live.
+	_response_fire_complete_hooks(&conn.loop.res)
+
 	// Ensure multi-buffer / file-send queue is inactive before reusing conn.
 	// Must nil exec_bufs (not only exec_n) so keep-alive cannot retain dangling
 	// body/heading slice refs across temp reset / next request.
 	_conn_clear_exec(conn)
 
-	// Request scrap only (bump reset). Response lives in conn.resp_buf.
-	// Safe: no pending_send / exec_bufs still referencing scrap or Static bodies.
-	conn_temp_reset(conn)
+	// Progressive stream + session markers (D0/D1). Session should already be
+	// destroyed in _stream_finish; clear residual state for keep-alive reuse.
+	conn.stream_open = false
+	conn.stream_ending = false
+	conn.stream_sent = 0
+	conn.stream_flush_pending = false
+	conn.stream_respond_fired = false
+	conn.stream_send_slab = nil
+	conn.stream_send_len = 0
+	conn.stream_pin_armed = false
+	// Do not free session here — _stream_finish / connection_close own that.
+
+	// Request scrap: reset or re-attach if session detach returned the slot.
+	if conn.temp_slot < 0 {
+		_ = conn_temp_attach(conn)
+	} else {
+		conn_temp_reset(conn)
+	}
 	when HTTP_PHASE_STATS {
 		phase_add(0, 0, 0, 0, 0, 0, phase_now() - t0_reset)
 	}

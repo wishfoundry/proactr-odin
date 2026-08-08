@@ -107,6 +107,13 @@ opts := mw.Static_Opts{root = "public"}
 - **416** when unsatisfiable
 - **If-Range**: apply Range only if validators match; else full **200**
 
+### MIME / Content-Type
+- Broad extension table (html/css/js/mjs, images incl. webp/avif, fonts woff/woff2/ttf/otf, pdf, audio/video, wasm, zip, webmanifest, source maps, …)
+- **Unknown extension → `application/octet-stream`** (not `text/plain`)
+- **Case-insensitive** extensions (`.PNG` == `.png`)
+- **UTF-8 charset** on text HTML/CSS/JS/plain/markdown/csv/xml
+- Optional `extra_mimes: []http.Mime_Extra` for app-specific types
+
 ### Delivery
 - POSIX: open + `body_file` + `prefer_sendfile` → **sendfile** (Linux/Darwin) or chunked pread
 - Not a full-file `read` into memory for the default path

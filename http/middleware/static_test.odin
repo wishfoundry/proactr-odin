@@ -254,15 +254,12 @@ test_cmd_file_owned_flag :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_mime_static_extensions :: proc(t: ^testing.T) {
-	testing.expect_value(t, http.mime_from_extension("a.jpg"), http.Mime_Type.Jpeg)
-	testing.expect_value(t, http.mime_from_extension("a.jpeg"), http.Mime_Type.Jpeg)
-	testing.expect_value(t, http.mime_from_extension("a.webp"), http.Mime_Type.Webp)
-	testing.expect_value(t, http.mime_from_extension("a.woff2"), http.Mime_Type.Woff2)
-	testing.expect_value(t, http.mime_from_extension("a.mp4"), http.Mime_Type.Mp4)
-	testing.expect_value(t, http.mime_to_content_type(.Webp), "image/webp")
-	testing.expect_value(t, http.mime_to_content_type(.Woff2), "font/woff2")
-	testing.expect_value(t, http.mime_to_content_type(.Mp4), "video/mp4")
+test_static_content_type_html_charset :: proc(t: ^testing.T) {
+	// Static path must emit charset for HTML/CSS/JS and octet-stream for unknown.
+	testing.expect_value(t, http.mime_content_type_for_path("x.HTML"), "text/html; charset=utf-8")
+	testing.expect_value(t, http.mime_content_type_for_path("x.bin"), "application/octet-stream")
+	extra := []http.Mime_Extra{{ext = ".gltf", content_type = "model/gltf+json"}}
+	testing.expect_value(t, http.mime_content_type_for_path_extra("a.gltf", extra), "model/gltf+json")
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +362,7 @@ test_static_prepare_get_body_file :: proc(t: ^testing.T) {
 
 		ct, has_ct := http.headers_get_unsafe(res.headers, "content-type")
 		testing.expect(t, has_ct)
-		testing.expect_value(t, ct, "text/plain")
+		testing.expect_value(t, ct, "text/plain; charset=utf-8")
 		_, has_ar := http.headers_get_unsafe(res.headers, "accept-ranges")
 		testing.expect(t, has_ar)
 		etag, has_etag := http.headers_get_unsafe(res.headers, "etag")
