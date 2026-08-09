@@ -505,7 +505,7 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 	// Deferred close while a wire SQE was outstanding: account for this CQE first.
 	// Mid multi-buffer / file stream: abort remaining queue (partial response on wire).
 	if conn.close_on_io {
-		if kind == .Stream || conn.stream_send_slab != nil {
+		if kind == .Stream || conn.slot.stream_send_slab != nil {
 			_stream_pool_abandon(conn)
 		}
 		_conn_clear_exec(conn)
@@ -518,7 +518,7 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 
 	if result < 0 {
 		// Stream/session peer death: notify session before teardown when possible.
-		if (kind == .Stream || conn.stream_open) && conn.session != nil {
+		if (kind == .Stream || conn.slot.stream_open) && conn.slot.session != nil {
 			sync.atomic_add(&session_metrics_client_gone, 1)
 			_session_drive(conn, Session_Event{kind = .Client_Gone})
 		}
@@ -536,7 +536,7 @@ host_on_wire :: proc(conn: ^Connection, kind: Wire_Kind, result: i32) {
 		_host_on_wire_send(conn, int(result))
 	case .Stream:
 		if result == 0 && len(conn.wire.pending_send) > 0 {
-			_wire_fail(conn, "stream send zero-length fd=%v pending=%d stream_sent=%d", conn.socket, len(conn.wire.pending_send), conn.stream_sent)
+			_wire_fail(conn, "stream send zero-length fd=%v pending=%d stream_sent=%d", conn.socket, len(conn.wire.pending_send), conn.slot.stream_sent)
 			return
 		}
 		_host_on_wire_stream(conn, int(result))
@@ -589,45 +589,45 @@ _host_on_wire_stream :: proc(conn: ^Connection, n: int) {
 	}
 
 	// Full arm delivered (stream_send_len is original copy size for this arm).
-	delivered := conn.stream_send_len
+	delivered := conn.slot.stream_send_len
 	if delivered <= 0 {
 		delivered = len(conn.wire.pending_send)
 	}
-	conn.stream_sent += delivered
+	conn.slot.stream_sent += delivered
 	conn.wire.pending_send = nil
 	_stream_pool_abandon(conn)
 
 	// Compact when wire idle so long sessions reclaim RSS.
 	_stream_compact_delivered(conn)
 
-	if conn.session != nil {
+	if conn.slot.session != nil {
 		_session_on_writable(conn)
 	}
 
-	more := len(conn.resp_buf) > conn.stream_sent
-	if more || conn.stream_flush_pending || conn.stream_ending {
-		conn.stream_flush_pending = false
-		if more || conn.stream_ending {
+	more := len(conn.resp_buf) > conn.slot.stream_sent
+	if more || conn.slot.stream_flush_pending || conn.slot.stream_ending {
+		conn.slot.stream_flush_pending = false
+		if more || conn.slot.stream_ending {
 			_stream_try_submit(conn)
 			return
 		}
 	}
 
-	if conn.stream_ending && conn.stream_sent >= len(conn.resp_buf) {
+	if conn.slot.stream_ending && conn.slot.stream_sent >= len(conn.resp_buf) {
 		_stream_finish(conn)
 		return
 	}
-	// Mid-session idle: arm PIN hangup watch (no concurrent send).
-	_stream_pin_arm(conn)
+	// Mid-session idle: hangup watch (clear PIN no-op; ciphered → CT recv).
+	_session_arm_hangup_watch(conn)
 }
 
 @(private)
 _stream_pool_abandon :: proc(conn: ^Connection) {
-	if conn.stream_send_slab != nil {
-		stream_pool_put(conn.stream_send_slab)
-		conn.stream_send_slab = nil
+	if conn.slot.stream_send_slab != nil {
+		stream_pool_put(conn.slot.stream_send_slab)
+		conn.slot.stream_send_slab = nil
 	}
-	conn.stream_send_len = 0
+	conn.slot.stream_send_len = 0
 }
 
 // Kernel WRITEV completion: advance exec_bufs on short write; then file region or finish.
@@ -744,6 +744,13 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 
 	// Current buffer fully sent.
 	conn.wire.pending_send = nil
+
+	// PR5 TLS: handshake CT or windowed response CT complete → continue seal/HS.
+	if conn.tls_ssl != nil {
+		if tls_host_on_send_complete(conn) {
+			return
+		}
+	}
 
 	// Phase 4: mid-chunked continue (no re-count); first file body entry via start_or_finish.
 	if was_file_chunk {

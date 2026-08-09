@@ -3,8 +3,11 @@ package http
 
 import "core:bytes"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
+
+import tls_server "../tls_server"
 
 @(test)
 test_effects_of_basic :: proc(t: ^testing.T) {
@@ -139,14 +142,15 @@ test_sse_drive_for_test_start_end :: proc(t: ^testing.T) {
 	defer delete(res.headers._kv)
 	res.status = .OK
 	headers_set_unsafe(&res.headers, "date", "Fri, 05 Feb 2023 09:01:10 GMT")
-	conn.loop.res = res
-	conn.loop.res._conn = &conn
-	// Note: res on stack; re-bind after copy into conn.loop
-	conn.loop.res._conn = &conn
+	conn.slot.conn = &conn
+	conn.slot.res = res
+	// Note: res on stack; re-bind after copy into conn.slot
+	conn.slot.res._slot = &conn.slot
+	conn.slot.res._conn = &conn
 	wire := make([dynamic]u8, 0, 1024, context.allocator)
 	defer delete(wire)
-	conn.loop.res._buf.buf = wire
-	conn.loop.res._buf.buf.allocator = context.allocator
+	conn.slot.res._buf.buf = wire
+	conn.slot.res._buf.buf.allocator = context.allocator
 	conn.resp_buf = wire
 
 	// Fake server only for allocator identity (not used if we alloc Session_State on stack path).
@@ -166,14 +170,14 @@ test_sse_drive_for_test_start_end :: proc(t: ^testing.T) {
 	st.hooks = {}
 	st.gen = 1
 	st.public = Session{_conn = &conn, id = 1}
-	conn.session = &st
-	conn.loop.res._session_attached = true
-	conn.loop.res._streaming = true
-	conn.loop.res._heading_written = true
+	conn.slot.session = &st
+	conn.slot.res._session_attached = true
+	conn.slot.res._streaming = true
+	conn.slot.res._heading_written = true
 
 	// Pre-seed a minimal heading so buffer is non-empty.
-	append(&conn.loop.res._buf.buf, ..transmute([]u8)string("HTTP/1.1 200 OK\r\n\r\n"))
-	conn.resp_buf = conn.loop.res._buf.buf
+	append(&conn.slot.res._buf.buf, ..transmute([]u8)string("HTTP/1.1 200 OK\r\n\r\n"))
+	conn.resp_buf = conn.slot.res._buf.buf
 
 	sess := st.public
 	effs := sse_drive_for_test(&sess, Session_Event{kind = .Start})
@@ -181,19 +185,198 @@ test_sse_drive_for_test_start_end :: proc(t: ^testing.T) {
 	testing.expect_value(t, effs.items[0].kind, Effect_Kind.Sse_Data)
 	testing.expect_value(t, effs.items[1].kind, Effect_Kind.End)
 	// End path sets ending; without worker flush is coalesce-only.
-	testing.expect(t, conn.stream_ending || st.ending)
+	testing.expect(t, conn.slot.stream_ending || st.ending)
 	// SSE data was chunked into the response buffer.
-	body := string(conn.loop.res._buf.buf[:])
+	body := string(conn.slot.res._buf.buf[:])
 	testing.expect(t, strings.contains(body, "data: hi"))
 	// Tear down without free (stack state).
-	conn.session = nil
-	conn.loop.res._session_attached = false
+	conn.slot.session = nil
+	conn.slot.res._session_attached = false
 }
 
 @(test)
 test_session_status_nil :: proc(t: ^testing.T) {
 	s: Session
 	testing.expect(t, !session_status(s))
+}
+
+// Orphan sse_alloc (no sse_start): pad must free on exchange reset / conn recycle.
+// Under odin test memory tracking this must not report a leak.
+@(test)
+test_sse_alloc_orphan_freed_on_reset :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+	wire_conn_init(&conn.wire_conn)
+
+	res: Response
+	res._conn = &conn
+	res._slot = &conn.slot
+
+	pad := sse_alloc(&res, 64)
+	testing.expect(t, pad != nil)
+	testing.expect(t, conn.slot.session_pad != nil)
+	testing.expect_value(t, conn.slot.session_pad_size, 64)
+	testing.expect(t, conn.slot.session == nil) // no sse_start
+
+	// Same path as connection_destroy / free-list recycle.
+	stream_slot_reset_exchange(&conn.slot, &conn)
+	testing.expect(t, conn.slot.session_pad == nil)
+	testing.expect_value(t, conn.slot.session_pad_size, 0)
+	testing.expect(t, conn.slot.conn == &conn)
+}
+
+// Free pad helper alone (connection_close orphan branch without full close/ring).
+@(test)
+test_sse_alloc_orphan_freed_on_free_pad :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+
+	res: Response
+	res._conn = &conn
+
+	_ = sse_alloc(&res, 32)
+	testing.expect(t, conn.slot.session_pad != nil)
+
+	stream_slot_free_pad(&conn.slot)
+	testing.expect(t, conn.slot.session_pad == nil)
+	testing.expect_value(t, conn.slot.session_pad_size, 0)
+	// Second call is a safe no-op.
+	stream_slot_free_pad(&conn.slot)
+}
+
+// Destroy bumps slot.gen (sole ABA owner); st.gen stays attach snapshot.
+// When wire_conn.q is set, seal units for the attach gen are removed.
+@(test)
+test_session_destroy_bumps_slot_gen :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+	conn.slot.gen = 1
+	wire_conn_init(&conn.wire_conn)
+
+	// Phase-2-style seal queue hung on wire_conn (clear-H1 normally leaves q nil).
+	sq: Seal_Queue
+	conn.wire_conn.q = &sq
+	testing.expect(t, seal_q_push(&sq, Seal_Unit{slot_gen = 1}))
+	testing.expect(t, seal_q_push(&sq, Seal_Unit{slot_gen = 9}))
+	testing.expect_value(t, sq.len, 2)
+
+	st := new(Session_State, context.allocator)
+	st.allocator = context.allocator
+	st.gen = 1
+	st.public = Session{_conn = &conn, id = 1}
+	conn.slot.session = st
+	conn.slot.res._session_attached = true
+
+	_session_destroy(&conn, after_wire = false)
+
+	testing.expect(t, conn.slot.session == nil)
+	testing.expect_value(t, conn.slot.gen, u32(2))
+	testing.expect_value(t, sq.len, 1) // gen=1 removed; gen=9 kept
+	testing.expect_value(t, sq.units[0].slot_gen, u32(9))
+	testing.expect(t, !conn.slot.res._session_attached)
+	// st was heap-allocated and freed by destroy (timer_pending_cqes == 0).
+}
+
+// PR10 soft admission: over session cap → 503, invalid Session, no panic.
+@(test)
+test_sse_start_soft_reject_over_cap :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+	server.opts = Default_Server_Opts
+	server.opts.max_sessions_per_worker = 1
+	server.opts.thread_count = 1
+
+	// Inflate live gauge so admission fails immediately.
+	prev_live := sync.atomic_load(&session_metrics_live)
+	prev_rej := sync.atomic_load(&session_metrics_admission_reject)
+	sync.atomic_store(&session_metrics_live, 1)
+	defer sync.atomic_store(&session_metrics_live, prev_live)
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+	wire_conn_init(&conn.wire_conn)
+
+	res: Response
+	headers_init(&res.headers, context.allocator)
+	defer delete(res.headers._kv)
+	res._conn = &conn
+	res._slot = &conn.slot
+	res.status = .OK
+
+	on_event :: proc(sess: ^Session, ev: Session_Event, user: rawptr) -> Effects {
+		_ = sess
+		_ = ev
+		_ = user
+		return {}
+	}
+
+	s := sse_start(&res, on_event)
+	testing.expect_value(t, s.id, u32(0))
+	testing.expect(t, !session_status(s))
+	testing.expect_value(t, res.status, Status.Service_Unavailable)
+	testing.expect(t, res.sent)
+	testing.expect(t, conn.slot.session == nil)
+	testing.expect(t, !res._session_attached)
+	rej := sync.atomic_load(&session_metrics_admission_reject)
+	testing.expect(t, rej > prev_rej, "admission_reject metric")
+	// live must not have been incremented on reject.
+	testing.expect_value(t, sync.atomic_load(&session_metrics_live), i64(1))
+}
+
+// PR10: ws_start soft-rejects over cap with 503 (not 101 attach).
+@(test)
+test_ws_start_soft_reject_over_cap :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+	server.opts = Default_Server_Opts
+	server.opts.max_sessions_per_worker = 1
+	server.opts.thread_count = 1
+
+	prev_live := sync.atomic_load(&session_metrics_live)
+	prev_rej := sync.atomic_load(&session_metrics_admission_reject)
+	sync.atomic_store(&session_metrics_live, 1)
+	defer sync.atomic_store(&session_metrics_live, prev_live)
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+	wire_conn_init(&conn.wire_conn)
+
+	res: Response
+	headers_init(&res.headers, context.allocator)
+	defer delete(res.headers._kv)
+	res._conn = &conn
+	res._slot = &conn.slot
+	res.status = .Switching_Protocols
+
+	on_event :: proc(sess: ^Session, ev: Session_Event, user: rawptr) -> Effects {
+		_ = sess
+		_ = ev
+		_ = user
+		return {}
+	}
+
+	s := ws_start(&res, on_event)
+	testing.expect_value(t, s.id, u32(0))
+	testing.expect(t, !session_status(s))
+	testing.expect_value(t, res.status, Status.Service_Unavailable)
+	testing.expect(t, res.sent)
+	testing.expect(t, conn.slot.session == nil)
+	rej := sync.atomic_load(&session_metrics_admission_reject)
+	testing.expect(t, rej > prev_rej)
 }
 
 @(test)
@@ -236,4 +419,157 @@ test_effect_ws_constructors :: proc(t: ^testing.T) {
 test_stream_buf_size_default :: proc(t: ^testing.T) {
 	testing.expect(t, STREAM_BUF_SIZE_DEFAULT == 8 * 1024)
 	testing.expect(t, STREAM_BYTES_TOTAL_DEFAULT == 64 * 1024 * 1024)
+}
+
+// PR6: ciphered flag + session attach; effects apply into resp_buf (plain framing).
+// No sockets / SSL — gen, apply, and hangup gate only (encrypt path needs tls_ssl + ring).
+@(test)
+test_session_ciphered_attach_ws_effects :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+	conn.slot.gen = 1
+	wire_conn_init(&conn.wire_conn)
+	tls_pipe_init(&conn.tls_pipe)
+	testing.expect(t, connection_enable_ciphered(&conn))
+	testing.expect(t, conn.ciphered)
+	// Lightweight enable has no SSL — hangup uses CT only when Open+ssl.
+	testing.expect(t, !_session_hangup_uses_tls_ct(&conn))
+
+	headers_init(&conn.slot.res.headers, context.allocator)
+	defer delete(conn.slot.res.headers._kv)
+
+	wire := make([dynamic]u8, 0, 256, context.allocator)
+	defer delete(wire)
+	conn.slot.res._buf.buf = wire
+	conn.slot.res._buf.buf.allocator = context.allocator
+	conn.slot.res._conn = &conn
+	conn.slot.res._slot = &conn.slot
+	conn.slot.res._heading_written = true
+	conn.slot.res._streaming = true
+	conn.resp_buf = wire
+
+	st: Session_State
+	st.on_event = proc(sess: ^Session, ev: Session_Event, user: rawptr) -> Effects {
+		_ = sess
+		_ = user
+		switch ev.kind {
+		case .Start:
+			// No End: avoids headers_set_close / Will_Close side effects without a worker.
+			return effects_of(effect_ws_text("hi"))
+		case .Timer, .External, .Client_Gone, .Idle_Timeout, .Writable:
+			return {}
+		}
+		return {}
+	}
+	st.gen = 1
+	st.proto = .Ws
+	st.public = Session{_conn = &conn, id = 1}
+	st.allocator = context.allocator
+	conn.slot.session = &st
+	conn.slot.res._session_attached = true
+
+	sess := st.public
+	effs := sse_drive_for_test(&sess, Session_Event{kind = .Start})
+	testing.expect_value(t, effs.n, u8(1))
+	testing.expect_value(t, effs.items[0].kind, Effect_Kind.Ws_Text)
+	// WS frames land in resp_buf as plain (encrypt is tls_host_stream_try_submit with ssl).
+	body := string(conn.slot.res._buf.buf[:])
+	testing.expect(t, strings.contains(body, "hi"))
+	// Frame opcode text (0x81) present — same apply path as clear H1.
+	testing.expect(t, len(conn.slot.res._buf.buf) >= 2)
+	testing.expect_value(t, conn.slot.res._buf.buf[0], u8(0x81))
+	testing.expect(t, conn.ciphered) // flag unchanged through apply
+
+	conn.slot.session = nil
+	connection_disable_ciphered(&conn)
+}
+
+// Hangup gate: clear never uses TLS CT; ciphered+Open+ssl does (no ring required).
+@(test)
+test_session_hangup_uses_tls_ct_gate :: proc(t: ^testing.T) {
+	c: Connection
+	tls_pipe_init(&c.tls_pipe)
+	testing.expect(t, !_session_hangup_uses_tls_ct(&c))
+
+	testing.expect(t, connection_enable_ciphered(&c))
+	// ciphered alone without SSL / Open is false.
+	testing.expect(t, !_session_hangup_uses_tls_ct(&c))
+
+	c.tls_pipe.state = .Open
+	// Still no ssl pointer — gate stays false (arm would no-op / fail).
+	testing.expect(t, !_session_hangup_uses_tls_ct(&c))
+
+	// Non-nil opaque marker: gate is structural (does not call into OpenSSL).
+	fake: int = 1
+	c.tls_ssl = tls_server.Conn(rawptr(&fake))
+	testing.expect(t, _session_hangup_uses_tls_ct(&c))
+
+	c.tls_ssl = nil
+	connection_disable_ciphered(&c)
+	testing.expect(t, !_session_hangup_uses_tls_ct(&c))
+}
+
+// Ciphered session attach snapshot: gen + effects without sockets (SSE data).
+@(test)
+test_session_ciphered_sse_apply_gen :: proc(t: ^testing.T) {
+	server: Server
+	server.conn_allocator = context.allocator
+
+	conn: Connection
+	conn.server = &server
+	conn.slot.conn = &conn
+	conn.slot.gen = 3
+	wire_conn_init(&conn.wire_conn)
+	testing.expect(t, connection_enable_ciphered(&conn))
+
+	headers_init(&conn.slot.res.headers, context.allocator)
+	// destroy frees Session_State; headers live on conn.slot.res until we delete.
+	defer delete(conn.slot.res.headers._kv)
+
+	wire := make([dynamic]u8, 0, 256, context.allocator)
+	defer delete(wire)
+	conn.slot.res._buf.buf = wire
+	conn.slot.res._buf.buf.allocator = context.allocator
+	conn.slot.res._conn = &conn
+	conn.slot.res._slot = &conn.slot
+	conn.slot.res._heading_written = true
+	conn.slot.res._streaming = true
+	conn.resp_buf = wire
+	append(&conn.slot.res._buf.buf, ..transmute([]u8)string("HTTP/1.1 200 OK\r\n\r\n"))
+	conn.resp_buf = conn.slot.res._buf.buf
+
+	st := new(Session_State, context.allocator)
+	st.allocator = context.allocator
+	st.on_event = proc(sess: ^Session, ev: Session_Event, user: rawptr) -> Effects {
+		_ = sess
+		_ = user
+		if ev.kind == .Start {
+			// Data only — End would headers_set_close without a real wire worker.
+			return effects_of(effect_sse_data("z"))
+		}
+		return {}
+	}
+	st.gen = stream_slot_bump_gen(&conn.slot)
+	st.proto = .Sse
+	st.public = Session{_conn = &conn, id = st.gen}
+	conn.slot.session = st
+	conn.slot.res._session_attached = true
+
+	sess := st.public
+	effs := sse_drive_for_test(&sess, Session_Event{kind = .Start})
+	testing.expect_value(t, effs.n, u8(1))
+	body := string(conn.slot.res._buf.buf[:])
+	testing.expect(t, strings.contains(body, "data: z"))
+	testing.expect(t, conn.ciphered)
+	testing.expect_value(t, st.gen, u32(4)) // bumped from 3
+
+	// Destroy bumps slot.gen again (ABA); attach snapshot st.gen stays 4 until free.
+	_session_destroy(&conn, after_wire = false)
+	testing.expect(t, conn.slot.session == nil)
+	testing.expect_value(t, conn.slot.gen, u32(5))
+	connection_disable_ciphered(&conn)
 }

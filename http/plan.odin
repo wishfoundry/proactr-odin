@@ -135,6 +135,7 @@ plan_wire_inc_kernel_writev :: #force_inline proc() {
 
 plan_wire_inc_materialize :: #force_inline proc() {
 	sync.atomic_add(&plan_wire_materialize_total, u64(1))
+	path_metrics_note_materialize()
 }
 
 // Only call when real kernel sendfile/splice path armed (not chunked pread).
@@ -204,38 +205,128 @@ Response_Cmd :: struct {
 // Constraints (not syscalls)
 // ---------------------------------------------------------------------------
 
-// Snapshot of machine / connection limits that drive planner policy.
-// Handlers may read this; they must not execute transport ops from it.
+// PUBLIC — advanced handlers may read only these semantic constraints.
+// No ring free, SQE budget, fixed_files, max_iovecs, or cipher flag here.
+// Live fill: plan_context(res) / plan_context_for(conn) in response.odin.
 Plan_Context :: struct {
-	max_iovecs:            u16, // gather budget (incl. heading slot)
-	zero_copy_send:        bool,
-	sendfile_ok:           bool, // plain TCP, OS support
-	fixed_files:           bool, // registered fd table (Linux)
-	tls:                   bool, // forces copy / no sendfile gather
-	output_ring_free:      u32, // free staging bytes (0 = unknown / unused)
-	sqe_budget:            u16, // remaining SQEs this batch (0 = ignore)
-	preferred_copy_budget: u32, // materialize if total body ≤ this
+	sendfile_ok:           bool, // kernel file→socket path available for this plan
+	preferred_copy_budget: u32,  // materialize mem bodies if total ≤ this (0 = disable size gate)
+	max_write_unit:        u32,  // 0 = ignore; if >0 and total_body > unit → materialize (v0)
+	zero_copy_send:        bool, // clear-path zc available
 }
 
+// Host-only meters for planner/executor (not on plan_context / public API surface).
+// Filled by plan_policy_for / plan_policy; never returned from plan_context*.
+Plan_Host :: struct {
+	max_iovecs:       u16,  // gather budget (incl. heading slot)
+	fixed_files:      bool, // registered fd table (Linux)
+	ciphered:         bool, // cipher path active — forces copy / no sendfile (was tls)
+	output_ring_free: u32,  // free staging bytes (0 = unknown / unused)
+	sqe_budget:       u16,  // remaining SQEs this batch (0 = ignore)
+}
+
+// Full pure-planner input: public four + host meters. plan_body / wire use this.
+// Not an app surface — prefer plan_context for handlers that only need constraints.
+Plan_Policy :: struct {
+	// public four (same meaning as Plan_Context)
+	sendfile_ok:           bool,
+	preferred_copy_budget: u32,
+	max_write_unit:        u32,
+	zero_copy_send:        bool,
+	// host
+	max_iovecs:            u16,
+	fixed_files:           bool,
+	ciphered:              bool,
+	output_ring_free:      u32,
+	sqe_budget:            u16,
+}
+
+// Host-private orthogonal axes (fill from conn/ALPN later; not app API).
+// Optional PR1 surface: derived sendfile/zc truth; not stored on Plan_Context.
+Conn_Cap :: enum u8 {
+	Ciphered,          // TLS / record path active
+	Multiplex,         // H2+ concurrent slots
+	Sendfile_Possible, // OS can sendfile clear TCP
+	Zero_Copy_Send,    // backend zc on clear
+}
+Conn_Caps :: bit_set[Conn_Cap; u8]
+
 // Conservative defaults for pure tests and early wiring.
-// Live fill from conn/backend: plan_context(res) in response.odin.
+// Live fill from conn/backend: plan_context / plan_policy in response.odin.
 PLAN_DEFAULT_MAX_IOVECS :: u16(1024)
 PLAN_DEFAULT_COPY_BUDGET :: u32(4096)
 
 plan_context_default :: proc() -> Plan_Context {
 	return Plan_Context {
-		max_iovecs            = PLAN_DEFAULT_MAX_IOVECS,
-		zero_copy_send        = false,
 		sendfile_ok           = false,
-		fixed_files           = false,
-		tls                   = false,
-		output_ring_free      = 0,
-		sqe_budget            = 0,
 		preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET,
+		max_write_unit        = 0,
+		zero_copy_send        = false,
 	}
 }
 
-// Handler-side bias over Plan_Context (POD).
+plan_host_default :: proc() -> Plan_Host {
+	return Plan_Host {
+		max_iovecs       = PLAN_DEFAULT_MAX_IOVECS,
+		fixed_files      = false,
+		ciphered         = false,
+		output_ring_free = 0,
+		sqe_budget       = 0,
+	}
+}
+
+plan_policy_default :: proc() -> Plan_Policy {
+	return Plan_Policy {
+		sendfile_ok           = false,
+		preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET,
+		max_write_unit        = 0,
+		zero_copy_send        = false,
+		max_iovecs            = PLAN_DEFAULT_MAX_IOVECS,
+		fixed_files           = false,
+		ciphered              = false,
+		output_ring_free      = 0,
+		sqe_budget            = 0,
+	}
+}
+
+// Project public four from a full policy (handler-facing).
+plan_policy_context :: proc(p: Plan_Policy) -> Plan_Context {
+	return Plan_Context {
+		sendfile_ok           = p.sendfile_ok,
+		preferred_copy_budget = p.preferred_copy_budget,
+		max_write_unit        = p.max_write_unit,
+		zero_copy_send        = p.zero_copy_send,
+	}
+}
+
+// Build Plan_Policy from public constraints + host meters.
+plan_policy_from :: proc(ctx: Plan_Context, host: Plan_Host) -> Plan_Policy {
+	return Plan_Policy {
+		sendfile_ok           = ctx.sendfile_ok,
+		preferred_copy_budget = ctx.preferred_copy_budget,
+		max_write_unit        = ctx.max_write_unit,
+		zero_copy_send        = ctx.zero_copy_send,
+		max_iovecs            = host.max_iovecs,
+		fixed_files           = host.fixed_files,
+		ciphered              = host.ciphered,
+		output_ring_free      = host.output_ring_free,
+		sqe_budget            = host.sqe_budget,
+	}
+}
+
+// Derive Plan_Host sendfile/zc-adjacent flags from Conn_Caps (host fill helper).
+// sendfile_ok public still gates on !ciphered && H1 in live fill; this only maps bits.
+plan_host_from_caps :: proc(caps: Conn_Caps, base: Plan_Host = {}) -> Plan_Host {
+	h := base
+	if h.max_iovecs == 0 {
+		h.max_iovecs = PLAN_DEFAULT_MAX_IOVECS
+	}
+	h.ciphered = .Ciphered in caps
+	// fixed_files / ring meters stay from base (not cap-derived).
+	return h
+}
+
+// Handler-side bias over Plan_Context / Plan_Policy (POD).
 // Zero value: no materialize/gather bias (server copy_budget / max_iovecs stand).
 //
 // sendfile (bastion: Sendfile ≫ chunked/materialize on file):
@@ -246,7 +337,7 @@ plan_context_default :: proc() -> Plan_Context {
 //   - When optimize is false, prefer_sendfile is the per-route opt-in (also enables
 //     optimize wire via prefer_sendfile alone).
 //   - Never promotes false→true.
-// Applied by plan_context / plan_context_apply_profile.
+// Applied by plan_context / plan_policy / plan_*_apply_profile.
 Handler_Profile :: struct {
 	prefer_materialize: bool, // force huge copy budget → plan_body materializes memory bodies
 	prefer_gather:      bool, // use copy_budget for size gate (0 → disable size-based copy preference)
@@ -254,7 +345,7 @@ Handler_Profile :: struct {
 	copy_budget:        u32,  // with prefer_gather: preferred_copy_budget (0 disables size gate)
 }
 
-// Apply Handler_Profile bias onto a base Plan_Context (filled from server/conn).
+// Apply Handler_Profile bias onto public Plan_Context fields only.
 // Order: prefer_gather first, prefer_materialize wins if both set.
 // optimize: true when plan_optimize or per-request optimize wire (gather/sendfile bias).
 //   When true and !prefer_materialize, sendfile_ok follows base (measured default path).
@@ -286,6 +377,21 @@ plan_context_apply_profile :: proc(
 		ctx.sendfile_ok = false
 	}
 	return ctx
+}
+
+// Same bias on full Plan_Policy (public sendfile/budget; host meters pass through).
+plan_policy_apply_profile :: proc(
+	base: Plan_Policy,
+	profile: Handler_Profile,
+	optimize := false,
+) -> Plan_Policy {
+	p := base
+	ctx := plan_context_apply_profile(plan_policy_context(base), profile, optimize)
+	p.sendfile_ok = ctx.sendfile_ok
+	p.preferred_copy_budget = ctx.preferred_copy_budget
+	p.max_write_unit = ctx.max_write_unit
+	p.zero_copy_send = ctx.zero_copy_send
+	return p
 }
 
 // Body middleware: rewrite intent cmds before plan/materialize.
@@ -462,7 +568,7 @@ cmd_known_length :: proc(c: Response_Cmd) -> (n: i64, ok: bool) {
 // ---------------------------------------------------------------------------
 
 /*
-plan_body turns body commands + constraints into an execution plan.
+plan_body turns body commands + Plan_Policy into an execution plan.
 
 Does not format HTTP headings or touch sockets. Heading is assumed to be
 prepended by the executor/materialize path as:
@@ -473,20 +579,25 @@ prepended by the executor/materialize path as:
 Policy (intended; Phase 3+ on the wire):
   1. Empty body            → Write_Slice (headers only)
   2. Memory only
-       materialize if TLS | total ≤ copy_budget | iovecs insufficient
+       materialize if ciphered | total ≤ copy_budget | over max_write_unit
+                         | iovecs insufficient
        else Writev (heading + each mem slice)
   3. Single file, no mem
-       sendfile_ok && !tls → Write_Slice (headers) + Sendfile
-       else                → Copy_Into + Write_Slice
+       sendfile_ok && !ciphered → Write_Slice (headers) + Sendfile
+       else                     → Copy_Into + Write_Slice
   4. Mixed mem + file
-       sendfile_ok && !tls && iovecs ok && no mem after File
+       sendfile_ok && !ciphered && iovecs ok && no mem after File
          → Writev(header+mem prefix) + Sendfile
        else materialize all            → Write_Slice (preserves cmd order)
   5. Unknown length / too many ops     → Write_Slice (safe fallback)
 
+max_write_unit (v0): if >0 and total_body > max_write_unit, force materialize
+on the memory-only path (treat like needing windowed/coalesced staging).
+0 = ignore. File Sendfile path does not materialize on over-unit (OS windows).
+
 Phase 0/1 wire path may ignore this and always materialize; tests lock the policy.
 */
-plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Context) -> Plan_Result {
+plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Policy) -> Plan_Result {
 	r: Plan_Result
 	r.total_body = 0
 	r.op_count = 0
@@ -545,6 +656,12 @@ plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Context) -> Plan_Result {
 		return r
 	}
 
+	// max_write_unit > 0: body larger than one plain unit → materialize (mem path).
+	over_write_unit :=
+		ctx.max_write_unit > 0 &&
+		r.total_body >= 0 &&
+		u64(r.total_body) > u64(ctx.max_write_unit)
+
 	// (2) Memory only
 	if r.n_file == 0 && r.n_mem > 0 {
 		// Need 1 slot for heading + one per body slice.
@@ -553,7 +670,7 @@ plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Context) -> Plan_Result {
 		prefer_copy := ctx.preferred_copy_budget > 0 && u32(r.total_body) <= ctx.preferred_copy_budget
 		iov_ok := ctx.max_iovecs > 0 && need_iov <= int(ctx.max_iovecs)
 
-		if ctx.tls || prefer_copy || !iov_ok {
+		if ctx.ciphered || prefer_copy || over_write_unit || !iov_ok {
 			materialize(&r, r.total_body)
 			return r
 		}
@@ -583,7 +700,8 @@ plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Context) -> Plan_Result {
 			}
 		}
 
-		if ctx.sendfile_ok && !ctx.tls {
+		// Sendfile only when sendfile_ok && !ciphered (clear path).
+		if ctx.sendfile_ok && !ctx.ciphered {
 			if !push(&r, Exec_Op {
 				kind      = .Write_Slice,
 				byte_len  = 0, // headers only
@@ -633,7 +751,7 @@ plan_body :: proc(cmds: []Response_Cmd, ctx: Plan_Context) -> Plan_Result {
 		// Only optimize the simple case: exactly one file with optional *prefix* mem.
 		// Wire sends all mem then the file region — any non-empty mem *after* File
 		// would reorder the body, so fall back to materialize (preserve cmd order).
-		if r.n_file == 1 && ctx.sendfile_ok && !ctx.tls && !mem_follows_file(cmds) {
+		if r.n_file == 1 && ctx.sendfile_ok && !ctx.ciphered && !mem_follows_file(cmds) {
 			need_iov := 1 + r.n_mem // heading + mem bodies; file is separate Sendfile
 			iov_ok := ctx.max_iovecs > 0 && need_iov <= int(ctx.max_iovecs)
 			if iov_ok {
@@ -706,7 +824,7 @@ mem_follows_file :: proc(cmds: []Response_Cmd) -> bool {
 
 // plan_exec_kinds fills out with the op kind sequence; returns count.
 // Convenience for table tests.
-plan_exec_kinds :: proc(cmds: []Response_Cmd, ctx: Plan_Context, out: []Exec_Op_Kind) -> int {
+plan_exec_kinds :: proc(cmds: []Response_Cmd, ctx: Plan_Policy, out: []Exec_Op_Kind) -> int {
 	r := plan_body(cmds, ctx)
 	n := min(r.op_count, len(out))
 	for i in 0 ..< n {

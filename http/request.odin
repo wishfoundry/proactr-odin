@@ -22,6 +22,9 @@ Request :: struct {
 	// Internal usage only.
 	_scanner:   ^Scanner,
 	_body_ok:   Maybe(bool),
+	// Pre-buffered body (H2 oneshot eng): body() delivers this without scanner I/O.
+	// Slice lifetime = request temp arena / H2 stream buffer until exchange done.
+	_pre_body:  Maybe([]u8),
 }
 
 request_init :: proc(r: ^Request, allocator := context.allocator) {

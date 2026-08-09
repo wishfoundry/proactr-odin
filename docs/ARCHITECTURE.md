@@ -14,6 +14,14 @@
 
 **proactr:** portable completion-native package (separate from `core:nbio`). See `docs/PROACTR.md`.
 
+## Writing handlers (app authors)
+
+**Required reading:** [`APP_CONTRACT.md`](APP_CONTRACT.md) (oneshot / long-lived / optional four-field `plan_context`).  
+Also: [`MIDDLEWARE_CONTRACT.md`](MIDDLEWARE_CONTRACT.md), [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md), Phase 0 gates in [`PHASE0_E0.md`](PHASE0_E0.md).  
+**Ship honesty (what is actually done):** [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).
+
+Design notes under `docs/design/dual-tls-h2/` are **implementer / reviewer** material — not required reading for app or middleware authors. Do not teach host pipe internals in tutorials or `examples/`.
+
 ## Package split
 
 ```
@@ -78,7 +86,12 @@ Shared accept via multishot accept on one ring is a later option.
 
 ## Non-goals (near term)
 
-- HTTP/2 / HTTP/3 (I have a different fork: vapor-http that owns that experiment space)
+**Product honesty:** TLS H1 oneshot + SSE/WS and TLS H2 concurrent unary + multi-SSE
+(PR9 M1–M6 offline) are product for matrix ✅ cells. Still **not** claimed: WS-on-H2,
+bastion multi-stream RPS peer matrix, live dual-CT bulk firehose, HTTP/3. Design
+track: `docs/design/dual-tls-h2/` + [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).
+
+- HTTP/3 as a shipped protocol surface (later; vapor-http owns a separate multi-protocol fork space)
 - Drop-in `core:nbio` API compatibility (packages stay separate for comparison)
 - Fixed files/buffers on non-Linux backends
 // Non-Linux: fixed files / registered recv pool are unavailable.

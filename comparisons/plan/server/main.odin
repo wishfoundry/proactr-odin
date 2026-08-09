@@ -142,13 +142,13 @@ PROFILE_FILE :: Handler_Profile {
 	copy_budget     = 0,
 }
 
-plan_ctx_for :: proc(profile: Handler_Profile) -> http.Plan_Context {
-	// Mirror http.plan_context_apply_profile: base capability + optimize / prefer_* gates.
-	base := http.plan_context_default()
+plan_ctx_for :: proc(profile: Handler_Profile) -> http.Plan_Policy {
+	// Mirror http.plan_policy_apply_profile: base capability + optimize / prefer_* gates.
+	base := http.plan_policy_default()
 	base.max_iovecs = g_max_iovecs
 	base.preferred_copy_budget = g_copy_budget
 	base.sendfile_ok = g_sendfile_ok
-	base.tls = false
+	base.ciphered = false
 
 	hp := http.Handler_Profile {
 		prefer_materialize = profile.prefer_materialize,
@@ -157,7 +157,7 @@ plan_ctx_for :: proc(profile: Handler_Profile) -> http.Plan_Context {
 		copy_budget        = profile.copy_budget,
 	}
 	// g_mode optimize → same as Server_Opts.plan_optimize (Sendfile without prefer_sendfile).
-	return http.plan_context_apply_profile(base, hp, g_mode == .Optimize)
+	return http.plan_policy_apply_profile(base, hp, g_mode == .Optimize)
 }
 
 run_shadow_plan :: proc(cmds: []http.Response_Cmd, profile: Handler_Profile) {

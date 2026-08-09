@@ -1,7 +1,8 @@
 // WebSocket session adapter (D3) on the same progressive Stream engine as SSE.
 // Minimal framing: text/binary data frames, close frame. No extensions / permessage-deflate.
 // Inbound client frames are not fully parsed in D3 v1 (send-oriented session).
-// Peer death: idle timer + stream send errors (same as SSE; no hangup-recv PIN without cancel).
+// Peer death: idle timer + stream send errors; ciphered Open also arms CT recv hangup.
+// Clear-H1: no hangup-recv PIN without cancel (same as SSE).
 package http
 
 import "core:bytes"
@@ -66,6 +67,9 @@ Start a WebSocket session after a successful ws_accept_upgrade.
 
 Writes the 101 heading (no chunked TE), attaches Session_State with proto=.Ws,
 drives Start. App uses effect_ws_text / effect_ws_binary / effect_ws_close / effect_end.
+
+Soft admission: same session cap as sse_start. Over cap → 503 (not 101), returns
+Session{} (id=0). Callers should check session_status or id != 0.
 */
 ws_start :: proc(
 	res:      ^Response,
@@ -79,8 +83,17 @@ ws_start :: proc(
 	assert(!res._session_attached, "ws_start: session already attached", loc)
 	assert(res.status == .Switching_Protocols, "ws_start: call ws_accept_upgrade first", loc)
 	conn := res._conn
-	assert(conn.session == nil, "ws_start: session exists", loc)
+	// Matrix: WebSocket over H2 is not supported (capability ⏳). Hard-fail.
+	assert(!conn.h2_active, "ws_start: WebSocket over HTTP/2 is not supported", loc)
+	ex := response_slot(res)
+	assert(ex != nil, "ws_start: no exchange slot", loc)
+	assert(ex.session == nil, "ws_start: session exists", loc)
 	assert(conn.server != nil, "ws_start: no server", loc)
+
+	// Soft admission (same global live gauge as SSE). Over cap → 503, not assert.
+	if !_session_admission_ok(conn) {
+		return _session_soft_reject(res, loc)
+	}
 
 	// 101 heading without chunked TE (raw WS frames follow).
 	if headers_has_unsafe(res.headers, "transfer-encoding") {
@@ -99,26 +112,30 @@ ws_start :: proc(
 	st.on_event = on_event
 	st.hooks = hooks
 	st.proto = .Ws
-	conn.session_epoch += 1
-	if conn.session_epoch == 0 {
-		conn.session_epoch = 1
-	}
-	st.gen = conn.session_epoch
-	st.public = Session{_conn = conn, id = st.gen}
+	// Monotonic per-slot gen (ABA-safe across free-list reuse); Session.id uses this.
+	st.gen = stream_slot_bump_gen(ex)
+	st.public = Session{_conn = conn, _slot = ex, id = st.gen}
 	idle_ms := conn.server.opts.stream_idle_timeout_ms
 	if idle_ms <= 0 {
 		idle_ms = SESSION_IDLE_TIMEOUT_MS_DEFAULT
 	}
 	st.idle_ns = i64(idle_ms) * 1_000_000
-	conn.session = st
+	ex.session = st
 	sync.atomic_add(&session_metrics_started, 1)
 	sync.atomic_add(&session_metrics_live, 1)
 
 	_stream_shrink_resp_for_session(conn)
-	_session_drive(conn, Session_Event{kind = .Start})
-	conn_temp_detach(conn)
-	if st.timer_op == 0 && st.idle_ns > 0 && !st.closed && !st.ending {
-		_session_arm_timer(conn, st.idle_ns, .Idle)
+	_session_drive_st(st, Session_Event{kind = .Start})
+	if td != nil && td.state != .Uninitialized && conn.temp_slot >= 0 {
+		conn_temp_detach(conn)
+	}
+	if st.timer_op == 0 && st.idle_ns > 0 && !st.closed && !st.ending &&
+	   td != nil && td.state != .Uninitialized && td.ring.ops != nil {
+		_session_arm_timer_st(st, st.idle_ns, .Idle)
+	}
+	// Ciphered Open: arm CT recv so peer FIN / close_notify → Client_Gone.
+	if !st.closed && !st.ending {
+		_session_arm_hangup_watch(conn)
 	}
 	return st.public
 }
@@ -150,7 +167,7 @@ _ws_write_frame :: proc(out: ^[dynamic]u8, opcode: u8, payload: []u8) {
 
 @(private)
 _ws_apply_effect :: proc(conn: ^Connection, e: Effect) {
-	r := &conn.loop.res
+	r := &conn.slot.res
 	frame: [dynamic]u8
 	frame.allocator = context.temp_allocator
 	switch e.kind {

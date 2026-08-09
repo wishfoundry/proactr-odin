@@ -29,6 +29,18 @@ Do not call this more than once.
 body :: proc(req: ^Request, max_length: int = -1, user_data: rawptr, cb: Body_Callback) {
 	assert(req._body_ok == nil, "you can only call body once per request")
 
+	// H2 oneshot eng: body already fully received by the framer.
+	if pre, has_pre := req._pre_body.?; has_pre {
+		if max_length > -1 && len(pre) > max_length {
+			req._body_ok = false
+			cb(user_data, "", .Too_Long)
+			return
+		}
+		req._body_ok = true
+		cb(user_data, string(pre), nil)
+		return
+	}
+
 	enc_header, ok := headers_get_unsafe(req.headers, "transfer-encoding")
 	if ok && strings.has_suffix(enc_header, "chunked") {
 		_body_chunked(req, max_length, user_data, cb)

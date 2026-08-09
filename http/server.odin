@@ -15,8 +15,16 @@ import "core:thread"
 import "core:time"
 
 import proactr "../proactr"
+import http2 "../http2"
+import tls_server "../tls_server"
 
 // virtual used for session_scratch arena on Server_Thread.
+
+// Multi-slot slab capacity for H2 host (PR8 structure, PR9 concurrent unary).
+// Slab is heap-allocated only on ALPN-h2 open (lazy) so clear/TLS H1 Connections
+// do not pay H2_SLOT_CAP × Stream_Slot. Concurrent oneshot uses free slots; serial
+// opt holds one in-flight (h2_serial_dispatch=true).
+H2_SLOT_CAP :: 8
 
 Server_Opts :: struct {
 	// Whether the server should accept every request that sends a "Expect: 100-continue" header automatically.
@@ -90,6 +98,19 @@ Server_Opts :: struct {
 	stream_mailbox_depth:    int,
 	// After sse_start: shrink permanent resp_buf capacity (0 → 16 KiB).
 	stream_resp_shrink_cap:  int,
+	// PR5 TLS knobs (listen_tls / handshake later). Empty PEM = TLS off.
+	// PEM slices match vapor-style in-memory cert material (not paths).
+	tls_cert_pem:            []u8,
+	tls_key_pem:             []u8,
+	// H2 dispatch: false (default) = concurrent unary — take while free slots remain.
+	// true = eng/debug single-flight (h2_serial_busy; at most one oneshot in flight).
+	// Does not implement SSE-on-H2; long-lived holds keep their slot only.
+	h2_serial_dispatch:      bool,
+	// PR10 optional SSE-vs-bulk fairness (engine RR flush). 0 → defaults (2 / 1).
+	// Interactive (sse_start H2) streams get h2_weight_interactive DATA frames per
+	// RR turn; oneshot bulk bodies use h2_weight_bulk.
+	h2_weight_interactive:   u8,
+	h2_weight_bulk:          u8,
 }
 
 // Zero-valued sizing fields mean “use host product defaults” (resolved in listen).
@@ -114,6 +135,9 @@ Default_Server_Opts := Server_Opts {
 	plan_max_iovecs      = 0, // → PLAN_DEFAULT_MAX_IOVECS at plan_context fill
 	plan_sendfile_ok     = true,
 	plan_optimize        = false, // opt-in: Writev/Sendfile wire (kernel or fallback)
+	h2_serial_dispatch   = false, // product concurrent unary; true = serial single-flight
+	h2_weight_interactive = 2,    // SSE / session streams (PR10 RR quanta)
+	h2_weight_bulk        = 1,    // oneshot large body
 }
 
 Server_State :: enum {
@@ -144,6 +168,15 @@ Server :: struct {
 	listen_closed:  Atomic(bool),
 	// Threads will decrement the wait group when they have fully closed/shutdown.
 	threads_closed: sync.Wait_Group,
+	// PR5 host TLS/bulk scrape gauges (atomics). Updated by tls_metrics_* helpers.
+	// peak_pt / peak_ct: high-water of admitted PT / sealed CT bytes; seal_units: count.
+	tls_peak_pt:    Atomic(u64),
+	tls_peak_ct:    Atomic(u64),
+	tls_seal_units: Atomic(u64),
+	// Shared TLS context (nil provider / nil ctx = TLS off; clear-H1 only).
+	// Init in listen when PEMs set; freed in serve teardown via server_tls_destroy.
+	tls_provider:   ^tls_server.Provider,
+	tls_ctx:        tls_server.Ctx,
 }
 
 // Thread-local host state: one proactr ring per worker.
@@ -298,6 +331,19 @@ listen :: proc(
 	s.conn_allocator = context.allocator
 	// No shared listen socket; workers bind with REUSEPORT (or REUSEADDR).
 	s.tcp_sock = {}
+	// PR5: init shared SSL_CTX when PEMs present. On failure: honest clear-H1 only.
+	if server_tls_wanted(s) {
+		if !server_tls_init(s) {
+			// Clear PEM knobs so accept path does not pretend TLS is live.
+			s.opts.tls_cert_pem = nil
+			s.opts.tls_key_pem = nil
+			s.tls_provider = nil
+			s.tls_ctx = nil
+		}
+	} else {
+		s.tls_provider = nil
+		s.tls_ctx = nil
+	}
 	return .None
 }
 
@@ -362,6 +408,8 @@ serve :: proc(s: ^Server, h: Handler) -> (err: proactr.Error) {
 		}
 	delete(s.threads)
 	s.threads = nil
+	// Free shared SSL_CTX (provider stays process-default if any).
+	server_tls_destroy(s)
 	return .None
 }
 
@@ -435,9 +483,10 @@ connection_set_state :: proc(c: ^Connection, s: Connection_State) -> bool {
 // In-flight invariant: at most one of {recv, send/writev/sendfile, close} is outstanding
 // per connection at a time (no concurrent SQEs, no refcount). wire.kind != .None while a
 // send/WRITEV/sendfile SQE (or soft completion) is outstanding; wire.pending_send stays valid
-// until a Send fully completes. close_pending gates submit_close; close_on_io defers
+// until a Send fully completes. tls_ct_recv_inflight is true while a CT RECV SQE is
+// outstanding (TLS hangup/HS/Open). close_pending gates submit_close; close_on_io defers
 // close until the in-flight CQE so the connection is not freed under a still-submitted
-// op (and wire.exec_bufs/iovecs/file_send_* stay live). See wire.odin for the wire executor.
+// op (and wire.exec_bufs/iovecs/file_send_*/tls_ct_rx stay live). See wire.odin.
 //
 // Memory: resp_buf is permanent (conn_allocator) and holds response wire bytes across
 // keep-alive requests. temp_allocator is request scrap only (headers/parse) — bump reset
@@ -466,31 +515,69 @@ Connection :: struct {
 	resp_buf:       [dynamic]u8,
 	loop:           Loop,
 	// Nested wire bag: mem queue, iovecs, file region, in-flight kind (see Wire_State).
+	// Clear-H1 path still drives Wire_State; Plan A pipe bags below are not yet wired.
 	wire:           Wire_State,
-	// Progressive multi-CQE stream (D0). Body mid-stream: do not clean_request_loop
-	// until stream_ending and all bytes delivered (or session Closed).
-	stream_open:           bool,
-	stream_ending:         bool,
-	stream_sent:           int,  // bytes of resp_buf fully delivered to peer
-	stream_flush_pending:  bool, // reflush after in-flight Stream CQE
-	stream_respond_fired:  bool, // on_respond once at first successful flush
-	// In-flight Stream send slab from stream_pool (len==slot_size capacity).
-	// pending_send aliases slab[:stream_send_len] during wire.kind==.Stream.
-	stream_send_slab:      []u8,
-	stream_send_len:       int, // bytes copied into slab for this arm
+	// Plan A pipe bags (POD; not yet driving clear-H1 wire path — Phase 2+)
+	// wire_conn is thin (~24 B); Seal_Queue / pipe CT[2] deferred until
+	// connection_enable_ciphered_pipe_sm (pure tests / future live seal∥send).
+	// Live oneshot only connection_enable_ciphered (flag + plan_policy). Clear-H1: Wire_State.
+	pt:        Conn_Pt_Ring,
+	wire_conn: Wire_Conn_State,
+	// tls: Tls_Pipe SM + host mem-BIO engine (opaque Conn; no SSL* public).
+	tls_pipe:  Tls_Pipe,
+	// True when TLS/cipher path is active for this conn (set by connection_enable_ciphered).
+	// plan_policy_for reads this: ciphered ⇒ no sendfile, max_write_unit = PULL_WINDOW_DEFAULT.
+	ciphered:  bool,
+	// Host-private TLS engine (0 / nil = clear). Opaque tls_server.Conn only.
+	tls_ssl:        tls_server.Conn,
+	// Network CT scratch (allocated on TLS accept; freed on destroy).
+	// Dual CT slabs: seal next window into the free slab while one sock send is
+	// in flight (live seal∥send / PR5.1). tls_ct_tx = primary; tls_ct_hold = second.
+	tls_ct_rx:      []u8,
+	tls_ct_tx:      []u8,
+	tls_ct_hold:    []u8,
+	// Ready (sealed, not yet submitted) lengths. 0 = slab free for next seal.
+	// A slab that is currently in wire.pending_send is "sending" (not ready);
+	// do not overwrite it until its CQE completes.
+	tls_ct_tx_ready_n: int,
+	tls_ct_hold_n:     int,
+	// True when wire.pending_send aliases tls_ct_hold (else aliases tls_ct_tx).
+	tls_send_is_hold: bool,
+	// True while a CT RECV SQE into tls_ct_rx is outstanding (hangup / HS / Open).
+	// Arm is idempotent; re-arm only after the matching CQE clears this bit.
+	// Prevents kqueue EV_ADD replace-udata orphan of a prior Recv (CQ-F1).
+	tls_ct_recv_inflight: bool,
+	// Remaining plaintext for windowed ciphered oneshot response (view into resp_buf).
+	tls_plain_rest: []u8,
+	// pending_send is handshake CT (vs response CT) for send-complete demux.
+	tls_hs_send:    bool,
+	// Progressive stream (SSE/WS): plain bytes sealed into the current CT flight(s).
+	// Advanced into slot.stream_sent only after full CT for that seal is delivered.
+	tls_stream_plain_n: int,
+	// H1 N=1 exchange ownership (Response + session + progressive stream). Pipe-only above;
+	// sole storage for exchange fields — no dual-write on Connection (Plan A §D).
+	slot:           Stream_Slot,
+	// H2 host (ALPN h2 after TLS Open). Engine + slots init only when negotiated
+	// (h2_host_on_open); destroy on connection_destroy. h2_slots is lazy: nil until
+	// ALPN-h2 open allocates [H2_SLOT_CAP]Stream_Slot. In-flight tracked per slot
+	// (h2_slot_used / h2_slot_sids); h2_serial_busy only when serial mode.
+	h2:              http2.Http2_Connection,
+	h2_active:       bool,
+	h2_out:          [dynamic]u8, // pending outbound H2 frame bytes (plaintext)
+	// Read cursor into h2_out — SSL_write advances this instead of front-delete
+	// (same class of O(n) memmove fix as http2 stream.pending_off).
+	h2_out_off:      int,
+	h2_serial_busy:  bool,        // serial mode: true while one oneshot is in flight
+	h2_dispatch_sid: u32,         // last taken/respond sid (respond prefers r._slot map)
+	h2_slots:        ^[H2_SLOT_CAP]Stream_Slot, // nil until h2 open; free on destroy
+	h2_slot_used:    [H2_SLOT_CAP]bool,
+	h2_slot_sids:    [H2_SLOT_CAP]u32, // stream id per slot; 0 when free
+	h2_pt_buf:       []u8,             // SSL_read PT scratch under H2 (not scanner)
+	// PR10: graceful GOAWAY drain started (engine also tracks goaway_sent).
+	// Host uses this to avoid double begin + to decide close-when-idle.
+	h2_goaway_drain: bool,
 	// Owning worker index (for mailbox affinity); set on accept.
-	worker_index:          int,
-	// PIN hangup: 1-byte recv when wire idle + only Idle timer (no concurrent send).
-	stream_pin_armed:      bool,
-	stream_pin_gen:        u32,
-	stream_pin_byte:       [1]u8,
-	// Effect-based Session (D1). Nil until sse_start / attach.
-	session:               ^Session_State,
-	// Monotonic epoch for Session.id / mailbox gen (survives free-list reuse).
-	session_epoch:         u32,
-	// Pad from sse_alloc before/during session life (conn_allocator); freed after on_close.
-	session_pad:           rawptr,
-	session_pad_size:      int,
+	worker_index:   int,
 	// True while a close SQE is outstanding.
 	close_pending:  bool,
 	// Set on shutdown for Idle/New conns that still have a pending Recv; close on that CQE.
@@ -507,12 +594,11 @@ Connection :: struct {
 	phase:          Phase_Conn,
 }
 
-// Loop/request cycle state.
+// Loop/request cycle state. Response lives on Stream_Slot (exchange ownership).
 @(private)
 Loop :: struct {
 	conn: ^Connection,
 	req:  Request,
-	res:  Response,
 }
 
 @(private)
@@ -663,7 +749,12 @@ _server_thread_begin_shutdown :: proc(s: ^Server) {
 	// Do not submit_close while Recv/Send may still be in flight (UAF on CQE).
 	// Idle/New typically have a pending recv: close_on_io → host_on_recv closes.
 	// Active: Will_Close so the response finishes, then clean_request_loop closes.
+	// H2: GOAWAY NO_ERROR drain — do not hard-close while streams / pending remain.
 	for _, conn in td.conns {
+		if conn.h2_active {
+			h2_host_on_server_closing(conn)
+			continue
+		}
 		#partial switch conn.state {
 		case .New, .Idle, .Pending:
 			conn.close_on_io = true
@@ -736,13 +827,34 @@ host_try_rearm_accept :: proc(s: ^Server) {
 }
 
 // host_submit_recv enqueues recv into the scanner buffer window.
+// When TLS Open: try SSL_read PT first (buffered app data); else arm CT recv into tls_ct_rx.
+// Clear-H1: pointer RECV into scanner window (pool-backed or dynamic). FIXED_BUF not used.
 @(private)
 host_submit_recv :: proc(conn: ^Connection, buf: []u8) -> proactr.Error {
 	assert_has_td()
 	if conn.state >= .Closing {
 		return .Closed
 	}
-	// Pointer RECV into scanner window (pool-backed or dynamic). FIXED_BUF not used.
+	// Ciphered Open: decrypt path owns network CT; scanner only sees PT.
+	if conn.tls_ssl != nil && conn.tls_pipe.state == .Open {
+		if len(buf) > 0 {
+			n := tls_host_try_ssl_read_into(conn, buf)
+			if n > 0 {
+				// SSL_read wrote into scanner free window (buf == scanner.buf[end:]).
+				scanner_on_bytes(&conn.scanner, n, false)
+				return .None
+			}
+			// n==0: WANT_READ (or hard error already closed conn).
+			if conn.state >= .Closing {
+				return .Closed
+			}
+		}
+		if tls_host_arm_recv(conn) {
+			return .None
+		}
+		return .Closed
+	}
+	// Clear path (or Handshake should not call this — HS arms via tls_host_arm_recv).
 	_, err := proactr.submit_recv(
 		&td.ring,
 		i32(conn.socket),
@@ -909,50 +1021,85 @@ host_on_accept :: proc(s: ^Server, result: i32, cqe_flags: u32) {
 	c.worker_index = td.index
 	td.conns[c.socket] = c
 	log.debugf("accepted fd=%v fixed=%v conns=%d", c.socket, c.fixed_idx, len(td.conns))
+
+	// PR5 TLS accept: mem-BIO SSL, Handshake state, arm CT recv — no clear parse yet.
+	if server_tls_live(s) {
+		if !tls_host_on_accept(c) {
+			log.errorf("TLS accept setup failed; dropping fd=%v", c.socket)
+			// No SQE yet: sync close + free.
+			net.close(c.socket)
+			if c.fixed_idx >= 0 {
+				_ = proactr.ring_file_clear(&td.ring, c.fixed_idx)
+				c.fixed_idx = -1
+			}
+			connection_destroy(c)
+			return
+		}
+		if !tls_host_arm_recv(c) {
+			connection_close(c)
+			return
+		}
+		return
+	}
+
+	// Clear HTTP/1.1 path.
 	conn_handle_reqs(c)
 }
 
 @(private)
 host_on_recv :: proc(conn: ^Connection, result: i32) {
+	// CT RECV CQE always consumes the outstanding SQE — clear flight bit first so
+	// deferred close / re-arm / destroy see a free slot (kqueue oneshot discipline).
+	if conn.tls_ssl != nil {
+		conn.tls_ct_recv_inflight = false
+	}
+
 	if conn.state >= .Closing {
 		return
 	}
 
-	// Shutdown drain for Idle/New: a Recv was in flight; close now (no UAF).
+	// Shutdown drain / deferred close: Recv was in flight; close now (no UAF).
 	if conn.close_on_io {
 		connection_close(conn)
 		return
 	}
 
 	// Stream PIN hangup (1-byte recv while long-lived stream is idle).
-	if conn.stream_pin_armed {
-		conn.stream_pin_armed = false
+	if conn.slot.stream_pin_armed {
+		conn.slot.stream_pin_armed = false
 		if result <= 0 {
-			if conn.session != nil {
+			if conn.slot.session != nil {
 				sync.atomic_add(&session_metrics_client_gone, 1)
 				_session_drive(conn, Session_Event{kind = .Client_Gone})
-				if conn.session != nil {
+				if conn.slot.session != nil {
 					_session_abort(conn)
 				}
-			} else if conn.stream_open {
+			} else if conn.slot.stream_open {
 				connection_close(conn)
 			}
 			return
 		}
 		// Unexpected data on PIN: treat as client gone for sessions.
-		if conn.session != nil {
+		if conn.slot.session != nil {
 			sync.atomic_add(&session_metrics_client_gone, 1)
 			_session_drive(conn, Session_Event{kind = .Client_Gone})
-			if conn.session != nil {
+			if conn.slot.session != nil {
 				_session_abort(conn)
 			}
 			return
 		}
-	} else if conn.stream_open && conn.session != nil {
-		// Stale PIN CQE after disarm for send: ignore body, resume flush if needed.
-		if conn.stream_flush_pending {
+	} else if conn.slot.stream_open && conn.slot.session != nil && conn.tls_ssl == nil {
+		// Clear-H1 only: stale PIN CQE after disarm for send — ignore body, resume flush.
+		// TLS sessions route CT through tls_host_on_recv (hangup / close_notify).
+		if conn.slot.stream_flush_pending {
 			_stream_try_submit(conn)
 		}
+		return
+	}
+
+	// PR5 TLS: network bytes are ciphertext (into tls_ct_rx), not scanner PT.
+	if conn.tls_ssl != nil {
+		tls_host_on_recv(conn, result)
 		return
 	}
 
@@ -997,28 +1144,38 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	}
 
 	// Invariant: at most one of {recv, send/writev/sendfile, close}. Never
-	// submit_close while wire I/O is outstanding — defer until host_on_wire CQE.
+	// submit_close while wire I/O or CT RECV is outstanding — defer until CQE.
 	// wire.kind != .None covers Send, WRITEV, and sendfile (pending_send alone is not enough:
 	// WRITEV/sendfile leave pending empty while SQE is still outstanding).
+	// tls_ct_recv_inflight covers hangup/HS CT RECV (CQ-M3).
 	if _conn_wire_in_flight(c) {
 		log.debugf("connection %i close deferred (wire I/O in flight)", c.socket)
 		c.close_on_io = true
 		return
 	}
+	if c.tls_ct_recv_inflight {
+		log.debugf("connection %i close deferred (CT recv in flight)", c.socket)
+		c.close_on_io = true
+		return
+	}
 
 	// Session teardown before close (Client_Gone path may have already destroyed).
-	if c.session != nil {
+	if c.slot.session != nil {
 		_session_destroy(c, after_wire = false)
+	} else {
+		// Orphan sse_alloc pad without session attach must not survive close.
+		stream_slot_free_pad(&c.slot)
 	}
-	// Clear progressive stream markers so free-list reuse is clean.
-	c.stream_open = false
-	c.stream_ending = false
-	c.stream_sent = 0
-	c.stream_flush_pending = false
-	c.stream_respond_fired = false
+	// Clear progressive stream markers so free-list reuse is clean (preserve gen).
+	c.slot.stream_open = false
+	c.slot.stream_ending = false
+	c.slot.stream_sent = 0
+	c.slot.stream_flush_pending = false
+	c.slot.stream_respond_fired = false
+	c.tls_stream_plain_n = 0
 	// Return any in-flight Stream slab before forgetting the pointer.
 	_stream_pool_abandon(c)
-	c.stream_pin_armed = false
+	c.slot.stream_pin_armed = false
 
 	log.debugf("closing connection: %i", c.socket)
 	c.state = .Closing
@@ -1118,9 +1275,9 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		switch err {
 		case .Method_Not_Implemented:
 			log.infof("request-line %q invalid method", token)
-			headers_set_close(&l.res.headers)
-			l.res.status = .Not_Implemented
-			respond(&l.res)
+			headers_set_close(&l.conn.slot.res.headers)
+			l.conn.slot.res.status = .Not_Implemented
+			respond(&l.conn.slot.res)
 			return
 		case .Invalid_Version_Format, .Not_Enough_Fields:
 			log.warnf("request-line %q invalid: %s", token, err)
@@ -1133,9 +1290,9 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		// Might need to support more versions later.
 		if rline.version.major != 1 || rline.version.minor > 1 {
 			log.infof("request http version not supported %v", rline.version)
-			headers_set_close(&l.res.headers)
-			l.res.status = .HTTP_Version_Not_Supported
-			respond(&l.res)
+			headers_set_close(&l.conn.slot.res.headers)
+			l.conn.slot.res.status = .HTTP_Version_Not_Supported
+			respond(&l.conn.slot.res)
 			return
 		}
 
@@ -1171,18 +1328,18 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		}
 		if !ok_hdr {
 			log.warnf("header-line %s is invalid", token)
-			headers_set_close(&l.res.headers)
-			l.res.status = .Bad_Request
-			respond(&l.res)
+			headers_set_close(&l.conn.slot.res.headers)
+			l.conn.slot.res.status = .Bad_Request
+			respond(&l.conn.slot.res)
 			return
 		}
 
 		l.conn.scanner.max_token_size -= len(token)
 		if l.conn.scanner.max_token_size <= 0 {
 			log.warn("request headers too large")
-			headers_set_close(&l.res.headers)
-			l.res.status = .Request_Header_Fields_Too_Large
-			respond(&l.res)
+			headers_set_close(&l.conn.slot.res.headers)
+			l.conn.slot.res.status = .Request_Header_Fields_Too_Large
+			respond(&l.conn.slot.res)
 			return
 		}
 
@@ -1199,9 +1356,9 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 
 		if !headers_validate_for_server(&l.req.headers) {
 			log.warn("request headers are invalid")
-			headers_set_close(&l.res.headers)
-			l.res.status = .Bad_Request
-			respond(&l.res)
+			headers_set_close(&l.conn.slot.res.headers)
+			l.conn.slot.res.status = .Bad_Request
+			respond(&l.conn.slot.res)
 			return
 		}
 
@@ -1213,9 +1370,9 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		if expect, ok := headers_get_unsafe(l.req.headers, "expect");
 		   ok && expect == "100-continue" && l.conn.server.opts.auto_expect_continue {
 
-			l.res.status = .Continue
+			l.conn.slot.res.status = .Continue
 
-			respond(&l.res)
+			respond(&l.conn.slot.res)
 			return
 		}
 
@@ -1223,8 +1380,8 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		// An options request with the "*" is a no-op/ping request to
 		// check for server capabilities and should not be sent to handlers.
 		if rline.method == .Options && rline.target.(string) == "*" {
-			l.res.status = .OK
-			respond(&l.res)
+			l.conn.slot.res.status = .OK
+			respond(&l.conn.slot.res)
 		} else {
 			// Give the handler this request as a GET, since the HTTP spec
 			// says a HEAD is identical to a GET but just without writing the body,
@@ -1240,7 +1397,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 				l.conn.phase.handle_t0 = phase_now()
 				l.conn.phase.in_handle = true
 			}
-			l.conn.server.handler.handle(&l.conn.server.handler, &l.req, &l.res)
+			l.conn.server.handler.handle(&l.conn.server.handler, &l.req, &l.conn.slot.res)
 			when HTTP_PHASE_STATS {
 				if l.conn.phase.in_handle {
 					phase_add(1, 0, 0, 0, phase_now() - l.conn.phase.handle_t0, 0, 0)
@@ -1253,7 +1410,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 	c.loop.conn = c
 	c.loop.req._scanner = &c.scanner
 	request_init(&c.loop.req, allocator)
-	response_init(&c.loop.res, c, allocator)
+	response_init(&c.slot.res, c, allocator)
 
 	c.scanner.max_token_size = c.server.opts.limit_request_line
 	scanner_scan(&c.scanner, &c.loop, on_rline1)

@@ -25,6 +25,10 @@ Response :: struct {
 	status:           Status,
 
 	// Only for internal usage.
+	// Ownership (Plan A): r lives in Stream_Slot.res; _slot is the owning exchange.
+	_slot:            ^Stream_Slot,
+	// Pipe convenience; filled only from slot.conn at init — not independent session owner.
+	// Prefer response_conn / response_slot in new code; keep _conn for hot-path compat.
 	_conn:            ^Connection,
 	// TODO/PERF: with some internal refactoring, we should be able to write directly to the
 	// connection (maybe a small buffer in this struct).
@@ -43,11 +47,14 @@ Response :: struct {
 	_profile:         Handler_Profile,
 	_body_mw:         Body_Middleware,
 	_body_mw_user:    rawptr,
-	// Phase 5: Response_Stream path (mutually exclusive with body cmds / body_reserve).
-	// Body middleware does NOT run on stream data; rewrite headers before begin_stream.
-	_streaming:       bool,
+	// Response-path guards (request facade — NOT dual copies of slot wire fields).
+	// Layering: slot.stream_* / slot.session are exchange/wire truth; these flags
+	// close the oneshot body API (body_*, respond) when progressive stream or
+	// session has taken the response path. Do not read slot.stream_open for body_* asserts.
+	_streaming:       bool, // progressive begin_stream or session attach closed oneshot body cmds
 	_stream_ended:    bool,
-	// D1: Session owns the wire after sse_start; respond/stream_* assert if set.
+	// True after sse_start/ws_start; mirrors slot.session != nil for assert paths without
+	// requiring callers to touch Stream_Slot. Cleared with session destroy / response_init.
 	_session_attached: bool,
 	// Middleware respond hooks (fixed slots; zero alloc). Fired LIFO at respond
 	// before wire assembly. See response_on_respond. Not a public "resume" API —
@@ -59,11 +66,40 @@ Response :: struct {
 	_on_complete_n:   u8,
 }
 
+// Exchange slot for this response (slot first; falls back to pipe.slot).
+@(private)
+response_slot :: proc(r: ^Response) -> ^Stream_Slot {
+	if r == nil {
+		return nil
+	}
+	if r._slot != nil {
+		return r._slot
+	}
+	if r._conn != nil {
+		return &r._conn.slot
+	}
+	return nil
+}
+
+// Pipe for this response (prefer slot.conn; then _conn convenience).
+@(private)
+response_conn :: proc(r: ^Response) -> ^Connection {
+	if r == nil {
+		return nil
+	}
+	if r._slot != nil && r._slot.conn != nil {
+		return r._slot.conn
+	}
+	return r._conn
+}
+
 // response_init binds r to c.resp_buf (permanent, conn_allocator). Request temp
 // arena is scrap only — never backs the response wire buffer.
 // Capacity is retained across keep-alive requests; len is cleared each request.
+// r is &conn.slot.res (exchange ownership). Binds _slot = &c.slot and _conn = c.
 @(private)
-response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocator) {
+// response_init binds r to the exchange slot (default: H1 conn.slot; H2 passes h2_slots[i]).
+response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocator, slot: ^Stream_Slot = nil) {
 	r.status = .Not_Found
 	r.sent = false
 	r._heading_written = false
@@ -79,6 +115,13 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 	r._session_attached = false
 	r._on_respond_n = 0
 	r._on_complete_n = 0
+	// Ensure pipe backref on slot; Response owns via _slot (exchange), _conn is pipe sugar.
+	ex := slot
+	if ex == nil {
+		ex = &c.slot
+	}
+	ex.conn = c
+	r._slot = ex
 	r._conn = c
 	r.cookies = {}
 	r.cookies.allocator = allocator
@@ -86,6 +129,7 @@ response_init :: proc(r: ^Response, c: ^Connection, allocator := context.allocat
 
 	// Ensure permanent buffer has initial capacity; keep any grown capacity.
 	// Size from Server_Opts.resp_buf_initial (resolved at listen; default HOST_RESP_BUF_INITIAL).
+	// H2 eng reuses the same pipe resp_buf for body materialize scrap (not H1 wire).
 	resp_init := c.server.opts.resp_buf_initial
 	if cap(c.resp_buf) < resp_init {
 		if c.resp_buf != nil {
@@ -206,34 +250,35 @@ _response_fire_complete_hooks :: proc(r: ^Response) {
 	r._on_complete_n = 0
 }
 
-// Base Plan_Context from connection/server/backend (no handler profile).
-// Safe with nil conn (pure defaults + platform sendfile when POSIX).
+// Base Plan_Policy from connection/server/backend (no handler profile).
+// Public four + host meters for plan_body / wire. Safe with nil conn
+// (pure defaults + platform sendfile when POSIX).
 // Safe off worker thread: thread-local td is nil → fixed_files stays false (no ring touch).
-plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
-	ctx := plan_context_default()
+plan_policy_for :: proc(conn: ^Connection) -> Plan_Policy {
+	p := plan_policy_default()
 
-	// Platform: plain TCP sendfile is OK on Linux/Darwin (no TLS in host yet).
+	// Platform: plain TCP sendfile is OK on Linux/Darwin (no cipher path in host yet).
 	when ODIN_OS == .Linux || ODIN_OS == .Darwin {
-		ctx.sendfile_ok = true
+		p.sendfile_ok = true
 	} else {
-		ctx.sendfile_ok = false
+		p.sendfile_ok = false
 	}
 
 	if conn != nil && conn.server != nil {
 		opts := conn.server.opts
 		if opts.plan_max_iovecs > 0 {
-			ctx.max_iovecs = opts.plan_max_iovecs
+			p.max_iovecs = opts.plan_max_iovecs
 		}
-		// 0 → PLAN_DEFAULT_COPY_BUDGET (already in plan_context_default).
+		// 0 → PLAN_DEFAULT_COPY_BUDGET (already in plan_policy_default).
 		if opts.plan_copy_budget > 0 {
-			ctx.preferred_copy_budget = opts.plan_copy_budget
+			p.preferred_copy_budget = opts.plan_copy_budget
 		}
 		// plan_sendfile_ok: Default_Server_Opts true on posix; false disables.
 		// Non-posix remains false from the when above.
 		// After profile: plan_optimize keeps this capability; without optimize,
-		// prefer_sendfile (or prefer_gather) is required (plan_context_apply_profile).
+		// prefer_sendfile (or prefer_gather) is required (plan_policy_apply_profile).
 		when ODIN_OS == .Linux || ODIN_OS == .Darwin {
-			ctx.sendfile_ok = opts.plan_sendfile_ok
+			p.sendfile_ok = opts.plan_sendfile_ok
 		}
 	}
 
@@ -241,21 +286,36 @@ plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
 	// Field read only (no SQE). Only while the ring is live for handlers (Running/Closing).
 	// Off-worker / tests: td is nil → leave false. Avoids Cleaning/Closed after ring_destroy.
 	if td != nil && (td.state == .Running || td.state == .Closing) {
-		ctx.fixed_files = proactr.ring_has_fixed_files(&td.ring)
+		p.fixed_files = proactr.ring_has_fixed_files(&td.ring)
 	}
 
-	// No TLS path yet; zero-copy send unknown.
-	ctx.tls = false
-	ctx.zero_copy_send = false
-	return ctx
+	// Cipher path (PR5 host): when conn.ciphered, force no sendfile / no zc and
+	// window mem coalesces to PIPE_MAX_WRITE_UNIT_DEFAULT (= PULL_WINDOW). Clear-H1 unchanged.
+	if conn != nil && conn.ciphered {
+		p.ciphered = true
+		p.sendfile_ok = false
+		p.zero_copy_send = false
+		p.max_write_unit = u32(PIPE_MAX_WRITE_UNIT_DEFAULT)
+	} else {
+		p.ciphered = false
+		p.zero_copy_send = false
+		p.max_write_unit = 0
+	}
+	return p
 }
 
-// Live Plan_Context for advanced handlers: server/conn/backend + Response profile bias.
+// Base public Plan_Context only (four fields). Handlers that need constraints without host meters.
+// Safe with nil conn. For plan_body / wire use plan_policy_for / plan_policy instead.
+plan_context_for :: proc(conn: ^Connection) -> Plan_Context {
+	return plan_policy_context(plan_policy_for(conn))
+}
+
+// Full policy for wire / plan_body: server/conn/backend + Response profile bias.
 // Response._profile is request-scoped (cleared in response_init); not atomic — same
 // single-worker-per-conn model as the rest of Response.
 // optimize flag matches wire gate (plan_optimize | prefer_gather | prefer_sendfile)
 // so Sendfile policy aligns with what response_send will actually run.
-plan_context :: proc(r: ^Response) -> Plan_Context {
+plan_policy :: proc(r: ^Response) -> Plan_Policy {
 	conn: ^Connection
 	profile: Handler_Profile
 	optimize := false
@@ -264,7 +324,13 @@ plan_context :: proc(r: ^Response) -> Plan_Context {
 		profile = r._profile
 		optimize = _response_wire_use_optimize(r)
 	}
-	return plan_context_apply_profile(plan_context_for(conn), profile, optimize)
+	return plan_policy_apply_profile(plan_policy_for(conn), profile, optimize)
+}
+
+// Live public Plan_Context for advanced handlers (four fields only).
+// Same fill/profile as plan_policy; host meters stripped.
+plan_context :: proc(r: ^Response) -> Plan_Context {
+	return plan_policy_context(plan_policy(r))
 }
 
 // Optimize-policy plan for tests/handlers (shadow of what plan_optimize wire would choose).
@@ -272,9 +338,9 @@ plan_context :: proc(r: ^Response) -> Plan_Context {
 // Wire path uses plan_body when plan_optimize / prefer_gather; otherwise materialize-only.
 response_plan_preview :: proc(r: ^Response) -> Plan_Result {
 	if r == nil {
-		return plan_body({}, plan_context(r))
+		return plan_body({}, plan_policy(r))
 	}
-	ctx := plan_context(r)
+	ctx := plan_policy(r)
 	if r._cmd_count == 0 {
 		return plan_body({}, ctx)
 	}
@@ -664,8 +730,8 @@ stream_end :: proc(s: ^Response_Stream, loc := #caller_location) {
 
 	// Progressive terminal path (oneshot = ending+flush with no prior mid-flush).
 	r.sent = true
-	conn.stream_open = true
-	conn.stream_ending = true
+	conn.slot.stream_open = true
+	conn.slot.stream_ending = true
 	// D0 default: stream end → Will_Close (no keep-alive reuse of stream conns).
 	headers_set_close(&r.headers)
 	_ = connection_set_state(conn, .Will_Close)
@@ -698,6 +764,7 @@ _stream_flush_response :: proc(r: ^Response, loc := #caller_location) {
 
 // Submit unsent stream bytes if wire idle; else mark flush_pending.
 // On first successful arm, fire on_respond once (TTFB / access log).
+// Ciphered / TLS: encrypt from resp_buf view via tls_host_stream_try_submit (no pool slabs).
 @(private)
 _stream_try_submit :: proc(conn: ^Connection) {
 	assert_has_td()
@@ -706,46 +773,53 @@ _stream_try_submit :: proc(conn: ^Connection) {
 	}
 
 	// Keep resp_buf synced from response binding when present.
-	r := &conn.loop.res
+	r := &conn.slot.res
 	if r._buf.buf != nil {
 		conn.resp_buf = r._buf.buf
 	}
 
-	unsent := len(conn.resp_buf) - conn.stream_sent
+	// PR6: progressive stream over TLS H1 — peer expects ciphertext.
+	// Same entry as clear Stream (ws_start / sse_start / begin_stream); no plain-send bypass.
+	if conn.ciphered || conn.tls_ssl != nil {
+		tls_host_stream_try_submit(conn)
+		return
+	}
+
+	unsent := len(conn.resp_buf) - conn.slot.stream_sent
 	if unsent <= 0 {
-		if conn.stream_ending {
+		if conn.slot.stream_ending {
 			_stream_finish(conn)
 		}
 		return
 	}
 
 	if conn.wire.kind != .None {
-		conn.stream_flush_pending = true
+		conn.slot.stream_flush_pending = true
 		return
 	}
 
-	conn.stream_open = true
+	conn.slot.stream_open = true
 
 	// First flush: on_respond once (heading final, body may still be streaming).
-	if !conn.stream_respond_fired {
-		conn.stream_respond_fired = true
+	if !conn.slot.stream_respond_fired {
+		conn.slot.stream_respond_fired = true
 		_response_fire_respond_hooks(r)
 	}
 
-	// Copy next chunk into a fixed pool slab (never alias resp_buf).
+	// Clear-H1: copy next chunk into a fixed pool slab (never alias resp_buf).
 	// Cap per CQE at STREAM_BUF_SIZE so large bodies are multi-CQE by design.
-	to_send := conn.resp_buf[conn.stream_sent:]
+	to_send := conn.resp_buf[conn.slot.stream_sent:]
 	slab := stream_pool_take()
 	if slab == nil {
 		// Admission fail: keep data, mark pending, try later.
-		conn.stream_flush_pending = true
+		conn.slot.stream_flush_pending = true
 		sync.atomic_add(&session_metrics_backpressure, 1)
 		return
 	}
 	n := min(len(to_send), len(slab))
 	copy(slab[:n], to_send[:n])
-	conn.stream_send_slab = slab
-	conn.stream_send_len = n
+	conn.slot.stream_send_slab = slab
+	conn.slot.stream_send_len = n
 
 	// Explicitly inactive multi-op queue so a prior path cannot leak exec_n.
 	conn.wire.exec_i = 0
@@ -753,14 +827,14 @@ _stream_try_submit :: proc(conn: ^Connection) {
 	conn.wire.pending_send = slab[:n]
 	if len(conn.wire.pending_send) == 0 {
 		stream_pool_put(slab)
-		conn.stream_send_slab = nil
-		conn.stream_send_len = 0
+		conn.slot.stream_send_slab = nil
+		conn.slot.stream_send_len = 0
 		return
 	}
 	if err := host_submit_send(conn); err != .None {
 		stream_pool_put(slab)
-		conn.stream_send_slab = nil
-		conn.stream_send_len = 0
+		conn.slot.stream_send_slab = nil
+		conn.slot.stream_send_len = 0
 		conn.wire.pending_send = nil
 		_wire_fail(conn, "submit_send (stream) failed: %v", err)
 		return
@@ -776,32 +850,32 @@ _stream_compact_delivered :: proc(conn: ^Connection) {
 	if conn.wire.kind != .None {
 		return
 	}
-	if conn.stream_sent <= 0 {
+	if conn.slot.stream_sent <= 0 {
 		return
 	}
 	// Compact when any prefix is delivered (sessions should not keep history).
 	// Non-session progressive streams still thrash less: only if >= 1 KiB or ending.
-	if conn.session == nil && conn.stream_sent < 1024 && !conn.stream_ending {
+	if conn.slot.session == nil && conn.slot.stream_sent < 1024 && !conn.slot.stream_ending {
 		return
 	}
 	n := len(conn.resp_buf)
-	if conn.stream_sent >= n {
+	if conn.slot.stream_sent >= n {
 		clear(&conn.resp_buf)
-		conn.stream_sent = 0
+		conn.slot.stream_sent = 0
 	} else {
 		// memmove unsent to front
-		unsent := n - conn.stream_sent
-		copy(conn.resp_buf[:unsent], conn.resp_buf[conn.stream_sent:][:unsent])
+		unsent := n - conn.slot.stream_sent
+		copy(conn.resp_buf[:unsent], conn.resp_buf[conn.slot.stream_sent:][:unsent])
 		resize(&conn.resp_buf, unsent)
-		conn.stream_sent = 0
+		conn.slot.stream_sent = 0
 	}
 	// Sync Response buffer view.
-	r := &conn.loop.res
+	r := &conn.slot.res
 	if r._buf.buf.allocator.procedure != nil {
 		r._buf.buf = conn.resp_buf
 	}
 	// Soft shrink oversized capacity for session streams (target ≤ 64 KiB).
-	if conn.session != nil && cap(conn.resp_buf) > 64 * 1024 && len(conn.resp_buf) < 16 * 1024 {
+	if conn.slot.session != nil && cap(conn.resp_buf) > 64 * 1024 && len(conn.resp_buf) < 16 * 1024 {
 		// Reallocate smaller (keep content).
 		small := make([dynamic]u8, len(conn.resp_buf), 16 * 1024, conn.server.conn_allocator)
 		copy(small[:], conn.resp_buf[:])
@@ -815,15 +889,16 @@ _stream_compact_delivered :: proc(conn: ^Connection) {
 @(private)
 _stream_finish :: proc(conn: ^Connection) {
 	// Session terminal path may still need destroy (End already set ending).
-	if conn.session != nil {
+	if conn.slot.session != nil {
 		_session_destroy(conn, after_wire = true)
 	}
 	_stream_pin_disarm(conn)
-	conn.stream_open = false
-	conn.stream_ending = false
-	conn.stream_sent = 0
-	conn.stream_flush_pending = false
-	conn.stream_respond_fired = false
+	conn.slot.stream_open = false
+	conn.slot.stream_ending = false
+	conn.slot.stream_sent = 0
+	conn.slot.stream_flush_pending = false
+	conn.slot.stream_respond_fired = false
+	conn.tls_stream_plain_n = 0
 	_stream_pool_abandon(conn)
 	conn.wire.pending_send = nil
 	conn.wire.kind = .None
@@ -855,18 +930,19 @@ _stream_shrink_resp_for_session :: proc(conn: ^Connection) {
 	}
 	delete(conn.resp_buf)
 	conn.resp_buf = small
-	r := &conn.loop.res
+	r := &conn.slot.res
 	if r._buf.buf.allocator.procedure != nil {
 		r._buf.buf = conn.resp_buf
 	}
 }
 
-// PIN hangup: intentionally disabled without portable recv cancel.
+// PIN hangup (clear-H1): intentionally disabled without portable recv cancel.
 // Arming a 1-byte recv while waiting for External/Timer creates a hang (cannot send
 // until peer activity, and peer data becomes Client_Gone). Peer death is detected via:
 //   - stream send error (Client_Gone)
 //   - Idle_Timeout watchdog
-// Re-enable only with IORING_ASYNC_CANCEL (or equivalent) to drop PIN before send.
+// Ciphered Open: _session_arm_hangup_watch arms CT recv instead (peer FIN / close_notify).
+// Re-enable clear PIN only with IORING_ASYNC_CANCEL (or equivalent) to drop PIN before send.
 @(private)
 _stream_pin_arm :: proc(conn: ^Connection) {
 	_ = conn
@@ -874,7 +950,44 @@ _stream_pin_arm :: proc(conn: ^Connection) {
 
 @(private)
 _stream_pin_disarm :: proc(conn: ^Connection) {
-	conn.stream_pin_armed = false
+	conn.slot.stream_pin_armed = false
+}
+
+// After stream mid-idle (or session attach): arm peer-close watch.
+// Ciphered long-lived → tls_host_arm_recv (single-flight via tls_ct_recv_inflight);
+// clear → PIN no-op (see _stream_pin_arm).
+@(private)
+_session_arm_hangup_watch :: proc(conn: ^Connection) {
+	if conn == nil || conn.state >= .Closing {
+		return
+	}
+	if _conn_wire_in_flight(conn) {
+		return
+	}
+	// CT hangup only for long-lived Open+ssl (session or progressive stream).
+	if _session_hangup_uses_tls_ct(conn) {
+		if conn.slot.session == nil && !conn.slot.stream_open {
+			return
+		}
+		if td == nil {
+			return
+		}
+		if !tls_host_arm_recv(conn) {
+			// CQ-M1: do not silently drop hangup watch on long-lived.
+			log.errorf("TLS: hangup CT arm failed fd=%v", conn.socket)
+		}
+		return
+	}
+	_stream_pin_arm(conn)
+}
+
+// Pure gate: ciphered Open with SSL (no ring). Used by hangup arm + tests.
+@(private)
+_session_hangup_uses_tls_ct :: proc(conn: ^Connection) -> bool {
+	return conn != nil &&
+		conn.ciphered &&
+		conn.tls_ssl != nil &&
+		conn.tls_pipe.state == .Open
 }
 
 Response_Writer :: struct {
@@ -1103,8 +1216,12 @@ _response_format_heading_ex :: proc(
 @(private)
 response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) {
 	assert(!r.sent, "response has already been sent", loc)
-	assert(!r._session_attached && conn.session == nil, "session attached; cannot respond", loc)
-	assert(!conn.stream_open || r._stream_ended, "progressive stream open; use stream_end", loc)
+	ex := response_slot(r)
+	if ex == nil {
+		ex = &conn.slot
+	}
+	assert(!r._session_attached && ex.session == nil, "session attached; cannot respond", loc)
+	assert(!ex.stream_open || r._stream_ended, "progressive stream open; use stream_end", loc)
 	// Note: on_respond hooks fire in response_send_got_body after body discard
 	// may adjust status — so access logs see the status that will hit the wire.
 	r.sent = true
@@ -1121,6 +1238,13 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 		}
 
 		response_send_got_body(res, will_close)
+	}
+
+	// PR8 H2 oneshot: request body is already fully framed (or empty). Skip H1
+	// scanner discard; body() still works via Request._pre_body for handlers.
+	if conn.h2_active {
+		response_send_got_body(r, false)
+		return
 	}
 
 	// RFC 7230 6.3: A server MUST read
@@ -1756,6 +1880,19 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	// Hooks must not call respond. One-shot clear inside fire.
 	_response_fire_respond_hooks(r)
 
+	// PR8 H2 oneshot: never assemble H1 status-line / Content-Length wire.
+	// Body middleware runs; h2_host maps status/headers/body → HPACK + DATA.
+	if conn != nil && conn.h2_active {
+		if r._streaming {
+			assert(r._stream_ended, "stream_end required before respond when streaming")
+		}
+		if r._cmd_count > 0 {
+			_response_apply_body_middleware(r)
+		}
+		h2_host_send_response(conn, r)
+		return
+	}
+
 	// Wire assembly (Phase 3–5):
 	//  1) Heading already written (body_reserve / Response_Writer / Response_Stream)
 	//     → single-buffer send as-is (stream path does not use plan_body).
@@ -1776,8 +1913,9 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if r._cmd_count > 0 {
 			cmds := r._cmds[:r._cmd_count]
 			used_opt := false
-			if _response_wire_use_optimize(r) {
-				plan := plan_body(cmds, plan_context(r))
+			// Ciphered: materialize only — no Writev/Sendfile (PT must pass SSL_write).
+			if _response_wire_use_optimize(r) && !(conn != nil && conn.ciphered) {
+				plan := plan_body(cmds, plan_policy(r))
 				// Kernel/multi gather only pays off for ≥2 body segments (assembled).
 				// Single Static+heading writev crashed under load on bastion — materialize.
 				n_mem := 0
@@ -1825,6 +1963,14 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		return
 	}
 
+	// PR5 ciphered: window plain through SSL_write → CT drain → multi-CQE send.
+	// Clear-H1: single host_submit_send of full body.
+	if conn.ciphered && conn.tls_ssl != nil {
+		conn.tls_plain_rest = buf
+		tls_host_flush_response(conn)
+		return
+	}
+
 	conn.wire.pending_send = buf
 	if err := host_submit_send(conn); err != .None {
 		// No CQE will clear this; leaving wire.kind set would make connection_close
@@ -1844,7 +1990,7 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Middleware on_complete (LIFO): wire done, request arena still live.
-	_response_fire_complete_hooks(&conn.loop.res)
+	_response_fire_complete_hooks(&conn.slot.res)
 
 	// Ensure multi-buffer / file-send queue is inactive before reusing conn.
 	// Must nil exec_bufs (not only exec_n) so keep-alive cannot retain dangling
@@ -1853,15 +1999,20 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 
 	// Progressive stream + session markers (D0/D1). Session should already be
 	// destroyed in _stream_finish; clear residual state for keep-alive reuse.
-	conn.stream_open = false
-	conn.stream_ending = false
-	conn.stream_sent = 0
-	conn.stream_flush_pending = false
-	conn.stream_respond_fired = false
-	conn.stream_send_slab = nil
-	conn.stream_send_len = 0
-	conn.stream_pin_armed = false
+	conn.slot.stream_open = false
+	conn.slot.stream_ending = false
+	conn.slot.stream_sent = 0
+	conn.slot.stream_flush_pending = false
+	conn.slot.stream_respond_fired = false
+	conn.slot.stream_send_slab = nil
+	conn.slot.stream_send_len = 0
+	conn.slot.stream_pin_armed = false
+	conn.tls_stream_plain_n = 0
 	// Do not free session here — _stream_finish / connection_close own that.
+	// Orphan sse_alloc pad (no session): free so keep-alive does not hold heap.
+	if conn.slot.session == nil {
+		stream_slot_free_pad(&conn.slot)
+	}
 
 	// Request scrap: reset or re-attach if session detach returned the slot.
 	if conn.temp_slot < 0 {
@@ -1882,11 +2033,11 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 
 	// Keep permanent response capacity; drop only request-scoped Response fields.
 	// Sync any growth that happened after last explicit sync (empty body path, etc.).
-	if conn.loop.res._buf.buf != nil {
-		conn.resp_buf = conn.loop.res._buf.buf
+	if conn.slot.res._buf.buf != nil {
+		conn.resp_buf = conn.slot.res._buf.buf
 	}
 	clear(&conn.resp_buf)
-	conn.loop.res = {}
+	conn.slot.res = {}
 
 	if c, ok := close.?; (ok && c) || conn.state == .Will_Close {
 		connection_close(conn)

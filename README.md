@@ -48,7 +48,15 @@ docs/                    # Architecture notes
 
 ## Status
 
-**Scaffold / greenfield.** Core packages and third_party peers are in place for baseline work. The proactor ring and HTTP host are intentional stubs — not production.
+**Scaffold / greenfield** for the proactor ring and clear-H1 host maturity. HTTPS H1
+(oneshot + SSE/WS) and **experimental product HTTP/2** (TLS ALPN `h2`: concurrent
+unary streams + multi-SSE; offline M1–M6 gates) are available when OpenSSL dynlib
+and PEMs are configured — same handler API; WS-on-H2 still ⏳. Not a peer-matrix
+H2 RPS claim until bastion numbers exist. See
+[`docs/CAPABILITY_MATRIX.md`](docs/CAPABILITY_MATRIX.md) and
+[`docs/design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](docs/design/dual-tls-h2/H2_PRODUCT_BASELINE.md).
+Operators: multi-worker / admission / shutdown edges in
+[`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md).
 
 ## Dependencies
 

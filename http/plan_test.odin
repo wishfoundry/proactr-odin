@@ -9,6 +9,7 @@ Run: odin test http/ -all-packages  (from repo root), or:
 */
 
 import "core:bytes"
+import "core:reflect"
 import "core:strings"
 import "core:testing"
 
@@ -39,9 +40,19 @@ expect_kinds :: proc(t: ^testing.T, got: []Exec_Op_Kind, want: []Exec_Op_Kind, l
 }
 
 @(private = "file")
-kinds_of :: proc(cmds: []Response_Cmd, ctx: Plan_Context, buf: []Exec_Op_Kind) -> []Exec_Op_Kind {
+kinds_of :: proc(cmds: []Response_Cmd, ctx: Plan_Policy, buf: []Exec_Op_Kind) -> []Exec_Op_Kind {
 	n := plan_exec_kinds(cmds, ctx, buf)
 	return buf[:n]
+}
+
+@(private = "file")
+kinds_contain :: proc(kinds: []Exec_Op_Kind, k: Exec_Op_Kind) -> bool {
+	for g in kinds {
+		if g == k {
+			return true
+		}
+	}
+	return false
 }
 
 // Large enough that prefer_copy is false under PLAN_DEFAULT_COPY_BUDGET (4096).
@@ -55,7 +66,7 @@ _small_b: [32]u8
 
 @(test)
 test_plan_empty_is_write_slice :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
 	got := kinds_of({}, ctx, buf[:])
 	expect_kinds(t, got, { .Write_Slice })
@@ -67,7 +78,7 @@ test_plan_empty_is_write_slice :: proc(t: ^testing.T) {
 @(test)
 test_plan_small_static_prefers_materialize :: proc(t: ^testing.T) {
 	// Under preferred_copy_budget → single Write_Slice (not Writev).
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.preferred_copy_budget = 4096
 	cmds := []Response_Cmd{cmd_static(_small_a[:])}
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
@@ -79,11 +90,11 @@ test_plan_small_static_prefers_materialize :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_multi_static_writev_when_large :: proc(t: ^testing.T) {
-	// Three large borrowed slices, no TLS, plenty of iovecs, over copy budget.
-	ctx := plan_context_default()
+	// Three large borrowed slices, clear path, plenty of iovecs, over copy budget.
+	ctx := plan_policy_default()
 	ctx.preferred_copy_budget = 4096
 	ctx.max_iovecs = 64
-	ctx.tls = false
+	ctx.ciphered = false
 
 	// 5KiB * 3 = 15KiB > 4096
 	a := cmd_static(_big_body[:])
@@ -102,11 +113,12 @@ test_plan_multi_static_writev_when_large :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_plan_multi_static_tls_forces_materialize :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+test_plan_multi_static_ciphered_forces_materialize :: proc(t: ^testing.T) {
+	// Cipher path: no gather/sendfile (was tls).
+	ctx := plan_policy_default()
 	ctx.preferred_copy_budget = 0 // disable size-based copy preference
 	ctx.max_iovecs = 64
-	ctx.tls = true
+	ctx.ciphered = true
 
 	cmds := []Response_Cmd {
 		cmd_static(_big_body[:]),
@@ -120,10 +132,10 @@ test_plan_multi_static_tls_forces_materialize :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_iovec_budget_forces_materialize :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.preferred_copy_budget = 0
 	ctx.max_iovecs = 2 // heading + 1 body only; two bodies need 3
-	ctx.tls = false
+	ctx.ciphered = false
 
 	cmds := []Response_Cmd {
 		cmd_static(_big_body[:]),
@@ -135,10 +147,41 @@ test_plan_iovec_budget_forces_materialize :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_plan_file_sendfile :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+test_plan_max_write_unit_forces_materialize :: proc(t: ^testing.T) {
+	// max_write_unit > 0 and total_body > unit → materialize on mem path (v0).
+	// 0 = ignore (default); large multi-static would otherwise Writev.
+	ctx := plan_policy_default()
+	ctx.preferred_copy_budget = 0
+	ctx.max_iovecs = 64
+	ctx.ciphered = false
+	ctx.max_write_unit = u32(len(_big_body)) // one slice fits; two exceed
+
+	cmds := []Response_Cmd {
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+	}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got := kinds_of(cmds, ctx, buf[:])
+	expect_kinds(t, got, { .Write_Slice })
+	testing.expect(t, plan_body(cmds, ctx).materialized)
+
+	// Unit large enough for both → Writev again.
+	ctx.max_write_unit = u32(2 * len(_big_body))
+	got2 := kinds_of(cmds, ctx, buf[:])
+	expect_kinds(t, got2, { .Writev })
+
+	// max_write_unit does not block clear Sendfile (OS windows file path).
+	ctx.max_write_unit = 1
 	ctx.sendfile_ok = true
-	ctx.tls = false
+	sf := plan_body([]Response_Cmd{cmd_file(1, 0, 1_000_000)}, ctx)
+	testing.expect(t, _plan_is_sendfile_wire(sf))
+}
+
+@(test)
+test_plan_file_sendfile :: proc(t: ^testing.T) {
+	ctx := plan_policy_default()
+	ctx.sendfile_ok = true
+	ctx.ciphered = false
 
 	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
@@ -153,9 +196,9 @@ test_plan_file_sendfile :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_file_no_sendfile_is_copy_then_write :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.sendfile_ok = false
-	ctx.tls = false
+	ctx.ciphered = false
 
 	cmds := []Response_Cmd{cmd_file(3, 100, 50)}
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
@@ -168,10 +211,11 @@ test_plan_file_no_sendfile_is_copy_then_write :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_plan_file_tls_disables_sendfile :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+test_plan_file_ciphered_disables_sendfile :: proc(t: ^testing.T) {
+	// sendfile_ok && ciphered → still Copy_Into (no kernel sendfile under cipher).
+	ctx := plan_policy_default()
 	ctx.sendfile_ok = true
-	ctx.tls = true
+	ctx.ciphered = true
 
 	cmds := []Response_Cmd{cmd_file(1, 0, 10)}
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
@@ -181,9 +225,9 @@ test_plan_file_tls_disables_sendfile :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_mixed_mem_and_file_sendfile :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.sendfile_ok = true
-	ctx.tls = false
+	ctx.ciphered = false
 	ctx.max_iovecs = 16
 	ctx.preferred_copy_budget = 0
 
@@ -198,7 +242,7 @@ test_plan_mixed_mem_and_file_sendfile :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_mixed_without_sendfile_materializes :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.sendfile_ok = false
 	ctx.preferred_copy_budget = 0
 
@@ -263,7 +307,7 @@ test_cmd_caps_static_and_file :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_bytes_and_static_same_memory_path :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.preferred_copy_budget = 0
 	ctx.max_iovecs = 16
 
@@ -276,24 +320,223 @@ test_plan_bytes_and_static_same_memory_path :: proc(t: ^testing.T) {
 	expect_kinds(t, got, { .Writev })
 }
 
-// --- Phase 2: Handler_Profile, plan_context, body middleware -----------------
+// =============================================================================
+// E0.8 / PR3 — pure plan_body policy table (Plan A R4 merge-blocker gate)
+// File+ciphered → no Sendfile; gather only on clear path; max_write_unit coalesce.
+// Host meters (ciphered, max_iovecs) live on Plan_Policy / Plan_Host only.
+// =============================================================================
+
+@(test)
+test_e0_8_plan_body_policy_table :: proc(t: ^testing.T) {
+	// Table cases 1–6: File / mem / max_write_unit under ciphered + sendfile_ok knobs.
+	// Case name is the gate statement; expect_kinds is the full op sequence.
+
+	file_cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
+	mem_cmds := []Response_Cmd {
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+		cmd_static(_big_body[:]),
+	}
+	// 15 KiB > PLAN_DEFAULT_COPY_BUDGET so size gate does not force materialize alone.
+	testing.expect(t, i64(3 * len(_big_body)) > i64(PLAN_DEFAULT_COPY_BUDGET))
+
+	// 1. File + ciphered=true → never Sendfile (Copy_Into / materialize path only).
+	{
+		ctx := plan_policy_default()
+		ctx.sendfile_ok = true
+		ctx.ciphered = true
+		buf: [PLAN_MAX_OPS]Exec_Op_Kind
+		got := kinds_of(file_cmds, ctx, buf[:])
+		testing.expectf(t, !kinds_contain(got, .Sendfile), "case1 ciphered file must not Sendfile: %v", got)
+		expect_kinds(t, got, { .Copy_Into, .Write_Slice })
+		testing.expect(t, !plan_body(file_cmds, ctx).materialized) // Copy_Into path, not full materialize
+	}
+
+	// 2. File + sendfile_ok=true + ciphered=false → Sendfile present.
+	{
+		ctx := plan_policy_default()
+		ctx.sendfile_ok = true
+		ctx.ciphered = false
+		buf: [PLAN_MAX_OPS]Exec_Op_Kind
+		got := kinds_of(file_cmds, ctx, buf[:])
+		testing.expectf(t, kinds_contain(got, .Sendfile), "case2 clear sendfile_ok must Sendfile: %v", got)
+		expect_kinds(t, got, { .Write_Slice, .Sendfile })
+	}
+
+	// 3. File + sendfile_ok=false + ciphered=false → no Sendfile.
+	{
+		ctx := plan_policy_default()
+		ctx.sendfile_ok = false
+		ctx.ciphered = false
+		buf: [PLAN_MAX_OPS]Exec_Op_Kind
+		got := kinds_of(file_cmds, ctx, buf[:])
+		testing.expectf(t, !kinds_contain(got, .Sendfile), "case3 !sendfile_ok must not Sendfile: %v", got)
+		expect_kinds(t, got, { .Copy_Into, .Write_Slice })
+	}
+
+	// 4. Memory bodies + ciphered=true → no Writev (materialize).
+	{
+		ctx := plan_policy_default()
+		ctx.preferred_copy_budget = 0
+		ctx.max_iovecs = 64
+		ctx.ciphered = true
+		buf: [PLAN_MAX_OPS]Exec_Op_Kind
+		got := kinds_of(mem_cmds, ctx, buf[:])
+		testing.expectf(t, !kinds_contain(got, .Writev), "case4 ciphered mem must not Writev: %v", got)
+		expect_kinds(t, got, { .Write_Slice })
+		testing.expect(t, plan_body(mem_cmds, ctx).materialized)
+	}
+
+	// 5. Memory + ciphered=false + large max_iovecs + copy budget under total → Writev.
+	//    (preferred_copy_budget high enough as a default size gate, but body exceeds it.)
+	{
+		ctx := plan_policy_default()
+		ctx.preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET // 4096; total 15KiB > budget
+		ctx.max_iovecs = 64
+		ctx.ciphered = false
+		buf: [PLAN_MAX_OPS]Exec_Op_Kind
+		got := kinds_of(mem_cmds, ctx, buf[:])
+		testing.expectf(t, kinds_contain(got, .Writev), "case5 clear gather path must Writev: %v", got)
+		expect_kinds(t, got, { .Writev })
+		testing.expect(t, !plan_body(mem_cmds, ctx).materialized)
+	}
+
+	// 6. max_write_unit > 0 and body larger → materialize (mem path).
+	{
+		ctx := plan_policy_default()
+		ctx.preferred_copy_budget = 0
+		ctx.max_iovecs = 64
+		ctx.ciphered = false
+		ctx.max_write_unit = u32(len(_big_body)) // one slice fits; three exceed
+		buf: [PLAN_MAX_OPS]Exec_Op_Kind
+		got := kinds_of(mem_cmds, ctx, buf[:])
+		testing.expectf(t, !kinds_contain(got, .Writev), "case6 over max_write_unit must materialize: %v", got)
+		expect_kinds(t, got, { .Write_Slice })
+		testing.expect(t, plan_body(mem_cmds, ctx).materialized)
+	}
+}
+
+@(test)
+test_e0_8_conn_caps_plan_host_sendfile_path :: proc(t: ^testing.T) {
+	// Case 7: Conn_Caps / plan_host_from_caps
+	//   Ciphered → plan_host.ciphered true → plan_body never Sendfile even if sendfile_ok.
+	//   Sendfile_Possible without Ciphered → host clear; policy filled correctly allows Sendfile.
+
+	// Ciphered bit forces host.ciphered.
+	host_ciph := plan_host_from_caps({.Ciphered, .Sendfile_Possible})
+	testing.expect(t, host_ciph.ciphered)
+	// Public sendfile_ok still true if platform would allow, but ciphered kills Sendfile.
+	ctx_pub := plan_context_default()
+	ctx_pub.sendfile_ok = true
+	pol_ciph := plan_policy_from(ctx_pub, host_ciph)
+	testing.expect(t, pol_ciph.ciphered)
+	testing.expect(t, pol_ciph.sendfile_ok) // public flag may still be true
+	file_cmds := []Response_Cmd{cmd_file(3, 0, 4096)}
+	buf: [PLAN_MAX_OPS]Exec_Op_Kind
+	got_ciph := kinds_of(file_cmds, pol_ciph, buf[:])
+	testing.expectf(
+		t,
+		!kinds_contain(got_ciph, .Sendfile),
+		"Ciphered host must not Sendfile even with sendfile_ok: %v",
+		got_ciph,
+	)
+	expect_kinds(t, got_ciph, { .Copy_Into, .Write_Slice })
+
+	// Clear path: Sendfile_Possible without Ciphered → ciphered false; fill policy for Sendfile.
+	host_clear := plan_host_from_caps({.Sendfile_Possible, .Zero_Copy_Send})
+	testing.expect(t, !host_clear.ciphered)
+	ctx_clear := Plan_Context {
+		sendfile_ok           = true, // live fill: !ciphered && H1 && platform
+		preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET,
+		max_write_unit        = 0,
+		zero_copy_send        = true,
+	}
+	pol_clear := plan_policy_from(ctx_clear, host_clear)
+	testing.expect(t, !pol_clear.ciphered)
+	testing.expect(t, pol_clear.sendfile_ok)
+	got_clear := kinds_of(file_cmds, pol_clear, buf[:])
+	testing.expectf(t, kinds_contain(got_clear, .Sendfile), "clear Sendfile_Possible policy must Sendfile: %v", got_clear)
+	expect_kinds(t, got_clear, { .Write_Slice, .Sendfile })
+}
+
+@(test)
+test_e0_8_plan_context_public_four_fields_only :: proc(t: ^testing.T) {
+	// Case 8: Public Plan_Context has only 4 fields — plan_context() does not expose max_iovecs.
+	// Runtime field count via reflect (compile would also fail if callers used max_iovecs on Plan_Context).
+	names := reflect.struct_field_names(Plan_Context)
+	testing.expect_value(t, len(names), 4)
+	// Exact public four (order is struct declaration order).
+	testing.expect_value(t, names[0], "sendfile_ok")
+	testing.expect_value(t, names[1], "preferred_copy_budget")
+	testing.expect_value(t, names[2], "max_write_unit")
+	testing.expect_value(t, names[3], "zero_copy_send")
+	for n in names {
+		testing.expectf(t, n != "max_iovecs", "Plan_Context must not expose max_iovecs")
+		testing.expectf(t, n != "ciphered", "Plan_Context must not expose ciphered")
+		testing.expectf(t, n != "fixed_files", "Plan_Context must not expose fixed_files")
+		testing.expectf(t, n != "output_ring_free", "Plan_Context must not expose output_ring_free")
+		testing.expectf(t, n != "sqe_budget", "Plan_Context must not expose sqe_budget")
+	}
+
+	// plan_context(res) returns public four only; host meters only on plan_policy.
+	r: Response
+	pub := plan_context(&r)
+	testing.expect_value(t, pub.preferred_copy_budget, PLAN_DEFAULT_COPY_BUDGET)
+	testing.expect_value(t, pub.max_write_unit, u32(0))
+	testing.expect(t, !pub.sendfile_ok)
+	testing.expect(t, !pub.zero_copy_send)
+	// size: public surface smaller than full policy (host meters extra).
+	testing.expect(t, size_of(Plan_Context) < size_of(Plan_Policy))
+	pol := plan_policy(&r)
+	testing.expect_value(t, pol.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
+	// Projecting policy → public drops host meters.
+	back := plan_policy_context(pol)
+	testing.expect_value(t, back.preferred_copy_budget, pub.preferred_copy_budget)
+	testing.expect_value(t, back.max_write_unit, pub.max_write_unit)
+	testing.expect_value(t, back.sendfile_ok, pub.sendfile_ok)
+	testing.expect_value(t, back.zero_copy_send, pub.zero_copy_send)
+}
+
+// --- Phase 2: Handler_Profile, plan_context / plan_policy, body middleware ---
+
+@(test)
+test_plan_context_public_is_four_fields :: proc(t: ^testing.T) {
+	// Public Plan_Context is exactly four semantic fields (no host meters).
+	// E0.8 case 8 (reflect) is test_e0_8_plan_context_public_four_fields_only.
+	ctx := plan_context_default()
+	testing.expect_value(t, ctx.preferred_copy_budget, PLAN_DEFAULT_COPY_BUDGET)
+	testing.expect_value(t, ctx.max_write_unit, u32(0))
+	testing.expect(t, !ctx.sendfile_ok)
+	testing.expect(t, !ctx.zero_copy_send)
+	// Host meters live on Plan_Policy / Plan_Host only.
+	host := plan_host_default()
+	testing.expect_value(t, host.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
+	testing.expect(t, !host.ciphered)
+	testing.expect(t, !host.fixed_files)
+	p := plan_policy_from(ctx, host)
+	testing.expect_value(t, p.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
+	testing.expect_value(t, plan_policy_context(p).preferred_copy_budget, PLAN_DEFAULT_COPY_BUDGET)
+}
 
 @(test)
 test_plan_context_apply_profile_prefer_materialize :: proc(t: ^testing.T) {
 	// prefer_materialize → huge copy budget forces materialize even for large multi-static.
-	base := plan_context_default()
+	base := plan_policy_default()
 	base.preferred_copy_budget = 0
 	base.max_iovecs = 64
-	base.tls = false
+	base.ciphered = false
 	base.sendfile_ok = true
 
 	profile := Handler_Profile {
 		prefer_materialize = true,
 	}
-	ctx := plan_context_apply_profile(base, profile)
+	ctx := plan_policy_apply_profile(base, profile)
 	testing.expect_value(t, ctx.preferred_copy_budget, max(u32))
 	// prefer_materialize always clears sendfile_ok.
 	testing.expect(t, !ctx.sendfile_ok)
+	// Host meters pass through.
+	testing.expect_value(t, ctx.max_iovecs, u16(64))
+	testing.expect(t, !ctx.ciphered)
 
 	cmds := []Response_Cmd {
 		cmd_static(_big_body[:]),
@@ -309,16 +552,16 @@ test_plan_context_apply_profile_prefer_materialize :: proc(t: ^testing.T) {
 @(test)
 test_plan_context_apply_profile_prefer_gather :: proc(t: ^testing.T) {
 	// prefer_gather + copy_budget=0 disables size gate → Writev for multi large static.
-	base := plan_context_default()
+	base := plan_policy_default()
 	base.preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET
 	base.max_iovecs = 64
-	base.tls = false
+	base.ciphered = false
 
 	profile := Handler_Profile {
 		prefer_gather = true,
 		copy_budget   = 0,
 	}
-	ctx := plan_context_apply_profile(base, profile)
+	ctx := plan_policy_apply_profile(base, profile)
 	testing.expect_value(t, ctx.preferred_copy_budget, u32(0))
 
 	cmds := []Response_Cmd {
@@ -332,20 +575,20 @@ test_plan_context_apply_profile_prefer_gather :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_context_apply_profile_prefer_sendfile :: proc(t: ^testing.T) {
-	base := plan_context_default()
+	base := plan_policy_default()
 	base.sendfile_ok = true
-	base.tls = false
+	base.ciphered = false
 
 	// Without optimize and without prefer_sendfile → no Sendfile (conservative).
-	ctx_off := plan_context_apply_profile(base, {}, false)
+	ctx_off := plan_policy_apply_profile(base, {}, false)
 	testing.expect(t, !ctx_off.sendfile_ok)
 
 	// prefer_sendfile alone enables when base allows (per-route opt-in).
-	ctx_on := plan_context_apply_profile(base, Handler_Profile{prefer_sendfile = true}, false)
+	ctx_on := plan_policy_apply_profile(base, Handler_Profile{prefer_sendfile = true}, false)
 	testing.expect(t, ctx_on.sendfile_ok)
 
 	// plan_optimize / optimize=true keeps base sendfile without prefer_sendfile.
-	ctx_opt := plan_context_apply_profile(base, {}, true)
+	ctx_opt := plan_policy_apply_profile(base, {}, true)
 	testing.expect(t, ctx_opt.sendfile_ok)
 
 	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
@@ -357,10 +600,10 @@ test_plan_context_apply_profile_prefer_sendfile :: proc(t: ^testing.T) {
 @(test)
 test_plan_context_optimize_allows_sendfile_without_prefer :: proc(t: ^testing.T) {
 	// Server plan_optimize path: zero profile still gets Sendfile when base allows.
-	base := plan_context_default()
+	base := plan_policy_default()
 	base.sendfile_ok = true
-	base.tls = false
-	ctx := plan_context_apply_profile(base, {}, true)
+	base.ciphered = false
+	ctx := plan_policy_apply_profile(base, {}, true)
 	testing.expect(t, ctx.sendfile_ok)
 	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
 	buf: [PLAN_MAX_OPS]Exec_Op_Kind
@@ -371,11 +614,11 @@ test_plan_context_optimize_allows_sendfile_without_prefer :: proc(t: ^testing.T)
 @(test)
 test_plan_context_prefer_sendfile_cannot_promote :: proc(t: ^testing.T) {
 	// Server/platform said no: prefer_sendfile must not force sendfile_ok true.
-	base := plan_context_default()
+	base := plan_policy_default()
 	base.sendfile_ok = false
-	base.tls = false
+	base.ciphered = false
 
-	ctx := plan_context_apply_profile(base, Handler_Profile{prefer_sendfile = true})
+	ctx := plan_policy_apply_profile(base, Handler_Profile{prefer_sendfile = true})
 	testing.expect(t, !ctx.sendfile_ok)
 
 	cmds := []Response_Cmd{cmd_file(7, 0, 1_000_000)}
@@ -386,16 +629,36 @@ test_plan_context_prefer_sendfile_cannot_promote :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_plan_context_apply_profile_public_only :: proc(t: ^testing.T) {
+	// plan_context_apply_profile biases four-field Plan_Context only.
+	base := plan_context_default()
+	base.sendfile_ok = true
+	base.preferred_copy_budget = PLAN_DEFAULT_COPY_BUDGET
+	ctx := plan_context_apply_profile(base, Handler_Profile{prefer_gather = true, copy_budget = 0}, false)
+	testing.expect_value(t, ctx.preferred_copy_budget, u32(0))
+	testing.expect(t, ctx.sendfile_ok) // prefer_gather soft-opens sendfile
+	ctx_mat := plan_context_apply_profile(base, Handler_Profile{prefer_materialize = true})
+	testing.expect_value(t, ctx_mat.preferred_copy_budget, max(u32))
+	testing.expect(t, !ctx_mat.sendfile_ok)
+}
+
+@(test)
 test_plan_context_zero_profile_is_defaults :: proc(t: ^testing.T) {
 	// Response with zero profile and no conn: no optimize wire → sendfile stays off
 	// even if platform base would allow (no plan_optimize / prefer_*).
+	// plan_context returns public four only.
 	r: Response
 	ctx := plan_context(&r)
 	testing.expect_value(t, ctx.preferred_copy_budget, PLAN_DEFAULT_COPY_BUDGET)
-	testing.expect_value(t, ctx.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
-	testing.expect(t, !ctx.tls)
+	testing.expect_value(t, ctx.max_write_unit, u32(0))
 	testing.expect(t, !ctx.zero_copy_send)
 	testing.expect(t, !ctx.sendfile_ok)
+	// Full policy still carries host defaults (not on public Plan_Context).
+	pol := plan_policy(&r)
+	testing.expect_value(t, pol.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
+	testing.expect(t, !pol.ciphered)
+	testing.expect(t, !pol.fixed_files)
+	testing.expect(t, !pol.sendfile_ok)
 }
 
 @(test)
@@ -405,12 +668,22 @@ test_plan_context_profile_on_response :: proc(t: ^testing.T) {
 	ctx := plan_context(&r)
 	testing.expect_value(t, ctx.preferred_copy_budget, max(u32))
 
-	// response_plan_preview uses profile-biased context.
+	// response_plan_preview uses profile-biased policy (plan_body).
 	_response_append_cmd(&r, cmd_static(_big_body[:]))
 	_response_append_cmd(&r, cmd_static(_big_body[:]))
 	preview := response_plan_preview(&r)
 	testing.expect(t, preview.materialized)
 	testing.expect_value(t, preview.ops[0].kind, Exec_Op_Kind.Write_Slice)
+}
+
+@(test)
+test_plan_host_from_caps_ciphered :: proc(t: ^testing.T) {
+	// Conn_Caps fill helper: Ciphered bit → host.ciphered.
+	h := plan_host_from_caps({.Ciphered, .Sendfile_Possible})
+	testing.expect(t, h.ciphered)
+	testing.expect_value(t, h.max_iovecs, PLAN_DEFAULT_MAX_IOVECS)
+	h2 := plan_host_from_caps({.Sendfile_Possible, .Zero_Copy_Send})
+	testing.expect(t, !h2.ciphered)
 }
 
 @(test)
@@ -607,7 +880,7 @@ test_conn_advance_exec_bufs_skip_empty_and_zero_progress :: proc(t: ^testing.T) 
 @(test)
 test_plan_is_writev_wire_gate :: proc(t: ^testing.T) {
 	// Multi large static → Writev and wire-eligible.
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.preferred_copy_budget = 0
 	ctx.max_iovecs = 64
 	cmds := []Response_Cmd {
@@ -624,9 +897,9 @@ test_plan_is_writev_wire_gate :: proc(t: ^testing.T) {
 	testing.expect(t, !_plan_is_writev_wire(m))
 
 	// Sendfile plan is not wire Writev (uses Phase 4 file path instead).
-	ctx2 := plan_context_default()
+	ctx2 := plan_policy_default()
 	ctx2.sendfile_ok = true
-	ctx2.tls = false
+	ctx2.ciphered = false
 	sf := plan_body([]Response_Cmd{cmd_file(1, 0, 100)}, ctx2)
 	testing.expect(t, !_plan_is_writev_wire(sf))
 	testing.expect(t, _plan_is_sendfile_wire(sf))
@@ -634,9 +907,9 @@ test_plan_is_writev_wire_gate :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_is_sendfile_wire_gate :: proc(t: ^testing.T) {
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.sendfile_ok = true
-	ctx.tls = false
+	ctx.ciphered = false
 
 	// Pure file → Write_Slice + Sendfile → wire-eligible.
 	sf := plan_body([]Response_Cmd{cmd_file(7, 0, 1024)}, ctx)
@@ -782,9 +1055,9 @@ test_file_send_after_pread_math :: proc(t: ^testing.T) {
 test_plan_mem_after_file_materializes :: proc(t: ^testing.T) {
 	// File then Static would be reordered by Writev+Sendfile (mem always before file).
 	// Policy must materialize to preserve cmd order on the wire.
-	ctx := plan_context_default()
+	ctx := plan_policy_default()
 	ctx.sendfile_ok = true
-	ctx.tls = false
+	ctx.ciphered = false
 	ctx.max_iovecs = 16
 	ctx.preferred_copy_budget = 0
 
@@ -979,7 +1252,7 @@ test_response_stream_mutual_exclusion_flags :: proc(t: ^testing.T) {
 @(test)
 test_stream_not_counted_as_plan_body :: proc(t: ^testing.T) {
 	// Empty cmds → plan_body is empty Write_Slice; stream is not a cmd kind.
-	r := plan_body({}, plan_context_default())
+	r := plan_body({}, plan_policy_default())
 	testing.expect(t, r.materialized)
 	testing.expect_value(t, r.op_count, 1)
 	// Response_Cmd_Kind has only Static/Bytes/File — no Stream kind (G5).

@@ -12,11 +12,13 @@
 | Temp-slot detach | **Done** — after Start drive; later drives use 64 KiB worker `session_scratch` |
 | Shrink `resp_buf` for sessions | **Done** — at attach + compact after CQE |
 | Compact delivered prefix | **Done** — after apply + after Stream CQE |
-| Hangup detection | **Idle timer + send error** (PIN recv disabled without cancel API — hang with External) |
+| Hangup detection | **Idle timer + send error** (clear PIN disabled without cancel); **ciphered Open** arms CT recv for peer FIN / close_notify → `.Client_Gone` |
 | Mailbox wake | **Partial** — `mail_pending` → `ring_wait(0)` (not eventfd) |
 | Idle vs Heartbeat timers | **Done** |
 | Timer UAF / session epoch | **Done** |
 | WS outbound + upgrade | **Done** (send-oriented; no inbound frame parse) |
+| Soft 503 session admission | **Done** — over `max_sessions_per_worker × threads` → 503 + invalid `Session` (id=0); metric `session_metrics_admission_reject`; check `session_status` / `id != 0` |
+| TLS H1 SSE/WS (PR6) | **Done (same App Contract)** — `sse_start` / `ws_start` over ciphered progressive stream (`_stream_try_submit` → `tls_host_stream_try_submit`); listen PEMs enable host TLS (no handler `#if`). Not H2 / not M6. |
 
 ---
 
@@ -69,11 +71,15 @@ on_ticks :: proc(sess: ^http.Session, ev: http.Session_Event, user: rawptr) -> h
 
 ## Wire model
 
-- `Wire_Kind.Stream` — one send in flight  
-- Send body from **pool slab** (≤8 KiB per CQE); unsent tail stays in compacting `resp_buf`  
-- After CQE: return slab, compact, reflush if more data  
-- Hangup: **no PIN recv** (disabled without cancel); use Idle_Timeout + send errors  
-- Error/close paths always `stream_pool_put` via `_stream_pool_abandon`
+- `Wire_Kind.Stream` — one send in flight (clear H1)  
+- Clear send: body from **pool slab** (≤8 KiB per CQE); unsent tail stays in compacting `resp_buf`  
+- After clear CQE: return slab, compact, reflush if more data  
+- Hangup: clear-H1 **no PIN recv** (disabled without cancel) → Idle_Timeout + send errors; TLS H1 arms **CT recv** on session attach / mid-idle (Open+ssl) → peer FIN / close_notify → `.Client_Gone`  
+- Ciphered progressive send (PR6): plain frames still written into `resp_buf`; `_stream_try_submit` routes to `tls_host_stream_try_submit` (windowed `SSL_write` → `tls_ct_tx`; **no** stream_pool slabs; no plain-send bypass)  
+- Mid-session TLS CT complete does **not** oneshot-clean the request loop  
+- Error/close paths: clear slabs via `_stream_pool_abandon`; TLS CT uses `tls_ct_tx`  
+
+Implementer notes: [`TLS_H1.md`](TLS_H1.md). Ship scorecard: [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).
 
 ---
 
@@ -81,8 +87,10 @@ on_ticks :: proc(sess: ^http.Session, ev: http.Session_Event, user: rawptr) -> h
 
 1. True eventfd / EVFILT_USER wake (today: zero wait when `mail_pending`)  
 2. Portable recv cancel (PIN disarm without waiting for CQE)  
-3. Soft 503 on session/pool admission instead of assert  
+3. Soft 503 on **stream pool** bytes admission (session cap soft path is **Done**)  
 4. Full WS inbound frame codec  
+5. H2 / M6 concurrent multi-SSE — **Done offline (PR9)** — matrix ✅; see `H2_PRODUCT_BASELINE.md`  
+
 
 ---
 
@@ -90,5 +98,8 @@ on_ticks :: proc(sess: ^http.Session, ev: http.Session_Event, user: rawptr) -> h
 
 ```bash
 odin test http -o:none
+# includes PR6: ciphered session attach (SSE/WS), hangup CT gate, tls_host stream long-lived
 odin test http/middleware -o:none
 ```
+
+Manual TLS SSE (OpenSSL + PEMs): `examples/https_demo` `/sse` — see [`TLS_H1.md`](TLS_H1.md).

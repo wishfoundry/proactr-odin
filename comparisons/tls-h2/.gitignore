@@ -1,0 +1,5 @@
+**/server.bin
+ntex/target/
+drogon/build/
+drogon/install/
+certs/

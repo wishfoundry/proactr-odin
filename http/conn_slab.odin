@@ -112,16 +112,16 @@ conn_temp_reset :: proc(c: ^Connection) {
 // conn_temp_detach returns the temp slot to the worker free pool and clears the arena.
 // Used after long-lived session attach so idle SSE does not hold ~4.5 MiB scrap.
 // Safe only when no live pointers into the scrap remain (heading already in resp_buf).
+// Offline/unit (no worker td): drop arena only — no pool return.
 @(private)
 conn_temp_detach :: proc(c: ^Connection) {
-	assert_has_td()
 	if c.temp_slot < 0 {
 		return
 	}
 	conn_temp_reset(c)
 	// Drop arena binding so no accidental use of detached region.
 	c.temp_allocator = {}
-	if td != nil && c.temp_slot < len(td.temp_regions) {
+	if td != nil && td.state != .Uninitialized && c.temp_slot < len(td.temp_regions) {
 		append(&td.temp_free, c.temp_slot)
 	}
 	c.temp_slot = -1
@@ -238,19 +238,35 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.wire.file_send_off = 0
 	c.wire.file_send_remaining = 0
 	// file_send_buf retained across free-list reuse (allocated lazily).
-	// Progressive stream + session: reset; pool slabs returned via stream_pool_put.
-	c.stream_open = false
-	c.stream_ending = false
-	c.stream_sent = 0
-	c.stream_flush_pending = false
-	c.stream_respond_fired = false
-	c.stream_send_slab = nil
-	c.stream_send_len = 0
-	c.stream_pin_armed = false
+	// Progressive stream + session on Stream_Slot: zero exchange; preserve gen; wire pipe.
+	stream_slot_reset_exchange(&c.slot, c)
+	// Plan A pipe bags (POD init; clear-H1 still uses Wire_State)
+	// ciphered starts false; seal_q remains nil until connection_enable_ciphered_pipe_sm.
+	c.ciphered = false
+	pt_ring_init(&c.pt)
+	wire_conn_init(&c.wire_conn)
+	tls_pipe_init(&c.tls_pipe)
+	// TLS engine fields cleared; buffers allocated only on TLS accept.
+	c.tls_ssl = nil
+	c.tls_ct_rx = nil
+	c.tls_ct_tx = nil
+	c.tls_ct_recv_inflight = false
+	c.tls_plain_rest = nil
+	c.tls_hs_send = false
+	c.tls_stream_plain_n = 0
+	// PR8 H2 eng fields (engine + slot slab only on ALPN h2 open; slots stay nil for H1).
+	c.h2_active = false
+	c.h2_serial_busy = false
+	c.h2_dispatch_sid = 0
+	c.h2_goaway_drain = false
+	c.h2_out = nil
+	c.h2_pt_buf = nil
+	c.h2_slots = nil // allocated in h2_host_on_open; freed in h2_host_destroy
+	for i in 0 ..< H2_SLOT_CAP {
+		c.h2_slot_used[i] = false
+		c.h2_slot_sids[i] = 0
+	}
 	c.worker_index = -1
-	c.session = nil
-	c.session_pad = nil
-	c.session_pad_size = 0
 	c.close_pending = false
 	c.close_on_io = false
 	c.fixed_idx = -1
@@ -288,24 +304,28 @@ connection_destroy :: proc(c: ^Connection) {
 	c.wire.file_send_off = 0
 	c.wire.file_send_remaining = 0
 	// Keep file_send_buf allocation for reuse.
-	// Session must already be destroyed (stream_finish / connection_close path).
-	c.stream_open = false
-	c.stream_ending = false
-	c.stream_sent = 0
-	c.stream_flush_pending = false
-	c.stream_respond_fired = false
-	c.stream_send_slab = nil
-	c.stream_send_len = 0
-	c.stream_pin_armed = false
-	c.session = nil
-	c.session_pad = nil
-	c.session_pad_size = 0
+	// Defensive drain: close path should already have destroyed session / freed pad;
+	// still repair if a bypass left session or pad live (never zero-without-free).
+	if c.slot.session != nil {
+		_session_destroy(c, after_wire = false)
+	}
+	// Capture any growth from the last Response binding before slot reset zeros res.
+	if c.slot.res._buf.buf != nil {
+		c.resp_buf = c.slot.res._buf.buf
+	}
+	// stream_slot_reset_exchange frees any remaining session_pad then zeros exchange
+	// (incl. Response). Preserve gen for ABA across free-list reuse.
+	stream_slot_reset_exchange(&c.slot, c)
+	// Free SSL + CT scratch + seal_q / ciphered (avoid leak on free-list).
+	tls_host_conn_destroy(c)
+	// PR8 H2 eng teardown (safe if never h2).
+	h2_host_destroy(c)
+	// Reset Plan A pipe bags so free-list reuse starts clean (clear-H1 default).
+	pt_ring_init(&c.pt)
+	wire_conn_init(&c.wire_conn)
+	tls_pipe_init(&c.tls_pipe)
 	c.close_pending = false
 	c.close_on_io = false
-	// Capture any growth from the last Response binding; keep capacity on free list.
-	if c.loop.res._buf.buf != nil {
-		c.resp_buf = c.loop.res._buf.buf
-	}
 	c.loop = {}
 
 	scanner_prepare(c)
@@ -332,7 +352,7 @@ connection_destroy :: proc(c: ^Connection) {
 			}
 			c.wire.file_send_buf = nil
 		}
-		c.stream_send_slab = nil
+		c.slot.stream_send_slab = nil
 		free(c, c.server.conn_allocator)
 	}
 }
@@ -361,8 +381,8 @@ _server_thread_free_slab :: proc(t: ^Server_Thread) {
 			}
 			// Ownership is Connection.resp_buf; r._buf.buf is a header copy that
 			// may have grown past a stale resp_buf. Sync first (same as destroy).
-			if c.loop.res._buf.buf != nil {
-				c.resp_buf = c.loop.res._buf.buf
+			if c.slot.res._buf.buf != nil {
+				c.resp_buf = c.slot.res._buf.buf
 			}
 			if c.resp_buf != nil {
 				delete(c.resp_buf)
@@ -377,8 +397,8 @@ _server_thread_free_slab :: proc(t: ^Server_Thread) {
 				}
 				c.wire.file_send_buf = nil
 			}
-			c.stream_send_slab = nil
-			c.loop.res._buf = {}
+			c.slot.stream_send_slab = nil
+			c.slot.res._buf = {}
 			c.temp_slot = -1
 			c.temp_allocator = {}
 		}

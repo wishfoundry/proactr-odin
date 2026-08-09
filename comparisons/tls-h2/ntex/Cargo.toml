@@ -1,0 +1,21 @@
+[package]
+name = "ntex-tls-h2"
+version = "0.1.0"
+edition = "2021"
+
+# Linux bastion: neon-uring + openssl (ALPN h2|http/1.1 via ntex bind_openssl).
+# Non-Linux: tokio + openssl so the crate typechecks on macOS; do not publish.
+[target.'cfg(target_os = "linux")'.dependencies]
+ntex = { version = "2", default-features = false, features = ["neon-uring", "openssl"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ntex = { version = "2", default-features = false, features = ["tokio", "openssl"] }
+
+[dependencies]
+openssl = "0.10"
+once_cell = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
