@@ -373,6 +373,8 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 }
 
 // reactor_finish_oneshot: clean oneshot exchange after full CT + plain drained.
+// Defer clean_request_loop to end of kevent turn — sync finish often runs nested
+// inside scanner/handler (respond → flush → here); reentrant conn_handle_req UAF.
 @(private)
 reactor_finish_oneshot :: proc(conn: ^Connection) {
 	if conn == nil {
@@ -386,7 +388,7 @@ reactor_finish_oneshot :: proc(conn: ^Connection) {
 		pt_release(&conn.pt, conn.pt.admitted)
 	}
 	path_metrics_note_req()
-	clean_request_loop(conn)
+	reactor_defer_clean(conn)
 }
 
 // reactor_finish_h2: duplex arm + exchange finish after h2_out/wBIO/residual empty.

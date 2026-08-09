@@ -538,15 +538,26 @@ Connection :: struct {
 	// reactor product paths). Stream residual-first also uses tx; dual_ct_try_ahead no-op.
 	dual_ct:        Dual_Ct,
 	// Darwin reactor residual: dual_ct.tx[reactor_res_off:][:reactor_res_n].
-	// reactor_h1: residual WRITE armed via host_submit_send (façade re-entry); must be set
-	// before submit so soft_cq_send_completes is not charged and CQE demuxes to reactor.
+	// reactor_h1: residual WRITE armed (native EVFILT_WRITE on reactor kq); must be set
+	// before arm so soft_cq_send_completes is not charged and write demuxes to reactor.
 	// reactor_fairness_yield: reserved (fairness uses product re-entry, not soft-Nop).
+	// reactor_read/write_armed: native oneshot interest on the reactor kqueue (P5).
+	// reactor_recv_buf: buffer for next native RECV (CT or clear scanner window).
 	reactor_res_off:         int,
 	reactor_res_n:           int,
 	reactor_h1:              bool,
 	reactor_fairness_yield:  bool,
-	// True while a CT RECV SQE into tls_ct_rx is outstanding (hangup / HS / Open).
-	// Arm is idempotent; re-arm only after the matching CQE clears this bit.
+	reactor_read_armed:      bool,
+	reactor_write_armed:     bool,
+	// reactor_need_clean: oneshot finished sync inside scan/handler — defer
+	// clean_request_loop until end of kevent turn (avoid reentrant scanner UAF).
+	reactor_need_clean:      bool,
+	// reactor_scan_injected: host_submit_recv wrote PT into scanner free window
+	// without reentrant scanner_on_bytes; scanner_scan should re-enter parse.
+	reactor_scan_injected:   bool,
+	reactor_recv_buf:        []u8,
+	// True while a CT RECV into tls_ct_rx is outstanding (hangup / HS / Open).
+	// Arm is idempotent; re-arm only after the matching completion clears this bit.
 	// Prevents kqueue EV_ADD replace-udata orphan of a prior Recv (CQ-F1).
 	tls_ct_recv_inflight: bool,
 	// Remaining plaintext for windowed ciphered oneshot response.
@@ -658,6 +669,12 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 			} else {
 				log.debugf("ring_set_listen_file failed: %v (using raw listen fd)", serr)
 			}
+		}
+
+		// Darwin P5: native reactor kqueue owns product sockets; proactr only timers.
+		when ODIN_OS == .Darwin {
+			server_reactor_worker_loop(s)
+			return
 		}
 
 		server_date_refresh()
@@ -776,44 +793,49 @@ _server_thread_begin_shutdown :: proc(s: ^Server) {
 // host_listen_reuseport is implemented in server_linux.odin / server_stub.odin.
 
 // host_submit_accept enqueues one accept SQE (user = Server), multishot by default.
+// Darwin P5: native reactor EVFILT_READ on listen (no proactr submit_accept).
 // On failure returns false and does not set accept_pending (caller should set needs_accept_rearm).
 @(private)
 host_submit_accept :: proc(s: ^Server) -> bool {
-	if atomic_load(&s.closing) || td.state >= .Closing {
-		return false
-	}
-	if atomic_load(&s.listen_closed) || td.listen_fd == {} {
-		return false
-	}
+	when ODIN_OS == .Darwin {
+		return reactor_host_submit_accept(s)
+	} else {
+		if atomic_load(&s.closing) || td.state >= .Closing {
+			return false
+		}
+		if atomic_load(&s.listen_closed) || td.listen_fd == {} {
+			return false
+		}
 
-	listen_fd := i32(td.listen_fd)
-	// Only use FIXED_FILE for accept when slot 0 was successfully installed.
-	fixed_listen: i32 = -1
-	if td.listen_fixed {
-		fixed_listen = 0
-	}
+		listen_fd := i32(td.listen_fd)
+		// Only use FIXED_FILE for accept when slot 0 was successfully installed.
+		fixed_listen: i32 = -1
+		if td.listen_fixed {
+			fixed_listen = 0
+		}
 
-	// Prefer continuous accept (uring multishot); fall back to one-shot.
-	continuous := td.accept_multishot
-	_, err := proactr.submit_accept(
-		&td.ring,
-		listen_fd,
-		s,
-		continuous,
-		fixed_listen,
-	)
-	if err != .None && continuous {
-		// Retry one-shot once.
-		td.accept_multishot = false
-		_, err = proactr.submit_accept(&td.ring, listen_fd, s, false, fixed_listen)
+		// Prefer continuous accept (uring multishot); fall back to one-shot.
+		continuous := td.accept_multishot
+		_, err := proactr.submit_accept(
+			&td.ring,
+			listen_fd,
+			s,
+			continuous,
+			fixed_listen,
+		)
+		if err != .None && continuous {
+			// Retry one-shot once.
+			td.accept_multishot = false
+			_, err = proactr.submit_accept(&td.ring, listen_fd, s, false, fixed_listen)
+		}
+		if err != .None {
+			log.errorf("submit_accept: %v", err)
+			return false
+		}
+		td.accept_pending = true
+		td.needs_accept_rearm = false
+		return true
 	}
-	if err != .None {
-		log.errorf("submit_accept: %v", err)
-		return false
-	}
-	td.accept_pending = true
-	td.needs_accept_rearm = false
-	return true
 }
 
 // host_try_rearm_accept retries submit_accept after a prior failure.
@@ -836,6 +858,7 @@ host_try_rearm_accept :: proc(s: ^Server) {
 // host_submit_recv enqueues recv into the scanner buffer window.
 // When TLS Open: try SSL_read PT first (buffered app data); else arm CT recv into tls_ct_rx.
 // Clear-H1: pointer RECV into scanner window (pool-backed or dynamic). FIXED_BUF not used.
+// Darwin P5: native reactor EVFILT_READ (no proactr submit_recv).
 @(private)
 host_submit_recv :: proc(conn: ^Connection, buf: []u8) -> proactr.Error {
 	assert_has_td()
@@ -848,6 +871,18 @@ host_submit_recv :: proc(conn: ^Connection, buf: []u8) -> proactr.Error {
 			n := tls_host_try_ssl_read_into(conn, buf)
 			if n > 0 {
 				// SSL_read wrote into scanner free window (buf == scanner.buf[end:]).
+				// Darwin reactor: do **not** reenter scanner_on_bytes here (nested
+				// scan from host_submit_recv → UAF / Advanced_Too_Far). Advance end
+				// and let scanner_scan tail-recurse via reactor_scan_injected.
+				when ODIN_OS == .Darwin {
+					s := &conn.scanner
+					if s.end + n <= len(s.buf) {
+						s.end += n
+						conn.reactor_scan_injected = true
+						return .None
+					}
+					// Fall through to façade-style inject if bounds fail (should not).
+				}
 				scanner_on_bytes(&conn.scanner, n, false)
 				return .None
 			}
@@ -862,14 +897,21 @@ host_submit_recv :: proc(conn: ^Connection, buf: []u8) -> proactr.Error {
 		return .Closed
 	}
 	// Clear path (or Handshake should not call this — HS arms via tls_host_arm_recv).
-	_, err := proactr.submit_recv(
-		&td.ring,
-		i32(conn.socket),
-		buf,
-		conn,
-		conn.fixed_idx,
-	)
-	return err
+	when ODIN_OS == .Darwin {
+		if reactor_host_arm_recv(conn, buf) {
+			return .None
+		}
+		return .Closed
+	} else {
+		_, err := proactr.submit_recv(
+			&td.ring,
+			i32(conn.socket),
+			buf,
+			conn,
+			conn.fixed_idx,
+		)
+		return err
+	}
 }
 
 @(private)
@@ -1151,19 +1193,26 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	}
 
 	// Invariant: at most one of {recv, send/writev/sendfile, close}. Never
-	// submit_close while wire I/O or CT RECV is outstanding — defer until CQE.
+	// submit_close while wire I/O or CT RECV is outstanding — defer until completion.
 	// wire.kind != .None covers Send, WRITEV, and sendfile (pending_send alone is not enough:
 	// WRITEV/sendfile leave pending empty while SQE is still outstanding).
-	// tls_ct_recv_inflight covers hangup/HS CT RECV (CQ-M3).
+	// tls_ct_recv_inflight / reactor_read_armed cover hangup/HS CT RECV (CQ-M3 / P5).
 	if _conn_wire_in_flight(c) {
 		log.debugf("connection %i close deferred (wire I/O in flight)", c.socket)
 		c.close_on_io = true
 		return
 	}
-	if c.tls_ct_recv_inflight {
-		log.debugf("connection %i close deferred (CT recv in flight)", c.socket)
+	if c.tls_ct_recv_inflight || c.reactor_read_armed {
+		log.debugf("connection %i close deferred (recv interest in flight)", c.socket)
 		c.close_on_io = true
 		return
+	}
+	when ODIN_OS == .Darwin {
+		if c.reactor_write_armed {
+			log.debugf("connection %i close deferred (reactor WRITE armed)", c.socket)
+			c.close_on_io = true
+			return
+		}
 	}
 
 	// Session teardown before close (Client_Gone path may have already destroyed).
@@ -1197,22 +1246,28 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	if c.close_pending {
 		return
 	}
-	// Close the process fd (raw). After CQE we FILES_UPDATE the fixed slot to -1
-	// (drops the registered ref). Using FIXED_FILE for close would leave the process
-	// fd open and leak descriptors.
-	_, err := proactr.submit_close(&td.ring, i32(c.socket), c, -1)
-	if err != .None {
-		log.errorf("submit_close failed: %v", err)
-		// Fall back to synchronous close + free.
-		net.close(c.socket)
-		if c.fixed_idx >= 0 {
-			_ = proactr.ring_file_clear(&td.ring, c.fixed_idx)
-			c.fixed_idx = -1
-		}
-		connection_destroy(c)
+	// Darwin P5: sync close (no submit_close / soft CQE). Linux: close SQE.
+	when ODIN_OS == .Darwin {
+		reactor_host_close(c)
 		return
+	} else {
+		// Close the process fd (raw). After CQE we FILES_UPDATE the fixed slot to -1
+		// (drops the registered ref). Using FIXED_FILE for close would leave the process
+		// fd open and leak descriptors.
+		_, err := proactr.submit_close(&td.ring, i32(c.socket), c, -1)
+		if err != .None {
+			log.errorf("submit_close failed: %v", err)
+			// Fall back to synchronous close + free.
+			net.close(c.socket)
+			if c.fixed_idx >= 0 {
+				_ = proactr.ring_file_clear(&td.ring, c.fixed_idx)
+				c.fixed_idx = -1
+			}
+			connection_destroy(c)
+			return
+		}
+		c.close_pending = true
 	}
-	c.close_pending = true
 }
 
 // Protocol request handling. Parsing is callback-driven via Scanner;
@@ -1234,6 +1289,11 @@ conn_handle_reqs :: proc(c: ^Connection) {
 conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 	on_rline1 :: proc(loop: rawptr, token: string, err: bufio.Scanner_Error) {
 		l := cast(^Loop)loop
+		if l == nil || l.conn == nil {
+			// Defensive: nil user_data from a stale scan callback (peer RST mid-parse).
+			log.debugf("on_rline1: nil loop/conn err=%v", err)
+			return
+		}
 
 		if !connection_set_state(l.conn, .Active) { return }
 

@@ -1,124 +1,73 @@
 # Plan R2 P0 — `proactr.submit_*` inventory (`http/`)
 
 **Date:** 2026-08-09  
-**Scope:** every direct `proactr.submit_*` call site under `http/`, with planned I/O owner after Darwin reactor cutover.  
-**Honesty note (R2 P4 / P4b / P5-lite):** Darwin TLS **product send law** is reactor until-EAGAIN + single residual CT:
+**Scope:** every direct `proactr.submit_*` call site under `http/`, with I/O owner after Darwin reactor cutover.  
+**Status:** **P5 full wait ownership SHIPPED** on Darwin.
+
+## Darwin product I/O (P5)
 
 | Path | Darwin owner |
 |------|----------------|
-| H1 oneshot flush | `reactor_tls_flush` |
-| H2 frame flush | `reactor_tls_flush` |
-| Handshake / WANT_WRITE drain | `tls_host_try_drain_out` → `reactor_drain_wbio` |
-| Progressive stream | residual-first CT write + `reactor_arm_write_residual`; `dual_ct_try_ahead` **no-op** |
-| Residual WRITE re-arm | `host_submit_send` with `conn.reactor_h1` (not charged as `soft_cq_send_completes`) |
-
-**Still façade (plan not 100%):** accept / recv / close / timers / `ring_wait` worker loop / clear-H1 send. Matrix label: `io_engine=reactor-kqueue`; see `io_engine_note` on `/_matrix/stats`.
+| Worker wait | `server_loop_reactor` — reactor kqueue (product sockets) + `ring_wait(0)` soft_cq (timers D5) |
+| Accept | `reactor_host_submit_accept` — EVFILT_READ listen |
+| Recv (TLS CT + clear) | `reactor_host_arm_recv` — EVFILT_READ; dispatch by fd → `td.conns` |
+| Residual / clear WRITE | `reactor_host_submit_send` — EVFILT_WRITE native (no `proactr.submit_send`) |
+| Close | `reactor_host_close` — EV_DELETE + sync `net.close` + destroy |
+| H1/H2 TLS flush | `reactor_tls_flush` residual-first until-EAGAIN |
+| HS / stream residual | residual-first + native WRITE arm |
+| Timers | proactr software timers → soft_cq (D5 keep) |
 
 Linux (`ODIN_OS != .Darwin`) remains full proactor-uring; dual-CT unchanged.
 
 ---
 
-## R2 P5-lite completion (this land)
+## R2 P5 completion (this land)
 
-**In scope done (solidity over full cutover):**
+1. Separate per-worker **reactor kqueue** (never share udata with proactr op_ids).
+2. Accept / recv / write / close native; no Darwin product `proactr.submit_accept/recv/send/close`.
+3. Timers only via soft_cq drain merged into worker loop.
+4. **Reentrancy guards:** defer `clean_request_loop` after sync oneshot finish; TLS PT inject without nested `scanner_on_bytes`.
+5. Dispatch by **fd → map** (not Connection* udata) + purge filters on close.
+6. Duty: `soft_cq_send_completes=0` on TLS bulk matrix cells.
 
-1. All Darwin **TLS product response/send** flushes use reactor law (H1, H2) or residual-first (stream window).
-2. `dual_ct_try_ahead` is a compile-time no-op on Darwin.
-3. Residual EAGAIN arms mark `reactor_h1` **before** `host_submit_send` (documented in `wire.odin` / `io_reactor_kqueue.odin`).
-4. Clear-H1 is non-TLS and stays proactr façade/proactor (correct; not a TLS flush gap).
-5. Duty counters: `soft_cq_send_completes` excludes residual arms; `seal_windows` / `kevent_turns` are `reactor_tls_flush` only.
+### Crash classes fixed
 
-**Not done (remaining façade — full P5):**
-
-| # | Item | Why still façade |
-|---|------|------------------|
-| R1 | `submit_accept` (`host_arm_accept`) | No `server_loop_reactor` accept ownership; soak risk if swapped alone |
-| R2 | `submit_recv` clear-H1 (`host_arm_recv`) | Scanner still arms via proactr |
-| R3 | `submit_recv` TLS CT (`tls_host_arm_recv`) | Handshake + duplex CT interest still proactr |
-| R4 | `submit_close` | Deferred close still rides façade CQE interest |
-| R5 | `submit_timeout` | **D5 keep** — proactr software timers through cutover |
-| R6 | Worker `ring_wait` / kqueue ownership | Product sockets still share proactr kqueue; no dedicated reactor wait loop |
-| R7 | Residual WRITE re-arm via `host_submit_send` | Intentional hybrid: bulk windows are sync; only EAGAIN remainder uses façade WRITE |
-| R8 | Clear-H1 `host_submit_send` / writev / sendfile | Non-TLS path; not R2 vertical slice |
-| R9 | Stream multi-window ≠ `reactor_tls_flush` | Residual-first per window + light re-entry; shared D9 fairness / full multi-window reactor deferred |
-| R10 | Dual-CT hold slab still allocated on Darwin | Unused on H1/H2 reactor product paths; drop optional |
-| R11 | CI grep: no `proactr.submit_send` from `http/` on Darwin | Residual arm still needs it; full delete is true P5 |
-| R12 | Nonblocking post-accept recv without `submit_recv` | Stretch skipped (too invasive vs `_server_thread_main`) |
-
-**Plan status:** P0–P4 product TLS send law landed on Darwin hybrid; **P5 not 100%** until R1–R4, R6–R7, R11 delete façade socket path (timers R5 stay).
+| Class | Fix |
+|-------|-----|
+| Shared kq op_id vs conn udata | Separate reactor kqueue |
+| Stale kevent after close / slab reuse | fd-map dispatch + EV_DELETE when armed |
+| EV_DELETE ENOENT dropping other arms | Delete-only flush; ignore ENOENT |
+| Sync finish nested in scanner | `reactor_defer_clean` + drain after kevent batch |
+| TLS inject nested `scanner_on_bytes` | `reactor_scan_injected` + tail rescan |
 
 ---
 
 ## Direct call sites
 
-| # | File | Symbol / context | Op | Planned owner | R2 P5-lite status |
-|---|------|------------------|-----|---------------|-------------------|
-| 1 | `http/server.odin` | `host_arm_accept` | `submit_accept` | reactor (full P5) | **façade** (R1) |
-| 2 | `http/server.odin` | `host_arm_accept` (one-shot fallback) | `submit_accept` | same | **façade** |
-| 3 | `http/server.odin` | `host_arm_recv` (clear-H1) | `submit_recv` | reactor | **façade** (R2) |
-| 4 | `http/server.odin` | `connection_close` path | `submit_close` | reactor / sync close | **façade** (R4) |
-| 5 | `http/tls_host.odin` | `tls_host_arm_recv` (CT recv) | `submit_recv` | reactor | **façade** (R3) |
-| 6 | `http/wire.odin` | `host_submit_send` | `submit_send` | **reactor residual WRITE arm** when `reactor_h1`; Linux dual-CT; clear-H1 façade | **Darwin residual only** for TLS (R7); bulk windows do not submit between seals |
-| 7 | `http/wire.odin` | `host_submit_writev` | `submit_writev` | Linux proactor; Darwin Unsupported→multi_send | unchanged (clear / Linux) |
-| 8 | `http/wire.odin` | `host_submit_sendfile` | `submit_sendfile` | platform façade/proactor | unchanged (clear path) |
-| 9 | `http/session.odin` | session timer arm | `submit_timeout` | proactr software timers (D5) | **proactr timers** (R5 kept) |
+| # | File | Symbol / context | Op | Darwin owner |
+|---|------|------------------|-----|--------------|
+| 1–2 | `http/server.odin` | `host_submit_accept` | `submit_accept` | **reactor** (`when` Linux only for proactr) |
+| 3 | `http/server.odin` | `host_submit_recv` clear | `submit_recv` | **reactor** |
+| 4 | `http/server.odin` | `connection_close` | `submit_close` | **reactor sync close** |
+| 5 | `http/tls_host.odin` | `tls_host_arm_recv` | `submit_recv` | **reactor** |
+| 6 | `http/wire.odin` | `host_submit_send` | `submit_send` | **reactor WRITE arm** |
+| 7–8 | `http/wire.odin` | writev / sendfile | — | clear/Linux (unchanged) |
+| 9 | `http/session.odin` | session timer | `submit_timeout` | **proactr timers (D5)** |
 
-## Indirect send paths (call `host_submit_send` → #6)
+Linux still uses proactr submit_* in the `else` branches of the same symbols.
 
-| Area | File(s) | Planned owner | R2 P5-lite status |
-|------|---------|---------------|-------------------|
-| Clear-H1 oneshot / plan exec | `response.odin`, `wire.odin` | façade / proactor | façade on Darwin (R8; non-TLS) |
-| TLS dual-CT submit / promote | `tls_dual_ct.odin` (`tls_host_submit_ct`, `tls_host_send_ct_or_arm`) | **Linux only** for product TLS H1/H2 | Darwin H1/H2 **bypass** via `reactor_tls_flush` / residual arm |
-| TLS oneshot flush | `tls_oneshot.odin` | Darwin → `reactor_tls_flush`; Linux → dual-CT | **Darwin reactor** |
-| H2 frame flush | `h2_flush.odin` | Darwin → `reactor_tls_flush`; Linux → dual-CT | **Darwin reactor** (P4) |
-| TLS progressive stream | `tls_stream.odin` | residual-first + residual arm | **Darwin residual-first window** (R9: not full `reactor_tls_flush`) |
-| TLS handshake CT drain | `tls_host.odin` / `tls_host_try_drain_out` | Darwin → `reactor_drain_wbio` | **Darwin reactor drain** (P4b) |
+---
 
-## Design law (Darwin H1 + H2 bulk)
-
-```text
-reactor_tls_flush (H1 oneshot | H2 h2_out):
-  residual-first write → EAGAIN arm WRITE (no SSL_write while residual > 0)
-  SSL_write(64 KiB) → drain wBIO → write until EAGAIN
-  fairness: 2 MiB plain or 32 windows → yield (product re-entry; no soft-Nop)
-  NO soft_cq between full CT windows
-  NO dual_ct_try_ahead
-  H2: arm CT recv after flush (duplex)
-
-// residual arm only:
-reactor_arm_write_residual:
-  reactor_h1 = true
-  host_submit_send(pending = residual view)  // façade EVFILT_WRITE re-entry
-  // CQE → reactor_on_send_complete; soft_cq_send_completes not charged
-```
-
-## Deferred (true P5 / later)
-
-| Item | Phase |
-|------|--------|
-| Full `server_loop_reactor.odin` (own kevent wait; no façade accept/recv) | full P5 |
-| Delete residual arm `submit_send` (native arm WRITE without proactr user) | full P5 |
-| Progressive stream shared `reactor_tls_flush` + D9 fairness | later |
-| Delete façade socket path from `http/` (accept/recv/close) | full P5 |
-| Dual-CT slab drop on Darwin (hold still allocated; unused on H1/H2 reactor) | optional |
-| Nonblocking post-accept recv without `submit_recv` | stretch — skipped (invasive) |
-| Stub `server_loop_reactor` accept ownership | deferred — do not replace accept without soak |
-
-## Metrics (duty / honesty)
+## Metrics
 
 | Key | Meaning |
 |-----|---------|
-| `io_engine` | `reactor-kqueue` (Darwin P5-lite), `proactor-uring` (Linux), `proactor-kqueue-facade` (other BSD) |
-| `io_engine_note` | Darwin hybrid: TLS send reactor; accept/recv/close/timers/`ring_wait` façade; residual arm via `submit_send` |
-| `seal_windows` | SSL_write windows on **`reactor_tls_flush` only** (H1 oneshot + H2; not stream) |
-| `kevent_turns` | `reactor_tls_flush` entries (proxy for seal_windows_per_kevent_turn) |
-| `soft_cq_send_completes` | proactor send CQE **without** `reactor_h1`; **0 expected** for pure Darwin H1/H2 TLS bulk cells; clear-H1 still charges |
-| `eagain_arms` | residual WRITE arms after EAGAIN (`reactor_arm_write_residual`) |
-| `pt_bytes` | plain sealed (existing) |
+| `io_engine` | `reactor-kqueue` (Darwin P5), `proactor-uring` (Linux) |
+| `io_engine_note` | full wait ownership note |
+| `soft_cq_send_completes` | **0** expected for pure Darwin TLS bulk cells |
+| `seal_windows` / `kevent_turns` | reactor flush duty |
+| `eagain_arms` | residual WRITE arms |
 
-## Baseline pin (operator)
+## Plan status
 
-- Matrix: `comparisons/tls-h2/run_matrix.sh` (or bastion equivalent)
-- Cells of interest: h1s plain, h1s s4k, h1s s1m, h2 plain, h2 s1m
-- Machine class: local Darwin vs bastion Linux (do not mix)
-- Git SHA: pin at first duty remeasure after this land
+**P0–P5 complete** on Darwin (product socket façade deleted; timers remain in proactr).

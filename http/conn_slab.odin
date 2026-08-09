@@ -254,6 +254,11 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.reactor_res_n = 0
 	c.reactor_h1 = false
 	c.reactor_fairness_yield = false
+	c.reactor_read_armed = false
+	c.reactor_write_armed = false
+	c.reactor_need_clean = false
+	c.reactor_scan_injected = false
+	c.reactor_recv_buf = nil
 	c.tls_ct_recv_inflight = false
 	c.tls_plain_rest = nil
 	c.tls_plain_body = nil

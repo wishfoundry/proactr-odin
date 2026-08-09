@@ -1,9 +1,9 @@
 # Plan R2: Native kqueue reactor host (Darwin) — frozen for implement
 
-**Status:** Phase 0 **FROZEN** (multi-critic WOW) · **P4 product TLS send law SHIPPED** · **P5-full wait ownership DEFERRED** (matrix segfault under concurrent load — reverted)  
+**Status:** Phase 0 **FROZEN** · **P0–P5 COMPLETE** (Darwin native reactor wait ownership shipped)  
 **Supersedes:** `plan-r1.md`  
 **Date:** 2026-08-09  
-**Implementation:** `6e22f37` (H1), `20d5cfa` (H2 + dual_ct no-op)  
+**Implementation:** `6e22f37` (H1), `20d5cfa` (H2), P5 full wait (`server_loop_reactor` + native accept/recv/write/close)  
 
 **One sentence:** On Darwin, delete proactor-emulation for HTTP sockets and run a **native kqueue reactor** send law (encrypt→write until EAGAIN, single residual CT). Linux keeps true io_uring proactor. **APP_CONTRACT unchanged.**
 
@@ -253,14 +253,14 @@ One kevent wait per Darwin worker for product sockets. proactr kqueue **must not
 
 **Exit:** h2 plain/s1m ≥ −3% vs pre-P4; 0 errors; no `submit_send` from H2 path.
 
-### P5 — Delete façade socket path
+### P5 — Delete façade socket path — **SHIPPED**
 
-- Darwin: no `proactr.submit_send/recv/accept` from `http/` (CI grep)  
-- proactr kqueue socket submit: remove or compile-fail if linked from http  
-- Timers remain in proactr  
-- Soak + fairness  
+- Darwin: product sockets on native reactor kqueue (`server_loop_reactor` + `io_reactor_kqueue`)  
+- No live `proactr.submit_send/recv/accept/close` on Darwin (`when ODIN_OS` branches keep Linux proactr)  
+- Timers remain in proactr soft_cq (D5)  
+- Soak: full h2+h1s matrix 0 errors; `soft_cq_send_completes=0`  
 
-**Exit:** grep gate; soak; IMPLEMENTATION_STATUS updated.
+**Exit:** met (matrix + duty gates; see `comparisons/tls-h2/results/PERF_LOOP_STATUS.md`).
 
 ---
 

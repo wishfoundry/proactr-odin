@@ -442,6 +442,12 @@ ring_peek :: proc(r: ^Ring, out: []Completion) -> (n: int, err: Error) {
 	return ring_wait(r, out, 0, 0)
 }
 
+// ring_next_timer_ms: ms until next software timer (D5 merge wait for reactor hosts).
+// has=false when no pending timer. ms=0 means due now.
+ring_next_timer_ms :: proc(r: ^Ring) -> (ms: i32, has: bool) {
+	return _timer_next_ms(r)
+}
+
 complete_apply :: proc(r: ^Ring, c: Completion) -> ^Operation {
 	op := operation_get(r, c.op_id)
 	if op == nil {

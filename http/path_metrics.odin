@@ -156,7 +156,7 @@ path_metrics_io_engine :: proc() -> string {
 	when ODIN_OS == .Linux {
 		return "proactor-uring"
 	} else when ODIN_OS == .Darwin {
-		// P5-lite: TLS product send law is reactor; accept/recv/close/timers/ring_wait façade.
+		// P5: native reactor kqueue wait ownership for product sockets; timers soft_cq.
 		return "reactor-kqueue"
 	} else when ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
 		return "proactor-kqueue-facade"
@@ -170,10 +170,8 @@ path_metrics_io_engine :: proc() -> string {
 // Operator scrape note (not APP_CONTRACT). Keep short; expand in INVENTORY.md.
 path_metrics_io_engine_note :: proc() -> string {
 	when ODIN_OS == .Darwin {
-		// Honest hybrid: TLS H1/H2 send + HS drain + stream residual-first on reactor law;
-		// accept/recv/close/timers/ring_wait + clear-H1 send still proactr façade;
-		// residual WRITE re-arm still host_submit_send with reactor_h1 (not soft_cq).
-		return "tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;accept_recv_close_timers_ring_wait_facade;clear_h1_facade;residual_arm_submit_send;no_dual_ct_ahead;no_soft_nop_fairness"
+		// P5 full wait: product sockets on native reactor kqueue; timers soft_cq only.
+		return "reactor_kqueue_wait;accept_recv_write_close_native;timers_soft_cq;tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;no_proactr_socket_submit;no_dual_ct_ahead;no_soft_nop_fairness"
 	} else {
 		return ""
 	}

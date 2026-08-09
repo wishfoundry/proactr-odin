@@ -1,0 +1,9 @@
+peer	proto	test	rps	status	app_proto	failed	errored	timeout
+proactr	h2	plaintext	101114.75	ok	h2	0	0	0
+proactr	h2	s4k	87209.38	ok	h2	0	0	0
+proactr	h2	s64k	31390.25	ok	h2	0	0	0
+proactr	h2	s1m	2253.38	ok	h2	0	0	0
+proactr	h1s	plaintext	115636.62	ok	http/1.1	0	0	0
+proactr	h1s	s4k	96802.50	ok	http/1.1	0	0	0
+proactr	h1s	s64k	31255.62	ok	http/1.1	0	0	0
+proactr	h1s	s1m	2562.75	ok	http/1.1	0	0	0

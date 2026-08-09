@@ -290,6 +290,15 @@ scanner_scan :: proc(
 		callback(user_data, "", s._err)
 		return
 	}
+	// Darwin TLS inject: PT already in buffer (reactor_scan_injected). Re-parse
+	// with the same user_data — no nested scanner_on_bytes (P5 reentrancy fix).
+	when ODIN_OS == .Darwin {
+		if s.connection != nil && s.connection.reactor_scan_injected {
+			s.connection.reactor_scan_injected = false
+			scanner_scan(s, user_data, callback)
+			return
+		}
+	}
 	// Callback resumes after Recv CQE → scanner_on_bytes → scanner_scan.
 }
 

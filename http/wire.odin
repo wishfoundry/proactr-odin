@@ -119,19 +119,16 @@ _wire_mem_done :: proc(conn: ^Connection) {
 // Submit paths
 // ---------------------------------------------------------------------------
 
-// host_submit_send enqueues send of conn.wire.pending_send via proactr
-// (io_uring on Linux; kqueue façade EVFILT_WRITE on Darwin).
+// host_submit_send enqueues send of conn.wire.pending_send.
+// Linux: proactr submit_send (io_uring). Darwin P5: native reactor EVFILT_WRITE
+// (no proactr submit_send — separate reactor kqueue).
 //
-// Darwin TLS residual arms (reactor_arm_write_residual in io_reactor_kqueue.odin)
-// set conn.reactor_h1 = true *before* calling this. That still uses the façade
-// WRITE interest for re-entry, but _host_on_wire_send does **not** charge
-// soft_cq_send_completes when reactor_h1 is set (Plan R2 duty gate = 0 for
-// H1/H2 bulk residual CQEs). Full CT windows on Darwin TLS never call this
-// between seals — they use host_try_send_nb until EAGAIN, then residual arm only.
+// Darwin TLS residual arms set conn.reactor_h1 = true *before* calling this so
+// soft_cq_send_completes is not charged and write demuxes to reactor_on_send_complete.
+// Full CT windows on Darwin TLS never call this between seals — host_try_send_nb
+// until EAGAIN, then residual arm only.
 //
-// Clear-H1 (non-TLS) and Linux dual-CT product sends call this without
-// reactor_h1; those CQEs count as soft_cq_send_completes. Partial residual
-// resubmits leave reactor_h1 true so the metric stays honest.
+// Clear-H1 and Linux dual-CT call without reactor_h1; Linux CQEs charge soft_cq.
 @(private)
 host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	assert_has_td()
@@ -141,17 +138,21 @@ host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	if len(conn.wire.pending_send) == 0 {
 		return .None
 	}
-	_, err := proactr.submit_send(
-		&td.ring,
-		i32(conn.socket),
-		conn.wire.pending_send,
-		conn,
-		conn.fixed_idx,
-	)
-	if err == .None {
-		conn.wire.kind = .Send
+	when ODIN_OS == .Darwin {
+		return reactor_host_submit_send(conn)
+	} else {
+		_, err := proactr.submit_send(
+			&td.ring,
+			i32(conn.socket),
+			conn.wire.pending_send,
+			conn,
+			conn.fixed_idx,
+		)
+		if err == .None {
+			conn.wire.kind = .Send
+		}
+		return err
 	}
-	return err
 }
 
 // host_try_send_nb: nonblocking send of buf on conn.socket (no ring arm).

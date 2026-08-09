@@ -211,9 +211,10 @@ tls_host_conn_destroy :: proc(conn: ^Connection) {
 // Recv arm (CT into tls_ct_rx)
 // ---------------------------------------------------------------------------
 
-// tls_host_arm_recv submits pointer RECV into tls_ct_rx.
-// Idempotent: if CT RECV is already outstanding, returns true without re-submit
-// (second EV_ADD on kqueue would replace udata and orphan the prior Recv op).
+// tls_host_arm_recv arms CT RECV into tls_ct_rx.
+// Idempotent: if CT RECV is already outstanding, returns true without re-arm
+// (second EV_ADD would replace udata and orphan the prior interest).
+// Darwin P5: native reactor EVFILT_READ; Linux: proactr submit_recv.
 @(private)
 tls_host_arm_recv :: proc(conn: ^Connection) -> bool {
 	if conn == nil || conn.state >= .Closing {
@@ -226,19 +227,27 @@ tls_host_arm_recv :: proc(conn: ^Connection) -> bool {
 	if conn.tls_ssl == nil || len(conn.tls_ct_rx) == 0 {
 		return false
 	}
-	_, err := proactr.submit_recv(
-		&td.ring,
-		i32(conn.socket),
-		conn.tls_ct_rx,
-		conn,
-		conn.fixed_idx,
-	)
-	if err != .None {
-		log.errorf("TLS: submit_recv CT failed fd=%v err=%v", conn.socket, err)
-		return false
+	when ODIN_OS == .Darwin {
+		if !reactor_host_arm_recv(conn, conn.tls_ct_rx) {
+			log.errorf("TLS: reactor arm CT recv failed fd=%v", conn.socket)
+			return false
+		}
+		return true
+	} else {
+		_, err := proactr.submit_recv(
+			&td.ring,
+			i32(conn.socket),
+			conn.tls_ct_rx,
+			conn,
+			conn.fixed_idx,
+		)
+		if err != .None {
+			log.errorf("TLS: submit_recv CT failed fd=%v err=%v", conn.socket, err)
+			return false
+		}
+		conn.tls_ct_recv_inflight = true
+		return true
 	}
-	conn.tls_ct_recv_inflight = true
-	return true
 }
 
 // ---------------------------------------------------------------------------
