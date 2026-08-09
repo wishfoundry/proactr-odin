@@ -732,6 +732,12 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 	// This CQE completes the prior SEND; clear until we re-arm (partial or next buffer).
 	conn.wire.kind = .None
 
+	// Duty metric: proactor send CQE only. Darwin H1 reactor residual arms set reactor_h1
+	// and must not increment soft_cq_send_completes (Plan R2 gate = 0 for H1 bulk).
+	if !conn.reactor_h1 {
+		path_metrics_note_soft_cq_send_complete()
+	}
+
 	// Multi-buffer sequential queue (Phase 3 fallback / multi_send).
 	// When the queue finishes and a file region remains, start sendfile or chunked stream.
 	if conn.wire.exec_n > 0 {
@@ -761,6 +767,12 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 		// Partial send — advance and resubmit. Buffer still owned until full send.
 		// n==0 already closed above; n>0 here.
 		conn.wire.pending_send = conn.wire.pending_send[n:]
+		// Darwin H1 reactor: keep residual meta aligned with pending_send (one region).
+		when ODIN_OS == .Darwin {
+			if conn.reactor_h1 {
+				reactor_sync_residual_from_pending(conn)
+			}
+		}
 		if len(conn.wire.pending_send) == 0 {
 			// Should not happen (n < len implies remainder > 0); fail closed.
 			_wire_fail(conn, "send partial emptied pending fd=%v", conn.socket)

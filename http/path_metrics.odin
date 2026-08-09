@@ -28,6 +28,16 @@ path_ssl_write_ok:   u64
 path_ct_sends:       u64
 path_materialize:    u64
 
+// Duty-cycle / reactor law counters (Plan R2). Always live; atomic adds only.
+// seal_windows: SSL_write windows (reactor path; also dual-CT seal_calls cousin).
+// kevent_turns: reactor_tls_flush entries (proxy for seal_windows_per_kevent_turn).
+// soft_cq_send_completes: proactor send CQE path only — must stay 0 for Darwin H1 bulk.
+// eagain_arms: residual WRITE arms after EAGAIN on reactor (or façade residual arm).
+path_seal_windows:            u64
+path_kevent_turns:            u64
+path_soft_cq_send_completes:  u64
+path_eagain_arms:             u64
+
 // Profiling cycles (only accumulated when HTTP_PHASE_STATS).
 path_seal_cyc:         u64 // full seal window: SSL_write + bio_read
 path_ssl_write_cyc:    u64
@@ -123,6 +133,47 @@ path_metrics_note_promote :: #force_inline proc "contextless" () {
 	}
 }
 
+path_metrics_note_seal_window :: #force_inline proc "contextless" () {
+	sync.atomic_add(&path_seal_windows, 1)
+}
+
+path_metrics_note_kevent_turn :: #force_inline proc "contextless" () {
+	sync.atomic_add(&path_kevent_turns, 1)
+}
+
+// Proactor send CQE only — never call from Darwin H1 reactor residual path.
+path_metrics_note_soft_cq_send_complete :: #force_inline proc "contextless" () {
+	sync.atomic_add(&path_soft_cq_send_completes, 1)
+}
+
+path_metrics_note_eagain_arm :: #force_inline proc "contextless" () {
+	sync.atomic_add(&path_eagain_arms, 1)
+}
+
+// Operator-facing engine label (not APP_CONTRACT; never use in handlers/examples).
+path_metrics_io_engine :: proc() -> string {
+	when ODIN_OS == .Linux {
+		return "proactor-uring"
+	} else when ODIN_OS == .Darwin {
+		// Honest hybrid (D7 not full cutover): H1 TLS send until-EAGAIN; rest façade.
+		return "reactor-kqueue-h1-send-hybrid"
+	} else when ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
+		return "proactor-kqueue-facade"
+	} else when ODIN_OS == .Windows {
+		return "proactor-iocp"
+	} else {
+		return "unknown"
+	}
+}
+
+path_metrics_io_engine_note :: proc() -> string {
+	when ODIN_OS == .Darwin {
+		return "h1_tls_until_eagain;accept_recv_h2_hs_facade;no_soft_nop_fairness"
+	} else {
+		return ""
+	}
+}
+
 path_metrics_reset :: proc() {
 	sync.atomic_store(&path_reqs, 0)
 	sync.atomic_store(&path_seal_calls, 0)
@@ -133,6 +184,10 @@ path_metrics_reset :: proc() {
 	sync.atomic_store(&path_ssl_write_ok, 0)
 	sync.atomic_store(&path_ct_sends, 0)
 	sync.atomic_store(&path_materialize, 0)
+	sync.atomic_store(&path_seal_windows, 0)
+	sync.atomic_store(&path_kevent_turns, 0)
+	sync.atomic_store(&path_soft_cq_send_completes, 0)
+	sync.atomic_store(&path_eagain_arms, 0)
 	sync.atomic_store(&path_seal_cyc, 0)
 	sync.atomic_store(&path_ssl_write_cyc, 0)
 	sync.atomic_store(&path_bio_read_cyc, 0)
@@ -162,6 +217,10 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	sslw := sync.atomic_load(&path_ssl_write_ok)
 	cts := sync.atomic_load(&path_ct_sends)
 	mat := sync.atomic_load(&path_materialize)
+	swin := sync.atomic_load(&path_seal_windows)
+	kturns := sync.atomic_load(&path_kevent_turns)
+	soft_cq := sync.atomic_load(&path_soft_cq_send_completes)
+	eagain := sync.atomic_load(&path_eagain_arms)
 	// Expansion ratios help spot seal overhead.
 	ratio: f64 = 0
 	if pt > 0 {
@@ -171,9 +230,18 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	if reqs > 0 {
 		seals_per_req = f64(seal) / f64(reqs)
 	}
+	// Duty: seal windows per reactor turn (0 if no reactor turns).
+	sw_per_turn: f64 = 0
+	if kturns > 0 {
+		sw_per_turn = f64(swin) / f64(kturns)
+	}
 	b: strings.Builder
 	strings.builder_init(&b, allocator)
 	fmt.sbprintf(&b, "peer=proactr\n")
+	fmt.sbprintf(&b, "io_engine=%s\n", path_metrics_io_engine())
+	if note := path_metrics_io_engine_note(); note != "" {
+		fmt.sbprintf(&b, "io_engine_note=%s\n", note)
+	}
 	fmt.sbprintf(&b, "reqs=%d\n", reqs)
 	fmt.sbprintf(&b, "seal_calls=%d\n", seal)
 	fmt.sbprintf(&b, "seals_per_req=%.3f\n", seals_per_req)
@@ -185,6 +253,11 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	fmt.sbprintf(&b, "h2_pt_bytes=%d\n", h2pt)
 	fmt.sbprintf(&b, "ct_sends=%d\n", cts)
 	fmt.sbprintf(&b, "materialize=%d\n", mat)
+	fmt.sbprintf(&b, "seal_windows=%d\n", swin)
+	fmt.sbprintf(&b, "kevent_turns=%d\n", kturns)
+	fmt.sbprintf(&b, "seal_windows_per_kevent_turn=%.3f\n", sw_per_turn)
+	fmt.sbprintf(&b, "soft_cq_send_completes=%d\n", soft_cq)
+	fmt.sbprintf(&b, "eagain_arms=%d\n", eagain)
 	when HTTP_PHASE_STATS {
 		seal_c := sync.atomic_load(&path_seal_cyc)
 		ssl_c := sync.atomic_load(&path_ssl_write_cyc)

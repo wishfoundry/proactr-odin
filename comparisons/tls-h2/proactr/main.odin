@@ -121,14 +121,10 @@ main :: proc() {
 	opts.h2_serial_dispatch = false
 
 	ep := net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port}
-	io_name := "io_uring"
-	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
-		io_name = "kqueue"
-	} else when ODIN_OS == .Windows {
-		io_name = "iocp"
-	}
+	// Operator label (path_metrics.io_engine); not exposed to handlers/APP_CONTRACT.
+	io_name := http.path_metrics_io_engine()
 	fmt.printf(
-		"proactr tls-h2 on 0.0.0.0:%d workers=%d alpn=h2|http/1.1 tls=openssl-membio io=%s instrument=path_metrics phase_stats=%v\n",
+		"proactr tls-h2 on 0.0.0.0:%d workers=%d alpn=h2|http/1.1 tls=openssl-membio io_engine=%s instrument=path_metrics phase_stats=%v\n",
 		port,
 		workers,
 		io_name,

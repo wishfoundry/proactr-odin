@@ -1828,6 +1828,11 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	conn.slot.stream_pin_armed = false
 	dual_ct_clear_meta(&conn.dual_ct)
 	conn.tls_stream_plain_n = 0
+	// Darwin H1 reactor residual (single CT region); clear on keep-alive reuse.
+	conn.reactor_res_off = 0
+	conn.reactor_res_n = 0
+	conn.reactor_h1 = false
+	conn.reactor_fairness_yield = false
 	// Do not free session here — _stream_finish / connection_close own that.
 	// Orphan sse_alloc pad (no session): free so keep-alive does not hold heap.
 	if conn.slot.session == nil {

@@ -534,7 +534,16 @@ Connection :: struct {
 	tls_ct_rx:      []u8,
 	// Live dual-CT seal∥send (PR5.1): primary + hold slabs; seal next window into
 	// free slab while one sock send is in flight. See tls_dual_ct.odin.
+	// Darwin H1 oneshot reactor uses dual_ct.tx as the single residual CT slab only
+	// (hold unused for H1; H2/stream still dual-CT on façade until P4).
 	dual_ct:        Dual_Ct,
+	// Darwin H1 reactor residual: dual_ct.tx[reactor_res_off:][:reactor_res_n].
+	// reactor_h1: residual WRITE armed via façade (not charged as soft_cq_send_completes).
+	// reactor_fairness_yield: Nop soft re-entry after D9 fairness cap.
+	reactor_res_off:         int,
+	reactor_res_n:           int,
+	reactor_h1:              bool,
+	reactor_fairness_yield:  bool,
 	// True while a CT RECV SQE into tls_ct_rx is outstanding (hangup / HS / Open).
 	// Arm is idempotent; re-arm only after the matching CQE clears this bit.
 	// Prevents kqueue EV_ADD replace-udata orphan of a prior Recv (CQ-F1).
@@ -1171,6 +1180,10 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	c.slot.stream_respond_fired = false
 	dual_ct_clear_meta(&c.dual_ct)
 	c.tls_stream_plain_n = 0
+	c.reactor_res_off = 0
+	c.reactor_res_n = 0
+	c.reactor_h1 = false
+	c.reactor_fairness_yield = false
 	// Return any in-flight Stream slab before forgetting the pointer.
 	_stream_pool_abandon(c)
 	c.slot.stream_pin_armed = false

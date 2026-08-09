@@ -103,6 +103,7 @@ tls_plain_clear :: proc(conn: ^Connection) {
 
 // tls_host_flush_response: window plain → SSL_write → drain CT → submit (dual-CT).
 // Multi-CQE: tls_plain_* cursor holds remaining plain. While send inflight, seals into hold.
+// Darwin: Plan R2 reactor until-EAGAIN + single residual (no soft-CQ between windows).
 @(private)
 tls_host_flush_response :: proc(conn: ^Connection) {
 	if conn == nil || conn.tls_ssl == nil {
@@ -110,6 +111,14 @@ tls_host_flush_response :: proc(conn: ^Connection) {
 	}
 	if conn.state >= .Closing {
 		return
+	}
+
+	when ODIN_OS == .Darwin {
+		// H1 oneshot reactor; H2/stream still dual-CT (guarded inside reactor_tls_flush).
+		if !conn.h2_active && !tls_host_stream_long_lived(conn) {
+			reactor_tls_flush(conn)
+			return
+		}
 	}
 
 	// Live dual-CT: keep encrypting into free slab while a CT send is on the wire.

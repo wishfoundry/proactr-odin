@@ -532,7 +532,19 @@ tls_host_ssl_read_burst :: proc(conn: ^Connection, dst: []u8) -> int {
 			break
 		}
 		if ge == p.ERROR_WANT_WRITE {
-			// Drain handshake/reneg CT if any.
+			// Drain CT if any. Darwin H1 reactor residual must not use dual-CT drain.
+			when ODIN_OS == .Darwin {
+				if conn.reactor_h1 || conn.reactor_res_n > 0 {
+					again, hard := reactor_drain_wbio(conn)
+					if hard {
+						return 0
+					}
+					if again {
+						_ = reactor_arm_write_residual(conn)
+					}
+					break
+				}
+			}
 			_ = tls_host_try_drain_out(conn, hs = false)
 			break
 		}
@@ -721,6 +733,12 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	}
 
 	if conn.ciphered || conn.tls_pipe.state == .Open {
+		when ODIN_OS == .Darwin {
+			// Reactor residual WRITE CQE → continue until-EAGAIN flush (not dual-CT promote).
+			if reactor_on_send_complete(conn) {
+				return true
+			}
+		}
 		// Dual-CT: if a slab was filled during flight, promote immediately.
 		if tls_host_promote_hold(conn) {
 			// New send armed — seal further into free slab.

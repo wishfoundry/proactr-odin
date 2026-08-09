@@ -250,6 +250,10 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.tls_ssl = nil
 	c.tls_ct_rx = nil
 	c.dual_ct = {}
+	c.reactor_res_off = 0
+	c.reactor_res_n = 0
+	c.reactor_h1 = false
+	c.reactor_fairness_yield = false
 	c.tls_ct_recv_inflight = false
 	c.tls_plain_rest = nil
 	c.tls_plain_body = nil

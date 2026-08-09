@@ -155,13 +155,26 @@ Tried **together** (plan critic APPROVE_WITH_AMENDMENTS):
 
 **Learning:** Even drogon-shaped dense + N=4 + peek does **not** buy ≥15% on this host under honest remeasure. Residual bulk gap is largely **AES + send + OpenSSL WPACKET** (sample), not free orchestration. Custom BIO_METHOD and true parity with drogon’s in-loop depth remain large eng bets, not next micro-flag.
 
+## Native kqueue reactor (Plan R2) — H1 send vertical slice
+
+**Plan:** [`docs/design/native-kqueue-reactor/plan-r2.md`](../../docs/design/native-kqueue-reactor/plan-r2.md) — multi-critic **WOW** → implement.
+
+**Shipped:** Darwin ciphered H1 oneshot residual-first multi `SSL_write(64KiB)` + write drain in one flush entry (no dual-CT ahead-seal). Label: `reactor-kqueue-h1-send-hybrid`.
+
+| Metric (h1s s1m) | Result |
+|------------------|--------|
+| RPS (3×) | **~2478–2508** (flat vs P0c; **no +15% claim**) |
+| Matrix vs drogon | 2666 / 8946 ≈ **0.30×** (unchanged) |
+| `seal_windows_per_kevent_turn` | **~16.9** (**duty law moved**; was ~1 under dual-CT) |
+
+**Learning:** Windows/turn jumped (more AES per flush entry). **RPS did not.** Residual bulk gap is not free soft-CQ tax alone — OpenSSL/AES+send ceiling. Full reactor wait (P4–P5) is hygiene / D7, not a promised RPS unlock.
+
 ## Next levers still open (honest, **no kTLS**)
 
-1. **h1s s1m ~0.30× drogon** — density trifecta **closed** for this loop without architecture change  
-2. Offline OpenSSL encrypt+send-until-EAGAIN microbench vs drogon (bound the ceiling)  
-3. Full custom wBIO_METHOD writing into CT slabs — only if microbench shows drain/copy still material  
-4. **h2 plain 0.75× ntex** — send/recv/frame named ≥10% leaf  
-5. Do **not** re-run: H1 dense, Dual_Ct N=4 as RPS, windowed frame, HPACK free-size, NODELAY, 1 MiB seal  
+1. Full Darwin reactor wait (accept/recv/H2) + façade delete — architecture completeness  
+2. Offline OpenSSL encrypt+send microbench to pin GB/s ceiling  
+3. **h2 plain 0.75× ntex** — separate track  
+4. Do **not** re-run Dual_Ct N=4 / façade H1 dense / BIO peek as RPS bets  
 
 ## Loop policy reminder
-Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix. **3× remeasure soft-band claims.**
+Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix. **3× remeasure soft-band claims.** **Duty cycle before RPS victory.**
