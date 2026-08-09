@@ -11,19 +11,20 @@
 | `a80a0a1` | H2 header borrow (no 2nd clone) | R3: **~0–2%** (noise / modest) |
 | `9d80eef` | R3 matrix artifacts | — |
 | *(reverted)* | 1 MiB seal + heading coalesce | **h1s s1m −6%**, plaintext −10% → **reset** |
+| `ac570cb` | H2 oneshot borrow + H2-only dense CT; HPACK free-size | **h2 s1m +41%**; P0-2 plain gate FAIL |
 
-## Current scoreboard vs best peer (R3 full matrix)
+## Current scoreboard vs best peer (P0c matrix)
 
 | Cell | proactr | best | ratio | status |
 |------|--------:|-----:|------:|--------|
-| h2 plaintext | 93.7k | ntex 128k | **0.73×** | gap |
-| h2 s4k | 78.9k | ntex 133k | **0.59×** | gap |
-| h2 s64k | 27.9k | ntex 49k | **0.57×** | gap |
-| h2 s1m | 1.78k | go 3.0k | **0.59×** | gap (beats ntex) |
-| h1s plaintext | 113k | drogon 150k | **0.75×** | gap |
-| h1s s4k | 96k | drogon 151k | **0.64×** | gap |
-| h1s s64k | 30k | drogon 67k | **0.44×** | gap |
-| h1s s1m | 2.8k | drogon 9.2k | **0.30×** | **largest hole** |
+| h2 plaintext | 94.8k | ntex 126k | **0.75×** | gap |
+| h2 s4k | 81.8k | ntex 129k | **0.64×** | gap |
+| h2 s64k | *(R3)* 27.9k | ntex 49k | **0.57×** | gap (not remeasured) |
+| h2 s1m | **2.51k** | go 3.25k | **0.77×** | improved (was 0.59×) |
+| h1s plaintext | 119k | drogon 151k | **0.79×** | gap |
+| h1s s4k | 103k | drogon 151k | **0.68×** | gap |
+| h1s s64k | *(R3)* 30k | drogon 67k | **0.44×** | gap (not remeasured) |
+| h1s s1m | 2.77k | drogon 9.2k | **0.30×** | **largest hole** (unchanged) |
 | drogon h2 | — | N/A | — | not a peer |
 
 Cleartext kqueue profile matrix (older): proactr ahead on tiny/file sendfile; behind ntex on assembled.
@@ -87,6 +88,44 @@ Per R4 plan critic: after NODELAY miss, optional OpenSSL calibration; **fresh sa
 2. Offline **OpenSSL encrypt+send** calibration for s1m ceiling  
 3. H1 header `sanitize_key` hygiene (not as primary RPS bet)  
 4. Accept residual bulk gap vs drogon without kTLS until architecture changes  
+
+## Competitor hot-path audit (2026-08-09)
+
+Full report: [`COMPETITOR_HOTPATH_AUDIT.md`](COMPETITOR_HOTPATH_AUDIT.md)  
+Agents: ntex · drogon · go · vapor-http (`~/Projects/odin-http`) → summary critic.
+
+**Consensus P0 (do not re-do NODELAY / 1 MiB / rearm):**
+
+| Rank | Item | Peers | Target | P0c result |
+|-----:|------|-------|--------|------------|
+| 1 | Seal-until-EAGAIN multi-window | drogon + vapor | h1s s1m **0.30×** | H1 dense **FAIL** (+2%, plain −4%) → **reset**; H2-only dense **kept** (s1m win) |
+| 2 | HPACK `decode_string` single-alloc | ntex + profile | h2 plain ≥+8% | shipped as free-size micro; RPS **+1% FAIL** gate |
+| 3 | H2 oneshot borrowed body | go + ntex | h2 s4k/s1m ≥+8% | **PASS** (s1m **+41%** with H2 dense) |
+
+## Round 5 — competitor P0 loop (agents + harsh critics)
+
+| Stage | Result |
+|-------|--------|
+| Audit agents | ntex / drogon / go / vapor → ranked backlog |
+| P0-1 H1 dense | seal-until-EAGAIN on oneshot; critic **REJECT** (no tests); measure gate **FAIL** |
+| P0-1 H2-only dense | `h2_host_flush_out` multi-window NB send (max 8); H1 classic dual-CT |
+| P0-2 HPACK | shrink+transfer Huffman; gate **FAIL** RPS |
+| P0-3 H2 body | skip materialize + direct frame when windows fit |
+| Combined measure | h2 s1m **1783→2509 (+41%)**; h2 plain +1%; h1s s1m flat |
+| Final critic | **COMMIT_WITH_AMENDMENTS** (honest story; not WOW; not audit-complete) |
+| Decision | **commit** H2 bulk path + HPACK free-size; H1 dense stays dead |
+
+Artifacts: [`KQUEUE_TLS_H2_P0c.md`](KQUEUE_TLS_H2_P0c.md), `summary_P0c.tsv`.
+
+**Not claimed:** H1 RPS wins · peer parity · P0-1/P0-2 complete · kTLS.
+
+## Next levers still open (honest, **no kTLS**)
+
+1. **h1s s1m 0.30× drogon** — still open; H1 dense failed; need new theory (CT depth / I/O law) not re-run of H1 dense  
+2. **h2 plain 0.75× ntex** — residual after HPACK alloc micro; sample + deeper path  
+3. H2 s1m residual vs go (~0.77×) — pure-Go AES / mem-BIO ceiling  
+4. Offline OpenSSL encrypt+send-until-EAGAIN microbench vs drogon bound  
+5. Do **not** re-enable H1 dense without a new theory + gate  
 
 ## Loop policy reminder
 Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix.

@@ -1425,3 +1425,98 @@ test_h2_sse_start_soft_reject_over_cap :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, saw_headers_es, "503 HEADERS END_STREAM on soft reject")
 }
+
+// P0-3: single Static body is borrowed (no resp_buf copy); multi Static still materializes.
+@(test)
+test_h2_host_materialize_borrow_static :: proc(t: ^testing.T) {
+	conn: Connection
+	conn.state = .Idle
+	static_body := transmute([]u8)string("borrowed-static-body")
+
+	// Single Static → view of cmd.bytes; resp_buf untouched.
+	r: Response
+	r._conn = &conn
+	body_static(&r, static_body)
+	got := h2_host_materialize_body(&r)
+	testing.expect(t, len(got) == len(static_body))
+	testing.expect(t, raw_data(got) == raw_data(static_body), "single Static borrows, no resp_buf copy")
+	testing.expect(t, conn.resp_buf == nil || len(conn.resp_buf) == 0, "resp_buf not used for single Static")
+
+	// Multi Static → concatenated into resp_buf (owned scrap).
+	r2: Response
+	r2._conn = &conn
+	a := transmute([]u8)string("aa")
+	b := transmute([]u8)string("bb")
+	body_static(&r2, a)
+	body_static(&r2, b)
+	got2 := h2_host_materialize_body(&r2)
+	testing.expect_value(t, string(got2), "aabb")
+	testing.expect(t, raw_data(got2) == raw_data(conn.resp_buf[:]), "multi Static materializes into resp_buf")
+	if conn.resp_buf != nil {
+		delete(conn.resp_buf)
+		conn.resp_buf = nil
+	}
+}
+
+// P0-3 end-to-end host send: single Static → frames in h2_out, stream pending empty.
+@(test)
+test_h2_host_send_oneshot_static_borrow :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	s: Server
+	s.conn_allocator = context.allocator
+	s.opts = Default_Server_Opts
+	st: Server_Thread
+	h2_test_install_worker(&st, &s)
+	defer h2_test_uninstall_worker()
+
+	conn: Connection
+	temp: [64 * 1024]u8
+	testing.expect(t, h2_test_conn_setup(&conn, &s, temp[:]))
+	defer h2_test_conn_teardown(&conn)
+
+	client: http2.Http2_Connection
+	http2.conn_init(&client, false, context.allocator)
+	defer http2.conn_destroy(&client)
+	c_out: [dynamic]u8
+	defer delete(c_out)
+	http2.conn_send_preface(&client, &c_out)
+	req_h := []http2.Header {
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/"},
+	}
+	sid := http2.conn_send_request(&client, &c_out, req_h)
+	http2.conn_send_preface(&conn.h2, &conn.h2_out)
+	testing.expect_value(t, http2.conn_feed(&conn.h2, c_out[:], &conn.h2_out), http2.H2_Error.None)
+	clear(&conn.h2_out)
+
+	i, ok := h2_host_slot_alloc(&conn, sid)
+	testing.expect(t, ok)
+	for {
+		_, _, _, tok := http2.conn_take_request(&conn.h2)
+		if !tok {
+			break
+		}
+	}
+	slot := &conn.h2_slots[i]
+	response_init(&slot.res, &conn, context.allocator, slot)
+	defer delete(slot.res.headers._kv)
+
+	static_body := transmute([]u8)string("pong-borrow")
+	slot.res.status = .OK
+	body_static(&slot.res, static_body)
+	// Borrow path: materialize returns Static view; direct frame skips pending.
+	before_resp_cap := cap(conn.resp_buf)
+	h2_host_send_response(&conn, &slot.res)
+	testing.expect(t, cap(conn.resp_buf) == before_resp_cap, "single Static must not grow resp_buf")
+	testing.expect(t, !http2.conn_has_pending_body(&conn.h2), "oneshot fully framed, no pending")
+
+	c2: [dynamic]u8
+	defer delete(c2)
+	testing.expect_value(t, http2.conn_feed(&client, conn.h2_out[:], &c2), http2.H2_Error.None)
+	_, rbody, done := http2.conn_response(&client, sid)
+	testing.expect(t, done)
+	testing.expect_value(t, string(rbody), "pong-borrow")
+}

@@ -107,7 +107,13 @@ dual_ct_clear_meta :: proc(d: ^Dual_Ct) {
 // Shared dual-CT wire ops
 // ---------------------------------------------------------------------------
 
+// Fairness bound for H2 dense seal∥send (multi-window in one flush turn).
+// 8 × 256 KiB plain ≈ 2 MiB PT per reactor turn before re-arm.
+// Used only by h2_host_flush_out (H1 oneshot stays classic dual-CT).
+TLS_DENSE_MAX_WINDOWS :: 8
+
 // Submit ciphertext from a slab. Marks which slab is in flight; clears that slab's ready len.
+// Always arms the ring (soft CQE or EVFILT_WRITE) — use for promote/drain and post-cap re-entry.
 @(private)
 tls_host_submit_ct :: proc(conn: ^Connection, buf: []u8, n: int, hs: bool) -> bool {
 	if conn == nil || n <= 0 || len(buf) < n {
@@ -128,6 +134,69 @@ tls_host_submit_ct :: proc(conn: ^Connection, buf: []u8, n: int, hs: bool) -> bo
 		return false
 	}
 	return true
+}
+
+// tls_host_send_ct_or_arm: try nonblocking send of buf[:n] without arming when full.
+// full=true  → all bytes delivered; wire.kind stays .None, no pending_send.
+// full=false → remainder armed via host_submit_send (wire in flight), or hard fail.
+// H2 dense flush only — H1 oneshot uses tls_host_submit_ct.
+@(private)
+tls_host_send_ct_or_arm :: proc(conn: ^Connection, buf: []u8, n: int, hs: bool) -> (full: bool) {
+	if conn == nil || n <= 0 || len(buf) < n {
+		return true
+	}
+	if conn.state >= .Closing {
+		return false
+	}
+	d := &conn.dual_ct
+	is_hold := len(d.hold) > 0 && raw_data(buf) == raw_data(d.hold)
+
+	sent, again, hard := host_try_send_nb(conn, buf[:n])
+	if hard {
+		_wire_fail(conn, "TLS dense send CT failed fd=%v", conn.socket)
+		return false
+	}
+	if !again && sent >= n {
+		conn.wire.pending_send = nil
+		conn.tls_hs_send = false
+		d.send_is_hold = false
+		if is_hold {
+			d.hold_n = 0
+		} else {
+			d.tx_ready_n = 0
+		}
+		return true
+	}
+
+	off := sent if sent > 0 else 0
+	if off > n {
+		off = n
+	}
+	remain := buf[off:n]
+	if len(remain) == 0 {
+		conn.wire.pending_send = nil
+		conn.tls_hs_send = false
+		d.send_is_hold = false
+		if is_hold {
+			d.hold_n = 0
+		} else {
+			d.tx_ready_n = 0
+		}
+		return true
+	}
+	conn.wire.pending_send = remain
+	conn.tls_hs_send = hs
+	d.send_is_hold = is_hold
+	if is_hold {
+		d.hold_n = 0
+	} else {
+		d.tx_ready_n = 0
+	}
+	if err := host_submit_send(conn); err != .None {
+		_wire_fail(conn, "TLS submit_send CT failed: %v", err)
+		return false
+	}
+	return false
 }
 
 // Free slab for sealing while a send may be in flight (not ready, not sending).

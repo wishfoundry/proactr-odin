@@ -954,3 +954,122 @@ test_h2_pending_cursor_large_body :: proc(t: ^testing.T) {
 	testing.expect(t, s.end_sent, "END_STREAM after full drain")
 	free_all(context.temp_allocator)
 }
+
+// P0-3 oneshot direct: sole stream, body fits windows → frame from caller slice,
+// no append into stream.pending (zero pending residual, empty pending buffer).
+@(test)
+test_h2_oneshot_direct_no_pending :: proc(t: ^testing.T) {
+	srv: Http2_Connection
+	conn_init(&srv, true)
+	defer conn_destroy(&srv)
+	srv.preface_seen = true
+	// Default windows (65535) are enough for a small oneshot body.
+	out: [dynamic]u8
+	defer delete(out)
+	in_buf: [dynamic]u8
+	defer delete(in_buf)
+	req_block: [dynamic]u8
+	defer delete(req_block)
+	hpack.encode(&req_block, []Header{
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
+	})
+	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
+	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
+	clear(&out)
+
+	body := transmute([]u8)string("hello-oneshot-direct")
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
+	buffered := conn_send_body(&srv, &out, 1, body, true)
+	testing.expect_value(t, buffered, 0)
+
+	s, ok := srv.streams[1]
+	// Stream may already be reaped after full END_STREAM; either way no pending body.
+	if ok {
+		testing.expect_value(t, stream_pending_len(s), 0)
+		testing.expect(t, len(s.pending) == 0, "direct path never allocated pending")
+		testing.expect(t, s.end_sent, "END_STREAM on direct oneshot")
+	}
+	testing.expect(t, !conn_has_pending_body(&srv))
+
+	// Wire: HEADERS then DATA with full body + END_STREAM.
+	hf, _, c1, e1 := frame_decode(out[:])
+	testing.expect_value(t, e1, Frame_Error.None)
+	testing.expect_value(t, hf.type, FRAME_HEADERS)
+	d1, p1, _, e2 := frame_decode(out[c1:])
+	testing.expect_value(t, e2, Frame_Error.None)
+	testing.expect_value(t, d1.type, FRAME_DATA)
+	testing.expect_value(t, d1.length, u32(len(body)))
+	testing.expect(t, d1.flags & FLAG_END_STREAM != 0, "END_STREAM on oneshot DATA")
+	testing.expect(t, slice.equal(p1, body), "payload is caller body (framed once)")
+	free_all(context.temp_allocator)
+}
+
+// P0-3: multi-frame oneshot under max_frame_size still skips pending when windows fit.
+@(test)
+test_h2_oneshot_direct_multi_frame :: proc(t: ^testing.T) {
+	srv: Http2_Connection
+	conn_init(&srv, true)
+	defer conn_destroy(&srv)
+	srv.preface_seen = true
+	srv.send_window = 1 << 20
+	srv.peer_settings.initial_window_size = 1 << 20
+	srv.peer_settings.max_frame_size = 100 // force multi DATA frames
+
+	out: [dynamic]u8
+	defer delete(out)
+	in_buf: [dynamic]u8
+	defer delete(in_buf)
+	req_block: [dynamic]u8
+	defer delete(req_block)
+	hpack.encode(&req_block, []Header{
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
+	})
+	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
+	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
+	// Stream inherits peer initial window on open; enlarge for full oneshot.
+	s, ok := srv.streams[1]
+	testing.expect(t, ok)
+	s.send_window = 1 << 20
+	clear(&out)
+
+	body := make([]u8, 250)
+	defer delete(body)
+	for i in 0 ..< len(body) do body[i] = u8(i)
+
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
+	buffered := conn_send_body(&srv, &out, 1, body, true)
+	testing.expect_value(t, buffered, 0)
+	testing.expect(t, len(s.pending) == 0, "multi-frame oneshot still skips pending")
+	testing.expect(t, s.end_sent, "END_STREAM after multi-frame oneshot")
+
+	// Collect DATA payloads; must equal body, last has END_STREAM.
+	pos := 0
+	// Skip HEADERS
+	_, _, c0, e0 := frame_decode(out[pos:])
+	testing.expect_value(t, e0, Frame_Error.None)
+	pos += c0
+	got: [dynamic]u8
+	defer delete(got)
+	frames := 0
+	for pos < len(out) {
+		h, p, c, e := frame_decode(out[pos:])
+		testing.expect_value(t, e, Frame_Error.None)
+		if h.type == FRAME_DATA {
+			append(&got, ..p)
+			frames += 1
+			if pos + c >= len(out) {
+				testing.expect(t, h.flags & FLAG_END_STREAM != 0, "last DATA END_STREAM")
+			}
+		}
+		pos += c
+	}
+	testing.expect(t, frames >= 3, "max_frame_size forces ≥3 DATA frames")
+	testing.expect(t, slice.equal(got[:], body), "concatenated DATA == body")
+	free_all(context.temp_allocator)
+}

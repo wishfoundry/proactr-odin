@@ -299,8 +299,9 @@ decode_string :: proc(
 	raw := src[consumed:consumed + n]
 	consumed += n
 	if huff {
-		// Decode into a reserved scratch buffer, then copy into an exact-sized
-		// allocation so delete(string) frees the true size (never string(dec[:])).
+		// Single alloc when shrink succeeds: decode → shrink(cap==len) → transfer to
+		// string (no second copy). delete(string) frees with len; needs cap==len.
+		// If shrink fails, fall back to exact make+copy so free size is correct.
 		dec: [dynamic]u8
 		dec.allocator = allocator
 		// Huffman expands at most ~2x for typical HTTP; reserve avoids grow thrash.
@@ -310,8 +311,18 @@ decode_string :: proc(
 			return "", 0, .Bad_Huffman
 		}
 		out_n := len(dec)
+		if out_n == 0 {
+			delete(dec)
+			return "", consumed, .None
+		}
+		// Transfer only when free size matches len (delete(string) uses len).
+		_, _ = shrink(&dec)
+		if cap(dec) == out_n {
+			// Transfer buffer ownership; do not delete(dec) — caller owns the string.
+			return string(dec[:out_n]), consumed, .None
+		}
 		exact := make([]u8, out_n, allocator)
-		copy(exact, dec[:])
+		copy(exact, dec[:out_n])
 		delete(dec)
 		return string(exact), consumed, .None
 	}

@@ -467,12 +467,18 @@ h2_host_send_response :: proc(conn: ^Connection, r: ^Response) {
 	}
 }
 
-// h2_host_materialize_body copies Static/Bytes cmds (and simple File) into resp_buf.
-// Returns a slice of the body only (no H1 status-line). Empty when no body cmds.
+// h2_host_materialize_body returns body bytes for H2 send (no H1 status-line).
+// Empty when no body cmds.
 //
-// Shared conn.resp_buf scrap: handlers on a worker are sequential, so oneshot
-// materialize → engine pending completes before the next handler runs. Do not
-// retain the returned slice or Request temp across handler return / peer take.
+// P0-3 oneshot borrow: a single Static or Bytes cmd is returned as a view of
+// c.bytes — no copy into resp_buf. The slice is only used through the sync
+// conn_send_response → frame_write into h2_out (or pending append under flow
+// control). Static is process-lifetime; handler-owned Bytes must remain valid
+// until respond returns (matrix / oneshot handlers keep body until then).
+//
+// Multi-cmd Static/Bytes still concatenate into resp_buf. File cmds unsupported
+// on H2 eng path. Shared resp_buf scrap for multi-cmd: handlers on a worker are
+// sequential, so materialize → engine encode completes before the next handler.
 // Nested/async respond while another slot still aliases resp_buf is unsupported.
 @(private)
 h2_host_materialize_body :: proc(r: ^Response) -> []u8 {
@@ -493,7 +499,20 @@ h2_host_materialize_body :: proc(r: ^Response) -> []u8 {
 		return nil
 	}
 	cmds := r._cmds[:r._cmd_count]
-	// Copy Static/Bytes only (eng unary). File cmds unsupported on H2 eng path.
+
+	// Single Static/Bytes: borrow — skip resp_buf materialize (P0-3).
+	if r._cmd_count == 1 {
+		c := cmds[0]
+		if c.kind == .Static || c.kind == .Bytes {
+			return c.bytes
+		}
+		if c.kind == .File {
+			log.warnf("H2 eng: body File cmd not supported; omitted")
+			return nil
+		}
+	}
+
+	// Multi-cmd: copy Static/Bytes only into resp_buf (eng unary concat).
 	total: int
 	for c in cmds {
 		if c.kind == .Static || c.kind == .Bytes {

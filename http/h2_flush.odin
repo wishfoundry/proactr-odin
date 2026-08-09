@@ -101,13 +101,88 @@ h2_host_flush_out :: proc(conn: ^Connection) {
 		}
 	}
 
-	avail := h2_out_pending_len(conn)
-	if avail == 0 {
-		return
+	// Dense seal∥send (H2 only): while wire idle, seal + nonblocking send full CT
+	// windows until EAGAIN or TLS_DENSE_MAX_WINDOWS. H1 oneshot stays classic path.
+	for _ in 0 ..< TLS_DENSE_MAX_WINDOWS {
+		if conn.state >= .Closing {
+			return
+		}
+		if h2_out_pending_len(conn) == 0 {
+			path_metrics_note_req()
+			_ = tls_host_arm_recv(conn)
+			return
+		}
+		dst := d.tx
+		if len(dst) == 0 {
+			_ = tls_host_arm_recv(conn)
+			return
+		}
+		n_ct, _, ok := tls_seal_window(conn, dst, .H2_Out)
+		if !ok {
+			log.errorf("H2: PT high-water refuse fd=%v", conn.socket)
+			connection_close(conn)
+			return
+		}
+		if n_ct <= 0 {
+			if tls_server.bio_pending_out(p, ssl) > 0 {
+				_ = tls_host_try_drain_out(conn, hs = false)
+				if _conn_wire_in_flight(conn) {
+					tls_dual_ct_try_ahead(conn, .H2_Out)
+					_ = tls_host_arm_recv(conn)
+					return
+				}
+			}
+			if h2_out_pending_len(conn) == 0 {
+				path_metrics_note_req()
+				_ = tls_host_arm_recv(conn)
+				return
+			}
+			if !_conn_wire_in_flight(conn) {
+				continue
+			}
+			_ = tls_host_arm_recv(conn)
+			return
+		}
+
+		last := h2_out_pending_len(conn) == 0
+		if last {
+			path_metrics_note_req()
+		}
+		full := tls_host_send_ct_or_arm(conn, dst, n_ct, hs = false)
+		if conn.state >= .Closing {
+			return
+		}
+		if !full {
+			if _conn_wire_in_flight(conn) {
+				tls_dual_ct_try_ahead(conn, .H2_Out)
+			}
+			_ = tls_host_arm_recv(conn)
+			return
+		}
+		// Full sync CT delivery — seal next window while idle, or done.
+		if last {
+			_ = tls_host_arm_recv(conn)
+			return
+		}
 	}
 
+	// Fairness cap: more h2_out after max windows — classic arm so CQE re-enters.
+	if conn.state >= .Closing {
+		return
+	}
+	if h2_out_pending_len(conn) == 0 {
+		path_metrics_note_req()
+		_ = tls_host_arm_recv(conn)
+		return
+	}
+	if _conn_wire_in_flight(conn) {
+		tls_dual_ct_try_ahead(conn, .H2_Out)
+		_ = tls_host_arm_recv(conn)
+		return
+	}
 	dst := d.tx
 	if len(dst) == 0 {
+		_ = tls_host_arm_recv(conn)
 		return
 	}
 	n_ct, _, ok := tls_seal_window(conn, dst, .H2_Out)
@@ -117,27 +192,16 @@ h2_host_flush_out :: proc(conn: ^Connection) {
 		return
 	}
 	if n_ct <= 0 {
-		if tls_server.bio_pending_out(p, ssl) > 0 {
-			_ = tls_host_try_drain_out(conn, hs = false)
-		}
-		if h2_out_pending_len(conn) > 0 && !_conn_wire_in_flight(conn) {
-			h2_host_flush_out(conn)
-		} else if h2_out_pending_len(conn) == 0 {
-			path_metrics_note_req()
-		}
 		_ = tls_host_arm_recv(conn)
 		return
 	}
-
 	if h2_out_pending_len(conn) == 0 {
 		path_metrics_note_req()
 	}
 	if !tls_host_submit_ct(conn, dst, n_ct, hs = false) {
 		return
 	}
-	// Dual-CT: seal next into hold while this CT sends.
 	tls_dual_ct_try_ahead(conn, .H2_Out)
-	// Duplex: do not wait for send CQE to arm recv — arm now if free.
 	_ = tls_host_arm_recv(conn)
 }
 

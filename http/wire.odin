@@ -142,6 +142,37 @@ host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	return err
 }
 
+// host_try_send_nb: nonblocking send of buf on conn.socket (no ring arm).
+// Returns (bytes_sent, would_block, hard_error).
+// Pure EAGAIN → (0, true, false). Full delivery → (len, false, false).
+// EINTR retried; other errors → (0, false, true). Windows forces again (arm path).
+@(private)
+host_try_send_nb :: proc(conn: ^Connection, buf: []u8) -> (n: int, again: bool, hard: bool) {
+	if conn == nil || len(buf) == 0 {
+		return 0, false, false
+	}
+	when ODIN_OS == .Windows {
+		return 0, true, false
+	} else {
+		for _ in 0 ..< 8 {
+			sn := posix.send(posix.FD(conn.socket), raw_data(buf), c.size_t(len(buf)), {})
+			if sn >= 0 {
+				return int(sn), false, false
+			}
+			e := posix.errno()
+			if e == .EAGAIN || e == .EWOULDBLOCK {
+				return 0, true, false
+			}
+			if e == .EINTR {
+				continue
+			}
+			return 0, false, true
+		}
+		// EINTR storm — arm via ring rather than hard-fail.
+		return 0, true, false
+	}
+}
+
 // Pack non-empty exec_bufs[exec_i..] into conn.wire.iovecs (ephemeral for WRITEV submit).
 // Returns iov count (0 if nothing to send).
 @(private)

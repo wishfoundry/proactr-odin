@@ -71,11 +71,53 @@ _n_pending_streams :: proc(c: ^Http2_Connection) -> int {
 // number of bytes still buffered — i.e. the backpressure: >0 means the windows
 // are full and the caller should stop producing until a WINDOW_UPDATE arrives.
 //
+// Oneshot direct path (P0-3): when this stream's pending is empty, no other
+// stream is already pending, and the entire `data` fits current send windows,
+// DATA frames are written from `data` straight into `dst` (one copy via
+// frame_write). Skips append into stream.pending. Multi-stream / partial-window
+// still uses the pending path for fairness and WINDOW_UPDATE resume.
+//
+// Lifetime: `data` must remain valid until this returns (frames are encoded
+// synchronously into `dst`). Host oneshot flushes before handler return; Static
+// bodies are process-lifetime; handler-owned Bytes must outlive respond.
+//
 // When ≥2 streams already have pending, flush uses fair RR quanta so the first
 // writer cannot monopolize residual connection window on the multi-pending path
 // (PR9 PERF-M1). A sole pending stream still drains fully via `_flush_stream`.
 conn_send_body :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, sid: u32, data: []u8, end_stream := false) -> (buffered: int) {
 	s := _get_or_make_stream(c, sid)
+
+	// Sole-stream oneshot: frame full body from caller's slice when windows allow.
+	if len(data) > 0 &&
+	   stream_pending_len(s) == 0 &&
+	   !s.end_pending &&
+	   !s.end_sent &&
+	   _n_pending_streams(c) == 0 {
+		allowed := min(s.send_window, c.send_window)
+		if allowed >= i64(len(data)) {
+			frame_cap := i64(c.peer_settings.max_frame_size)
+			if frame_cap <= 0 do frame_cap = i64(DEFAULT_MAX_FRAME_SIZE)
+			off := 0
+			for off < len(data) {
+				n := min(int(frame_cap), len(data) - off)
+				last := off + n == len(data)
+				end := end_stream && last
+				flags: u8 = end ? FLAG_END_STREAM : 0
+				frame_write(dst, FRAME_DATA, flags, s.id, data[off:off + n])
+				s.send_window -= i64(n)
+				c.send_window -= i64(n)
+				off += n
+				if end {
+					s.end_sent = true
+					_stream_maybe_close(c, s)
+				}
+			}
+			// No pending bytes — direct path fully drained.
+			if end_stream || s.closed do conn_reap_streams(c)
+			return 0
+		}
+	}
+
 	if len(data) > 0 {
 		append(&s.pending, ..data)
 	}
