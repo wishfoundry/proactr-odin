@@ -735,8 +735,8 @@ h2_host_seal_window_into :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, ok
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
 	win := avail
-	if win > PULL_WINDOW_DEFAULT {
-		win = PULL_WINDOW_DEFAULT
+	if win > TLS_SEAL_WINDOW_DEFAULT {
+		win = TLS_SEAL_WINDOW_DEFAULT
 	}
 	if !pt_admit(&conn.pt, u32(win)) {
 		win = int(min(u32(win), TLS_RECORD_PLAIN))

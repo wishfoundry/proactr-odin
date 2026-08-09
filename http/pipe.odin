@@ -14,11 +14,18 @@ import "base:runtime"
 // ---------------------------------------------------------------------------
 
 // Max plaintext produce per unit from Static/Bytes/File into Conn_Pt_Ring.
+// Pure firehose / pipe SM use this; live TLS bulk uses TLS_SEAL_WINDOW_DEFAULT.
 PULL_WINDOW_DEFAULT :: 64 * 1024
 
+// Live TLS seal window (oneshot + H2 frame seal into dual-CT slabs). Larger than
+// PULL_WINDOW so bulk needs fewer SSL_write/CQE turns per MiB while dual-CT
+// keeps one window encrypting while another sends. OpenSSL still frames at
+// TLS_RECORD_PLAIN internally.
+TLS_SEAL_WINDOW_DEFAULT :: 256 * 1024
+
 // Ciphered-path default for Plan_Policy.max_write_unit (host sets when ciphered).
-// Apps may respect this via plan_context; not a public knob of its own.
-PIPE_MAX_WRITE_UNIT_DEFAULT :: PULL_WINDOW_DEFAULT
+// Apps may respect this via plan_context; not a public knobs of its own.
+PIPE_MAX_WRITE_UNIT_DEFAULT :: TLS_SEAL_WINDOW_DEFAULT
 
 // Single TLS record plaintext budget.
 TLS_RECORD_PLAIN :: 16 * 1024
@@ -29,14 +36,22 @@ TLS_RECORD_BATCH_TARGET :: 4
 // Double-buffer CT slots: encrypt ∥ send (seal_n ∈ {0,1,2}).
 CT_SLOTS :: 2
 
-// Fixed ciphertext slab capacity per CT slot (one pull window / batch plain).
+// Fixed ciphertext slab capacity per CT slot (pure pipe mock / firehose).
 CT_SLAB_SIZE :: PULL_WINDOW_DEFAULT
 
+// Live dual-CT slab: seal window + TLS record/AEAD overhead headroom.
+TLS_CT_SLAB_DEFAULT :: TLS_SEAL_WINDOW_DEFAULT + 16 * 1024
+
 // Stop producing into conn PT ring when admitted PT bytes ≥ this.
+// Pure pipe dual-slot peak = 2×PULL_WINDOW; live TLS raises per-conn on enable.
 PT_HIGH_WATER_DEFAULT :: 128 * 1024
+
+// Live ciphered PT high-water: two seal windows (depth-2 dual-CT).
+PT_HIGH_WATER_TLS_DEFAULT :: 2 * TLS_SEAL_WINDOW_DEFAULT
 
 // Stop sealing new CT when sealed/in-flight CT bytes ≥ this.
 CT_HIGH_WATER_DEFAULT :: 128 * 1024
+CT_HIGH_WATER_TLS_DEFAULT :: 2 * TLS_CT_SLAB_DEFAULT
 
 // Bounded partial-record remainder (fixed; not growable).
 RX_HOLD_CAP :: 16 * 1024
@@ -416,21 +431,24 @@ _conn_pipe_allocator :: proc(conn: ^Connection, fallback := context.allocator) -
 
 // connection_enable_ciphered: lightweight host path after TLS Open.
 // Sets conn.ciphered so plan_policy_for forces no sendfile and
-// max_write_unit = PIPE_MAX_WRITE_UNIT_DEFAULT; ensures PT high-water is set.
-// Does NOT allocate Seal_Queue or pipe CT[2] slabs — live oneshot uses serial
-// SSL_write + tls_ct_tx, not dual-CT seal∥send. Clear-H1 never calls this.
-// For pure firehose / future live seal∥send SM, call connection_enable_ciphered_pipe_sm
-// (or wire_conn_enable_seal_q + tls_pipe_alloc_buffers explicitly).
+// max_write_unit = PIPE_MAX_WRITE_UNIT_DEFAULT; raises PT high-water for
+// dual-CT large seal windows. Live oneshot uses dual CT slabs (tls_ct_tx +
+// tls_ct_hold), not pure-pipe Seal_Queue. Clear-H1 never calls this.
+// For pure firehose SM, call connection_enable_ciphered_pipe_sm.
 connection_enable_ciphered :: proc(conn: ^Connection, allocator := context.allocator) -> bool {
 	if conn == nil {
 		return false
 	}
 	if conn.ciphered {
+		// Keep TLS high-water even if already ciphered (re-open / tests).
+		if conn.pt.high_water < PT_HIGH_WATER_TLS_DEFAULT {
+			conn.pt.high_water = PT_HIGH_WATER_TLS_DEFAULT
+		}
 		return true
 	}
-	// Ensure PT high-water is live for windowed admit (pt_ring_init may already have set it).
-	if conn.pt.high_water == 0 {
-		conn.pt.high_water = PT_HIGH_WATER_DEFAULT
+	// Live dual-CT: admit up to two TLS seal windows (not pure-pipe 128 KiB HW).
+	if conn.pt.high_water < PT_HIGH_WATER_TLS_DEFAULT {
+		conn.pt.high_water = PT_HIGH_WATER_TLS_DEFAULT
 	}
 	conn.ciphered = true
 	return true

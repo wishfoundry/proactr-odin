@@ -99,7 +99,8 @@ server_tls_live :: proc(s: ^Server) -> bool {
 
 // TLS_CT_RX_DEFAULT / TX: network ciphertext windows (not app-visible).
 TLS_CT_RX_DEFAULT :: 16 * 1024
-TLS_CT_TX_DEFAULT :: CT_SLAB_SIZE // one pull window of CT room
+// Live dual-CT slab size (plain seal window + TLS record overhead headroom).
+TLS_CT_TX_DEFAULT :: TLS_CT_SLAB_DEFAULT
 
 // tls_host_on_accept: after conn_alloc + nonblocking fd. Creates SSL + mem-BIOs.
 // On success: tls_pipe = Handshake; does NOT enable ciphered yet.
@@ -812,11 +813,11 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		_response_fire_respond_hooks(r)
 	}
 
-	// Plain window: min(unsent, PULL_WINDOW_DEFAULT) from resp_buf[stream_sent:].
+	// Plain window: min(unsent, TLS_SEAL_WINDOW) from resp_buf[stream_sent:].
 	// Encrypt from resp_buf view — do not copy into stream_pool slabs.
 	win := unsent
-	if win > PULL_WINDOW_DEFAULT {
-		win = PULL_WINDOW_DEFAULT
+	if win > TLS_SEAL_WINDOW_DEFAULT {
+		win = TLS_SEAL_WINDOW_DEFAULT
 	}
 	plain := conn.resp_buf[conn.slot.stream_sent:][:win]
 
@@ -925,8 +926,8 @@ tls_host_seal_oneshot_window :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
 	win := len(conn.tls_plain_rest)
-	if win > PULL_WINDOW_DEFAULT {
-		win = PULL_WINDOW_DEFAULT
+	if win > TLS_SEAL_WINDOW_DEFAULT {
+		win = TLS_SEAL_WINDOW_DEFAULT
 	}
 	if !pt_admit(&conn.pt, u32(win)) {
 		win = int(min(u32(win), TLS_RECORD_PLAIN))
