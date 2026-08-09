@@ -63,5 +63,30 @@ Cleartext kqueue profile matrix (older): proactr ahead on tiny/file sendfile; be
 4. **Calibration:** bare OpenSSL encrypt+send microbench to bound headroom  
 5. Do **not** re-do plain-split, dual-CT 256KiB, 1MiB window, or heading coalesce as main bets  
 
+## Round 4 — TCP_NODELAY on accept (no kTLS)
+
+| Stage | Result |
+|-------|--------|
+| Plan | Header-map tax **REJECT** as RPS bet; OpenSSL calib not product |
+| Alt plan | **`TCP_NODELAY` on accept** — peer parity (ntex/drogon default) |
+| Plan critic | **APPROVE_WITH_AMENDMENTS** — gate ≥+5% h1s or h2 plain |
+| Impl | `net.set_option(client_fd, .TCP_Nodelay, true)` after accept |
+| Measure | h1s plain **+2.6%**, h2 plain **+1.0%** — gate **FAIL** |
+| h1s s1m ×3 | **2434–2472** vs R3 **2778** (−11–12%) — **regress** |
+| Decision | **RESET** (not committed) |
+
+**Learning:** On this Darwin loopback+h2load shape, Nagle off is **not free RPS**; bulk H1.s got worse. Peers may benefit differently (epoll/uring paths). Do not force NODELAY for matrix cosplay.
+
+## Stop inventing small wins?
+
+Per R4 plan critic: after NODELAY miss, optional OpenSSL calibration; **fresh sample** of current HPACK/send mix; only productize if a ≥10% CPU bucket is named.
+
+## Next levers still open (honest, **no kTLS**)
+
+1. Fresh post-HPACK **sample** on h2 plain / h1s plain (current residual stacks)  
+2. Offline **OpenSSL encrypt+send** calibration for s1m ceiling  
+3. H1 header `sanitize_key` hygiene (not as primary RPS bet)  
+4. Accept residual bulk gap vs drogon without kTLS until architecture changes  
+
 ## Loop policy reminder
 Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix.
