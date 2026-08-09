@@ -119,13 +119,28 @@ Artifacts: [`KQUEUE_TLS_H2_P0c.md`](KQUEUE_TLS_H2_P0c.md), `summary_P0c.tsv`.
 
 **Not claimed:** H1 RPS wins · peer parity · P0-1/P0-2 complete · kTLS.
 
+## Round 6 — H2 windowed frame (RESET)
+
+| Stage | Result |
+|-------|--------|
+| Pre-flight sample h2 s1m | Busy: **memmove ≈ AES ≈ sendto**; `_append_elems` residual ~8%; memmove mostly **OpenSSL WPACKET + mem BIO** (not h2_out growth alone) |
+| Plan critic | APPROVE_WITH_AMENDMENTS: windowed frame-into-dense-seal; gate h2 s1m ≥+10%; H1 density family **closed** |
+| Impl | Frame DATA in ≤256 KiB body windows + flush; small-body pre-reserve |
+| First matrix | h2 s1m **2727** vs P0c **2509** (+8.7%) soft-band; plain/s4k flat |
+| 3× remeasure (10s, warm) | **2462 / 2500 / 2524** ≈ P0c — **noise, not real** |
+| Chunk-size “fix” | Worse (2569 / more flush turns) |
+| Decision | **RESET** (not committed) |
+
+**Learning:** residual H2 bulk tax after P0c is **OpenSSL mem-BIO + WPACKET + AES + send**, not frame-buffer growth. Windowed encode is not a ≥10% RPS lever on this host. Do not re-run as RPS bet.
+
 ## Next levers still open (honest, **no kTLS**)
 
-1. **h1s s1m 0.30× drogon** — still open; H1 dense failed; need new theory (CT depth / I/O law) not re-run of H1 dense  
-2. **h2 plain 0.75× ntex** — residual after HPACK alloc micro; sample + deeper path  
-3. H2 s1m residual vs go (~0.77×) — pure-Go AES / mem-BIO ceiling  
-4. Offline OpenSSL encrypt+send-until-EAGAIN microbench vs drogon bound  
-5. Do **not** re-enable H1 dense without a new theory + gate  
+1. **h1s s1m 0.30× drogon** — H1 density family **closed** for this loop; I/O-law / OpenSSL ceiling until new theory  
+2. **h2 plain 0.75× ntex** — sample: sendto+recv+frame/map (HPACK not dominant); need ≥10% named leaf  
+3. **h2 s1m vs go (~0.77×)** — mem-BIO + pure-Go AES gap; product RPS micro on frame path **exhausted** for now  
+4. Offline OpenSSL encrypt+send-until-EAGAIN microbench vs drogon (calibration, not matrix win)  
+5. Optional: custom wBIO → dual-CT (kill mem_read/write copies) — real eng, not a free flag  
+6. Do **not** re-run: H1 dense, windowed frame, HPACK free-size as RPS, NODELAY, 1 MiB seal  
 
 ## Loop policy reminder
-Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix.
+Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix. **3× remeasure soft-band claims.**
