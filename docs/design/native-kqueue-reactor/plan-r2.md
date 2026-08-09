@@ -1,9 +1,9 @@
 # Plan R2: Native kqueue reactor host (Darwin) — frozen for implement
 
-**Status:** Phase 0 **FROZEN** — multi-critic WOW (2026-08-09 consolidation)  
+**Status:** Phase 0 **FROZEN** (multi-critic WOW) · **P4 product TLS send law SHIPPED** · **P5-full wait ownership DEFERRED** (matrix segfault under concurrent load — reverted)  
 **Supersedes:** `plan-r1.md`  
 **Date:** 2026-08-09  
-**START_IMPLEMENT:** yes (P0 first; no behavior change until inventory exit)  
+**Implementation:** `6e22f37` (H1), `20d5cfa` (H2 + dual_ct no-op)  
 
 **One sentence:** On Darwin, delete proactor-emulation for HTTP sockets and run a **native kqueue reactor** send law (encrypt→write until EAGAIN, single residual CT). Linux keeps true io_uring proactor. **APP_CONTRACT unchanged.**
 
