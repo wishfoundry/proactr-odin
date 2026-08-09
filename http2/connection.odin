@@ -93,6 +93,7 @@ Http2_Connection :: struct {
 	is_server:      bool,
 	allocator:      mem.Allocator,
 	dec:            hpack.HPackDynamicTable, // HPACK decoder table (mirrors peer insertions)
+	enc:            hpack.HPackEncoder,      // HPACK encoder dynamic table (peer decoder view)
 	local_settings: Settings,
 	peer_settings:  Settings,
 	rx:             [dynamic]u8,
@@ -157,12 +158,15 @@ Http2_Connection :: struct {
 conn_init :: proc(c: ^Http2_Connection, is_server: bool, allocator := context.allocator) {
 	c.is_server = is_server
 	c.allocator = allocator
-	hpack.init(&c.dec, 4096, allocator)
 	c.rx.allocator = allocator
 	c.streams.allocator = allocator
 	c.cont_frag.allocator = allocator
 	c.local_settings = default_settings()
 	c.peer_settings = default_settings()
+	// Decoder table max/limit match SETTINGS_HEADER_TABLE_SIZE we advertise.
+	hpack.init(&c.dec, int(c.local_settings.header_table_size), allocator)
+	// Encoder table max tracks peer SETTINGS_HEADER_TABLE_SIZE (default 4096).
+	hpack.encoder_init(&c.enc, int(c.peer_settings.header_table_size), allocator)
 	c.next_stream_id = is_server ? 2 : 1
 	c.preface_seen = !is_server
 	c.send_window = DEFAULT_WINDOW
@@ -182,6 +186,7 @@ conn_destroy :: proc(c: ^Http2_Connection) {
 		free(s, c.allocator)
 	}
 	delete(c.streams)
+	hpack.encoder_destroy(&c.enc)
 	hpack.destroy(&c.dec)
 	delete(c.rx)
 	delete(c.cont_frag)
@@ -314,7 +319,17 @@ _handle_frame :: proc(c: ^Http2_Connection, h: Frame_Header, payload: []u8, out:
 		// send window by the delta (§6.9.2) — and a positive delta may have
 		// just made buffered body sendable, so flush.
 		old_window := i64(c.peer_settings.initial_window_size)
+		old_table := c.peer_settings.header_table_size
 		settings_decode(payload, &c.peer_settings)
+		// Peer HEADER_TABLE_SIZE caps what we may put in our encoder dynamic table.
+		// Cap absurd values so a peer cannot force multi-GB encoder tables.
+		if c.peer_settings.header_table_size != old_table {
+			table_cap := c.peer_settings.header_table_size
+			if table_cap > 16 << 20 {
+				table_cap = 16 << 20 // 16 MiB hard ceiling
+			}
+			hpack.encoder_set_max(&c.enc, int(table_cap))
+		}
 		if delta := i64(c.peer_settings.initial_window_size) - old_window; delta != 0 {
 			for _, s in c.streams {
 				s.send_window += delta
@@ -501,6 +516,19 @@ _finish_header_block :: proc(
 		c.open_streams >= int(c.local_settings.max_concurrent_streams)
 	refuse_new := refuse_goaway || refuse_max
 
+	// Decoded list budget: wire block cap doubles as HPACK entry-size budget
+	// when set; also honour advertised SETTINGS_MAX_HEADER_LIST_SIZE.
+	max_list := 0
+	if c.max_header_bytes > 0 {
+		max_list = c.max_header_bytes
+	}
+	if c.local_settings.max_header_list_size > 0 {
+		mls := int(c.local_settings.max_header_list_size)
+		if max_list == 0 || mls < max_list {
+			max_list = mls
+		}
+	}
+
 	if refuse_new {
 		// Decode for table sync only — do not open the stream or deliver.
 		tmp: [dynamic]Header
@@ -509,7 +537,7 @@ _finish_header_block :: proc(
 			hpack.headers_destroy(tmp[:], c.allocator)
 			delete(tmp)
 		}
-		if hpack.decode(&c.dec, frag, &tmp, c.allocator) != .None {
+		if hpack.decode(&c.dec, frag, &tmp, c.allocator, max_list) != .None {
 			return _fail(c, H2_COMPRESSION_ERROR, .Hpack)
 		}
 		// Peer did open this id; track it so reuse is PROTOCOL_ERROR.
@@ -524,7 +552,7 @@ _finish_header_block :: proc(
 	s := _get_or_make_stream(c, sid)
 	is_trailers := s.headers_done
 	first_new := len(s.headers)
-	if hpack.decode(&c.dec, frag, &s.headers, c.allocator) != .None {
+	if hpack.decode(&c.dec, frag, &s.headers, c.allocator, max_list) != .None {
 		return _fail(c, H2_COMPRESSION_ERROR, .Hpack)
 	}
 	if c.is_server {

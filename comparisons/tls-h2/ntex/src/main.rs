@@ -67,8 +67,12 @@ async fn sse() -> HttpResponse {
 }
 
 async fn stats() -> HttpResponse {
+    #[cfg(target_os = "linux")]
+    let io = "neon-uring";
+    #[cfg(not(target_os = "linux"))]
+    let io = "tokio";
     let body = format!(
-        "peer=ntex\nreqs={}\nbytes={}\ntls=openssl\nio=neon-uring\n",
+        "peer=ntex\nreqs={}\nbytes={}\ntls=openssl\nio={io}\n",
         REQS.load(Ordering::Relaxed),
         BYTES.load(Ordering::Relaxed)
     );
@@ -105,8 +109,12 @@ async fn main() -> std::io::Result<()> {
     // ntex bind_openssl also injects ALPN h2|http/1.1.
 
     let addr = format!("0.0.0.0:{port}");
+    #[cfg(target_os = "linux")]
+    let io = "neon-uring";
+    #[cfg(not(target_os = "linux"))]
+    let io = "tokio";
     eprintln!(
-        "ntex tls-h2 on {addr} workers={workers} tls=openssl alpn=h2|http/1.1 io=neon-uring instrument=reqs+bytes"
+        "ntex tls-h2 on {addr} workers={workers} tls=openssl alpn=h2|http/1.1 io={io} instrument=reqs+bytes"
     );
 
     HttpServer::new(|| {

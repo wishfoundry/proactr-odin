@@ -29,11 +29,11 @@ test_h2_loopback_request_response :: proc(t: ^testing.T) {
 
 	conn_send_preface(&client, &c_out)
 	req := []Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/"},
-		{"user-agent", "vapor-http2"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/"},
+		{name = "user-agent", value = "vapor-http2"},
 	}
 	sid := conn_send_request(&client, &c_out, req)
 	conn_send_preface(&server, &s_out)
@@ -49,7 +49,7 @@ test_h2_loopback_request_response :: proc(t: ^testing.T) {
 			if !ok do break
 			testing.expect_value(t, find(hdrs, ":method"), "GET")
 			testing.expect_value(t, find(hdrs, ":path"), "/")
-			resp := []Header{{":status", "200"}, {"content-type", "text/plain"}}
+			resp := []Header{{name = ":status", value = "200"}, {name = "content-type", value = "text/plain"}}
 			conn_send_response(&server, &s_out, rsid, resp, transmute([]u8)string("hi from h2"))
 		}
 		if len(s_out) > 0 {
@@ -75,7 +75,7 @@ test_h2_stream_ids :: proc(t: ^testing.T) {
 	defer conn_destroy(&client)
 	out: [dynamic]u8
 	defer delete(out)
-	req := []Header{{":method", "GET"}, {":path", "/"}}
+	req := []Header{{name = ":method", value = "GET"}, {name = ":path", value = "/"}}
 	s1 := conn_send_request(&client, &out, req)
 	s2 := conn_send_request(&client, &out, req)
 	testing.expect_value(t, s1, u32(1))

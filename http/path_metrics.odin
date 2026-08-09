@@ -7,8 +7,12 @@
 //   ct_sends                          — ciphertext submit_send ops
 //   materialize                       — plan materialize (clear path cousin)
 //   reqs                              — completed response seal cycles (approx)
+//
+// Cycle counters (HTTP_PHASE_STATS only — profiling builds):
+//   seal_cyc / ssl_write_cyc / bio_read_cyc / materialize_cyc / ahead_seals
 package http
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:log"
 import "core:strings"
@@ -23,6 +27,14 @@ path_h2_pt_bytes:    u64
 path_ssl_write_ok:   u64
 path_ct_sends:       u64
 path_materialize:    u64
+
+// Profiling cycles (only accumulated when HTTP_PHASE_STATS).
+path_seal_cyc:         u64 // full seal window: SSL_write + bio_read
+path_ssl_write_cyc:    u64
+path_bio_read_cyc:     u64
+path_materialize_cyc:  u64
+path_ahead_seals:      u64 // dual-CT try_ahead seal successes (n_ct > 0)
+path_promote:          u64 // promote_hold submitted a ready slab
 
 path_metrics_note_req :: #force_inline proc "contextless" () {
 	sync.atomic_add(&path_reqs, 1)
@@ -67,6 +79,50 @@ path_metrics_note_materialize :: #force_inline proc "contextless" () {
 	sync.atomic_add(&path_materialize, 1)
 }
 
+// Cycle helpers — no-op cost when HTTP_PHASE_STATS is false (compile-time strip).
+path_metrics_cyc_now :: #force_inline proc "contextless" () -> u64 {
+	when HTTP_PHASE_STATS {
+		return u64(intrinsics.read_cycle_counter())
+	} else {
+		return 0
+	}
+}
+
+path_metrics_note_seal_cycles :: #force_inline proc "contextless" (ssl_write_c, bio_read_c: u64) {
+	when HTTP_PHASE_STATS {
+		if ssl_write_c != 0 {
+			sync.atomic_add(&path_ssl_write_cyc, ssl_write_c)
+		}
+		if bio_read_c != 0 {
+			sync.atomic_add(&path_bio_read_cyc, bio_read_c)
+		}
+		total := ssl_write_c + bio_read_c
+		if total != 0 {
+			sync.atomic_add(&path_seal_cyc, total)
+		}
+	}
+}
+
+path_metrics_note_materialize_cycles :: #force_inline proc "contextless" (c: u64) {
+	when HTTP_PHASE_STATS {
+		if c != 0 {
+			sync.atomic_add(&path_materialize_cyc, c)
+		}
+	}
+}
+
+path_metrics_note_ahead_seal :: #force_inline proc "contextless" () {
+	when HTTP_PHASE_STATS {
+		sync.atomic_add(&path_ahead_seals, 1)
+	}
+}
+
+path_metrics_note_promote :: #force_inline proc "contextless" () {
+	when HTTP_PHASE_STATS {
+		sync.atomic_add(&path_promote, 1)
+	}
+}
+
 path_metrics_reset :: proc() {
 	sync.atomic_store(&path_reqs, 0)
 	sync.atomic_store(&path_seal_calls, 0)
@@ -77,6 +133,22 @@ path_metrics_reset :: proc() {
 	sync.atomic_store(&path_ssl_write_ok, 0)
 	sync.atomic_store(&path_ct_sends, 0)
 	sync.atomic_store(&path_materialize, 0)
+	sync.atomic_store(&path_seal_cyc, 0)
+	sync.atomic_store(&path_ssl_write_cyc, 0)
+	sync.atomic_store(&path_bio_read_cyc, 0)
+	sync.atomic_store(&path_materialize_cyc, 0)
+	sync.atomic_store(&path_ahead_seals, 0)
+	sync.atomic_store(&path_promote, 0)
+	when HTTP_PHASE_STATS {
+		// Also clear HTTP request phase buckets so /_matrix/reset is a full baseline.
+		sync.atomic_store(&phase_n, 0)
+		sync.atomic_store(&phase_parse_cyc, 0)
+		sync.atomic_store(&phase_header_parse_cyc, 0)
+		sync.atomic_store(&phase_rline_parse_cyc, 0)
+		sync.atomic_store(&phase_handle_cyc, 0)
+		sync.atomic_store(&phase_build_cyc, 0)
+		sync.atomic_store(&phase_reset_cyc, 0)
+	}
 }
 
 // path_metrics_format returns a text/plain scrape (key=value lines).
@@ -95,11 +167,16 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	if pt > 0 {
 		ratio = f64(ct) / f64(pt)
 	}
+	seals_per_req: f64 = 0
+	if reqs > 0 {
+		seals_per_req = f64(seal) / f64(reqs)
+	}
 	b: strings.Builder
 	strings.builder_init(&b, allocator)
 	fmt.sbprintf(&b, "peer=proactr\n")
 	fmt.sbprintf(&b, "reqs=%d\n", reqs)
 	fmt.sbprintf(&b, "seal_calls=%d\n", seal)
+	fmt.sbprintf(&b, "seals_per_req=%.3f\n", seals_per_req)
 	fmt.sbprintf(&b, "ssl_write_ok=%d\n", sslw)
 	fmt.sbprintf(&b, "pt_bytes=%d\n", pt)
 	fmt.sbprintf(&b, "ct_bytes=%d\n", ct)
@@ -108,6 +185,50 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	fmt.sbprintf(&b, "h2_pt_bytes=%d\n", h2pt)
 	fmt.sbprintf(&b, "ct_sends=%d\n", cts)
 	fmt.sbprintf(&b, "materialize=%d\n", mat)
+	when HTTP_PHASE_STATS {
+		seal_c := sync.atomic_load(&path_seal_cyc)
+		ssl_c := sync.atomic_load(&path_ssl_write_cyc)
+		bio_c := sync.atomic_load(&path_bio_read_cyc)
+		mat_c := sync.atomic_load(&path_materialize_cyc)
+		ahead := sync.atomic_load(&path_ahead_seals)
+		promo := sync.atomic_load(&path_promote)
+		// Denominators: prefer seal_calls for seal stages; materialize count for mat.
+		sf := f64(seal) if seal > 0 else 1.0
+		mf := f64(mat) if mat > 0 else 1.0
+		rf := f64(reqs) if reqs > 0 else 1.0
+		fmt.sbprintf(&b, "seal_cyc=%d\n", seal_c)
+		fmt.sbprintf(&b, "ssl_write_cyc=%d\n", ssl_c)
+		fmt.sbprintf(&b, "bio_read_cyc=%d\n", bio_c)
+		fmt.sbprintf(&b, "materialize_cyc=%d\n", mat_c)
+		fmt.sbprintf(&b, "ahead_seals=%d\n", ahead)
+		fmt.sbprintf(&b, "promote=%d\n", promo)
+		fmt.sbprintf(&b, "cyc_per_seal=%.0f\n", f64(seal_c) / sf)
+		fmt.sbprintf(&b, "cyc_ssl_write_per_seal=%.0f\n", f64(ssl_c) / sf)
+		fmt.sbprintf(&b, "cyc_bio_read_per_seal=%.0f\n", f64(bio_c) / sf)
+		fmt.sbprintf(&b, "cyc_materialize_per=%.0f\n", f64(mat_c) / mf)
+		// Share of seal window cycles.
+		ssl_share := 100.0 * f64(ssl_c) / f64(seal_c if seal_c > 0 else 1)
+		bio_share := 100.0 * f64(bio_c) / f64(seal_c if seal_c > 0 else 1)
+		fmt.sbprintf(&b, "seal_share_ssl_write=%.1f\n", ssl_share)
+		fmt.sbprintf(&b, "seal_share_bio_read=%.1f\n", bio_share)
+		// HTTP request phases (parse/handle/build/reset).
+		pn := sync.atomic_load(&phase_n)
+		pp := sync.atomic_load(&phase_parse_cyc)
+		ph := sync.atomic_load(&phase_handle_cyc)
+		pb := sync.atomic_load(&phase_build_cyc)
+		pr := sync.atomic_load(&phase_reset_cyc)
+		pf := f64(pn) if pn > 0 else 1.0
+		fmt.sbprintf(&b, "phase_n=%d\n", pn)
+		fmt.sbprintf(&b, "phase_parse_cyc_per=%.0f\n", f64(pp) / pf)
+		fmt.sbprintf(&b, "phase_handle_cyc_per=%.0f\n", f64(ph) / pf)
+		fmt.sbprintf(&b, "phase_build_cyc_per=%.0f\n", f64(pb) / pf)
+		fmt.sbprintf(&b, "phase_reset_cyc_per=%.0f\n", f64(pr) / pf)
+		// seal cycles attributed per completed req (approx).
+		fmt.sbprintf(&b, "seal_cyc_per_req=%.0f\n", f64(seal_c) / rf)
+		// Ahead efficiency: seals that happened while send inflight.
+		ahead_share := 100.0 * f64(ahead) / f64(seal if seal > 0 else 1)
+		fmt.sbprintf(&b, "ahead_seal_share=%.1f\n", ahead_share)
+	}
 	return strings.to_string(b)
 }
 

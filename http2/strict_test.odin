@@ -29,7 +29,7 @@ request_block :: proc(headers: []Header, buf: ^[dynamic]u8) {
 }
 
 @(private = "file")
-GOOD_REQ := []Header{{":method", "GET"}, {":scheme", "http"}, {":authority", "x"}, {":path", "/"}}
+GOOD_REQ := []Header{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":authority", value = "x"}, {name = ":path", value = "/"}}
 
 @(test)
 test_h2_strict_frame_rules :: proc(t: ^testing.T) {
@@ -128,13 +128,13 @@ test_h2_strict_frame_rules :: proc(t: ^testing.T) {
 @(test)
 test_h2_strict_request_semantics :: proc(t: ^testing.T) {
 	bad_requests := [][]Header{
-		{{":method", "GET"}, {":scheme", "http"}, {":authority", "x"}},                          // no :path
-		{{":method", "GET"}, {":scheme", "http"}, {":path", ""}},                                // empty :path
-		{{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {":status", "200"}},           // response pseudo
-		{{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {"x-a", "1"}, {":path", "/"}}, // pseudo after regular
-		{{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {"X-Upper", "1"}},             // uppercase name
-		{{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {"connection", "keep-alive"}}, // conn-specific
-		{{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {"te", "gzip"}},               // te != trailers
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":authority", value = "x"}},                          // no :path
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":path", value = ""}},                                // empty :path
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":path", value = "/"}, {name = ":status", value = "200"}},           // response pseudo
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":path", value = "/"}, {name = "x-a", value = "1"}, {name = ":path", value = "/"}}, // pseudo after regular
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":path", value = "/"}, {name = "X-Upper", value = "1"}},             // uppercase name
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":path", value = "/"}, {name = "connection", value = "keep-alive"}}, // conn-specific
+		{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":path", value = "/"}, {name = "te", value = "gzip"}},               // te != trailers
 	}
 	for bad in bad_requests {
 		c := server_conn()
@@ -156,7 +156,7 @@ test_h2_strict_request_semantics :: proc(t: ^testing.T) {
 		defer conn_destroy(&c)
 		block: [dynamic]u8
 		defer delete(block)
-		request_block([]Header{{":method", "POST"}, {":scheme", "http"}, {":path", "/"}, {"content-length", "5"}}, &block)
+		request_block([]Header{{name = ":method", value = "POST"}, {name = ":scheme", value = "http"}, {name = ":path", value = "/"}, {name = "content-length", value = "5"}}, &block)
 		wire: [dynamic]u8
 		defer delete(wire)
 		frame_write(&wire, FRAME_HEADERS, FLAG_END_HEADERS, 1, block[:])

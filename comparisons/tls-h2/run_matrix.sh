@@ -43,19 +43,37 @@ echo "WORKERS=$WORKERS BENCH_C=$BENCH_C BENCH_Z=${BENCH_Z}s WARMUP_Z=${WARMUP_Z}
 echo "CERT_FILE=$CERT_FILE"
 echo "LOGDIR=$LOGDIR"
 echo "backends (must stay labeled):"
-echo "  proactr: io_uring + mem-BIO OpenSSL · ALPN h2|http/1.1"
-echo "  ntex:    neon-uring + OpenSSL · ALPN h2|http/1.1 (ntex bind_openssl)"
-echo "  drogon:  trantor/epoll + OpenSSL · primarily HTTP/1.1 (h2 may be N/A)"
-echo "  go:      net/http + crypto/tls · auto HTTP/2 · epoll/net"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "  proactr: kqueue + mem-BIO OpenSSL · ALPN h2|http/1.1"
+  echo "  ntex:    tokio + OpenSSL · ALPN h2|http/1.1 (Darwin; neon-uring is Linux-only)"
+  echo "  drogon:  trantor/kqueue + OpenSSL · primarily HTTP/1.1 (h2 may be N/A)"
+  echo "  go:      net/http + crypto/tls · auto HTTP/2 · kqueue/net"
+else
+  echo "  proactr: io_uring + mem-BIO OpenSSL · ALPN h2|http/1.1"
+  echo "  ntex:    neon-uring + OpenSSL · ALPN h2|http/1.1 (ntex bind_openssl)"
+  echo "  drogon:  trantor/epoll + OpenSSL · primarily HTTP/1.1 (h2 may be N/A)"
+  echo "  go:      net/http + crypto/tls · auto HTTP/2 · epoll/net"
+fi
 echo ""
 
 ./gen_certs.sh
 
 kill_port() {
-  if have fuser; then
+  # macOS ships a different fuser; use lsof on Darwin always.
+  if [[ "$(uname -s)" == "Darwin" ]] && have lsof; then
+    pids=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      kill -9 $pids 2>/dev/null || true
+    fi
+  elif have fuser; then
     fuser -k "${PORT}/tcp" 2>/dev/null || true
   elif have lsof; then
-    lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    pids=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      kill -9 $pids 2>/dev/null || true
+    fi
   fi
   sleep 0.3
 }
@@ -209,17 +227,26 @@ bench_one() {
   url="https://127.0.0.1:${PORT}${path}"
   out="$LOGDIR/${peer}.${proto}.${test}.h2load.txt"
   echo "--- $peer $proto $test → $url ---"
-  local h1flag=()
+  # Bash 3.2 (macOS) + set -u: empty arrays are "unbound"; use a scalar flag.
+  local h1_opt=""
   if [[ "$proto" == "h1s" ]]; then
-    h1flag=(--h1)
+    h1_opt="--h1"
   fi
   export SSL_CERT_FILE="$CERT_FILE"
   reset_stats
   if [[ "${WARMUP_Z}" != "0" ]]; then
-    SSL_CERT_FILE="$CERT_FILE" h2load -c "$BENCH_C" -D "$WARMUP_Z" -t 4 "${h1flag[@]}" "$url" >/dev/null 2>&1 || true
+    if [[ -n "$h1_opt" ]]; then
+      SSL_CERT_FILE="$CERT_FILE" h2load -c "$BENCH_C" -D "$WARMUP_Z" -t 4 "$h1_opt" "$url" >/dev/null 2>&1 || true
+    else
+      SSL_CERT_FILE="$CERT_FILE" h2load -c "$BENCH_C" -D "$WARMUP_Z" -t 4 "$url" >/dev/null 2>&1 || true
+    fi
     reset_stats
   fi
-  SSL_CERT_FILE="$CERT_FILE" h2load -c "$BENCH_C" -D "$BENCH_Z" -t 4 "${h1flag[@]}" "$url" | tee "$out"
+  if [[ -n "$h1_opt" ]]; then
+    SSL_CERT_FILE="$CERT_FILE" h2load -c "$BENCH_C" -D "$BENCH_Z" -t 4 "$h1_opt" "$url" | tee "$out"
+  else
+    SSL_CERT_FILE="$CERT_FILE" h2load -c "$BENCH_C" -D "$BENCH_Z" -t 4 "$url" | tee "$out"
+  fi
   rps="$(parse_h2load_rps "$out")"
   failed_line="$(parse_h2load_failed "$out")"
   read -r f e t <<<"$failed_line"
@@ -395,10 +422,17 @@ done
   echo ""
   echo "| Peer | Stack | TLS | H2 |"
   echo "|------|-------|-----|-----|"
-  echo "| proactr | io_uring | OpenSSL mem-BIO | ALPN h2 product path |"
-  echo "| ntex | neon-uring | OpenSSL (ntex-tls) | ALPN h2 via bind_openssl |"
-  echo "| drogon | trantor **epoll** | OpenSSL | primarily H1; h2 cells N/A if no_h2 |"
-  echo "| go | net/http epoll | crypto/tls | automatic HTTP/2 |"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "| proactr | **kqueue** | OpenSSL mem-BIO | ALPN h2 product path |"
+    echo "| ntex | **tokio** (not neon-uring) | OpenSSL (ntex-tls) | ALPN h2 via bind_openssl |"
+    echo "| drogon | trantor **kqueue** | OpenSSL | primarily H1; h2 cells N/A if no_h2 |"
+    echo "| go | net/http **kqueue** | crypto/tls | automatic HTTP/2 |"
+  else
+    echo "| proactr | io_uring | OpenSSL mem-BIO | ALPN h2 product path |"
+    echo "| ntex | neon-uring | OpenSSL (ntex-tls) | ALPN h2 via bind_openssl |"
+    echo "| drogon | trantor **epoll** | OpenSSL | primarily H1; h2 cells N/A if no_h2 |"
+    echo "| go | net/http epoll | crypto/tls | automatic HTTP/2 |"
+  fi
   echo ""
   echo "## RPS matrix"
   echo ""
@@ -413,7 +447,12 @@ done
   echo "- Nonzero failed/errored/timeout → status=fail RPS=INVALID."
   echo "- go: GOMAXPROCS=$WORKERS label only (not thread-per-worker)."
   echo "- proactr/ntex: WORKERS=$WORKERS thread/worker model."
-  echo "- drogon: setThreadNum=$WORKERS, epoll — not same I/O class as uring peers."
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "- **Darwin/kqueue host:** proactr uses kqueue (not io_uring). ntex uses tokio+openssl (not neon-uring)."
+    echo "- drogon: setThreadNum=$WORKERS, trantor kqueue — not Linux epoll class."
+  else
+    echo "- drogon: setThreadNum=$WORKERS, epoll — not same I/O class as uring peers."
+  fi
   echo "- Instrumentation: /_matrix/stats after each cell → instrumentation.txt"
   echo "- Not multi-stream SSE RPS; oneshot size ladder only."
   if [[ -s "$LOGDIR/errors.txt" ]]; then

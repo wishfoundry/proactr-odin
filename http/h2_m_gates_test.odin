@@ -89,16 +89,16 @@ test_m1_concurrent_unary_two_get :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_a := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/a"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/a"},
 	}
 	req_b := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/b"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/b"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_a)
 	sid2 := http2.conn_send_request(&client, &c_out, req_b)
@@ -147,10 +147,10 @@ test_m2_concurrent_deferred_large_bodies_window_update :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_h)
 	sid2 := http2.conn_send_request(&client, &c_out, req_h)
@@ -171,9 +171,9 @@ test_m2_concurrent_deferred_large_bodies_window_update :: proc(t: ^testing.T) {
 	defer delete(body)
 	for i in 0 ..< 50 do body[i] = u8('B')
 
-	http2.conn_send_headers(&srv, &out, sid1, []http2.Header{{":status", "200"}}, false)
+	http2.conn_send_headers(&srv, &out, sid1, []http2.Header{{name = ":status", value = "200"}}, false)
 	b1 := http2.conn_send_body(&srv, &out, sid1, body, true)
-	http2.conn_send_headers(&srv, &out, sid2, []http2.Header{{":status", "200"}}, false)
+	http2.conn_send_headers(&srv, &out, sid2, []http2.Header{{name = ":status", value = "200"}}, false)
 	b2 := http2.conn_send_body(&srv, &out, sid2, body, true)
 	testing.expect(t, b1 > 0 && b2 > 0, "M2: both bodies deferred under window")
 	testing.expect(t, http2.conn_has_pending_body(&srv))
@@ -217,10 +217,10 @@ test_m3_fair_rr_both_streams_progress :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_h)
 	sid2 := http2.conn_send_request(&client, &c_out, req_h)
@@ -328,10 +328,10 @@ test_m5_peak_wire_o_window_not_o_sum_bodies :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_h)
 	sid2 := http2.conn_send_request(&client, &c_out, req_h)
@@ -348,9 +348,9 @@ test_m5_peak_wire_o_window_not_o_sum_bodies :: proc(t: ^testing.T) {
 	defer delete(big)
 	for i in 0 ..< 200 do big[i] = u8('X')
 
-	http2.conn_send_headers(&srv, &out, sid1, []http2.Header{{":status", "200"}}, false)
+	http2.conn_send_headers(&srv, &out, sid1, []http2.Header{{name = ":status", value = "200"}}, false)
 	_ = http2.conn_send_body(&srv, &out, sid1, big, true)
-	http2.conn_send_headers(&srv, &out, sid2, []http2.Header{{":status", "200"}}, false)
+	http2.conn_send_headers(&srv, &out, sid2, []http2.Header{{name = ":status", value = "200"}}, false)
 	_ = http2.conn_send_body(&srv, &out, sid2, big, true)
 
 	wire := m_gate_total_data_bytes(out[:])
@@ -443,16 +443,16 @@ test_m6_two_concurrent_sse_sessions :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_a := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/sse-a"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/sse-a"},
 	}
 	req_b := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/sse-b"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/sse-b"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_a)
 	sid2 := http2.conn_send_request(&client, &c_out, req_b)

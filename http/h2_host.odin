@@ -349,7 +349,7 @@ h2_host_dispatch_available :: proc(conn: ^Connection) {
 				conn.h2_serial_busy = true
 			}
 			conn.h2_dispatch_sid = sid
-			bad := []http2.Header{{":status", "400"}}
+			bad := []http2.Header{{name = ":status", value = "400"}}
 			http2.conn_send_response(&conn.h2, &conn.h2_out, sid, bad, nil)
 			h2_host_flush_out(conn)
 			h2_host_maybe_finish_exchange(conn)
@@ -531,13 +531,13 @@ h2_response_headers_from :: proc(r: ^Response, out: ^[dynamic]http2.Header) {
 	st_buf[2] = u8('0' + code % 10)
 	// Clone into temp so the slice outlives the stack buffer across encode.
 	st := strings.clone(string(st_buf[:]), context.temp_allocator)
-	append(out, http2.Header{":status", st})
+	append(out, http2.Header{name = ":status", value = st})
 
 	// Date for 2xx–5xx when not already set (parity with H1 heading).
 	// server_date requires a worker thread — skip on offline/unit paths (td unset).
 	if r.status >= .OK && r.status <= .Internal_Server_Error && !headers_has_unsafe(r.headers, "date") {
 		if r._conn != nil && r._conn.server != nil && td != nil && td.state != .Uninitialized {
-			append(out, http2.Header{"date", server_date(r._conn.server)})
+			append(out, http2.Header{name = "date", value = server_date(r._conn.server)})
 		}
 	}
 
@@ -550,7 +550,7 @@ h2_response_headers_from :: proc(r: ^Response, out: ^[dynamic]http2.Header) {
 			// request-only
 			continue
 		}
-		append(out, http2.Header{k, v})
+		append(out, http2.Header{name = k, value = v})
 	}
 }
 

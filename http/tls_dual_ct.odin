@@ -220,11 +220,19 @@ tls_host_promote_hold :: proc(conn: ^Connection) -> bool {
 	// Prefer hold then primary ready.
 	if d.hold_n > 0 && len(d.hold) > 0 {
 		n := d.hold_n
-		return tls_host_submit_ct(conn, d.hold, n, hs = false)
+		ok := tls_host_submit_ct(conn, d.hold, n, hs = false)
+		if ok {
+			path_metrics_note_promote()
+		}
+		return ok
 	}
 	if d.tx_ready_n > 0 && len(d.tx) > 0 {
 		n := d.tx_ready_n
-		return tls_host_submit_ct(conn, d.tx, n, hs = false)
+		ok := tls_host_submit_ct(conn, d.tx, n, hs = false)
+		if ok {
+			path_metrics_note_promote()
+		}
+		return ok
 	}
 	return false
 }
@@ -311,7 +319,9 @@ tls_seal_window_oneshot :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, pt_
 	}
 	tls_metrics_note_pt(conn.server, u64(conn.pt.admitted))
 
+	t_ssl0 := path_metrics_cyc_now()
 	ret := tls_server.write(p, ssl, raw_data(win_slice), c.int(win))
+	t_ssl1 := path_metrics_cyc_now()
 	if ret <= 0 {
 		pt_release(&conn.pt, u32(win))
 		ge := tls_server.get_error(p, ssl, ret)
@@ -339,10 +349,14 @@ tls_seal_window_oneshot :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, pt_
 
 	pending := tls_server.bio_pending_out(p, ssl)
 	if pending <= 0 {
+		path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, 0)
 		pt_release(&conn.pt, u32(consumed))
 		return 0, consumed, true
 	}
+	t_bio0 := path_metrics_cyc_now()
 	n := tls_server.bio_read_net(p, ssl, dst)
+	t_bio1 := path_metrics_cyc_now()
+	path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, t_bio1 - t_bio0)
 	if n <= 0 {
 		pt_release(&conn.pt, u32(consumed))
 		return 0, consumed, true
@@ -375,7 +389,9 @@ tls_seal_window_stream :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plai
 		win = TLS_SEAL_WINDOW_DEFAULT
 	}
 	plain := conn.resp_buf[off:][:win]
+	t_ssl0 := path_metrics_cyc_now()
 	ret := tls_server.write(p, ssl, raw_data(plain), c.int(win))
+	t_ssl1 := path_metrics_cyc_now()
 	if ret <= 0 {
 		ge := tls_server.get_error(p, ssl, ret)
 		if ge == p.ERROR_WANT_WRITE || ge == p.ERROR_WANT_READ {
@@ -391,13 +407,20 @@ tls_seal_window_stream :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plai
 	if consumed > win {
 		consumed = win
 	}
+	// Stream seals count toward seal_calls for cyc_per_seal denominators.
+	sync.atomic_add(&path_seal_calls, 1)
+	path_metrics_note_ssl_write(u64(consumed))
 
 	pending := tls_server.bio_pending_out(p, ssl)
 	if pending <= 0 {
 		// Sealed but no CT yet (OpenSSL internal buffer) — plain is done for cursor.
+		path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, 0)
 		return 0, consumed, true
 	}
+	t_bio0 := path_metrics_cyc_now()
 	n := tls_server.bio_read_net(p, ssl, dst)
+	t_bio1 := path_metrics_cyc_now()
+	path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, t_bio1 - t_bio0)
 	if n <= 0 {
 		// Fail-closed (CQ-M2): pending was > 0 but drain failed.
 		log.debugf(
@@ -438,7 +461,9 @@ tls_seal_window_h2 :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plain_n:
 	}
 	tls_metrics_note_pt(conn.server, u64(conn.pt.admitted))
 	plain := conn.h2_out[conn.h2_out_off:conn.h2_out_off + win]
+	t_ssl0 := path_metrics_cyc_now()
 	ret := tls_server.write(p, ssl, raw_data(plain), c.int(win))
+	t_ssl1 := path_metrics_cyc_now()
 	if ret <= 0 {
 		pt_release(&conn.pt, u32(win))
 		ge := tls_server.get_error(p, ssl, ret)
@@ -464,10 +489,14 @@ tls_seal_window_h2 :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plain_n:
 
 	pending := tls_server.bio_pending_out(p, ssl)
 	if pending <= 0 {
+		path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, 0)
 		pt_release(&conn.pt, u32(consumed))
 		return 0, consumed, true
 	}
+	t_bio0 := path_metrics_cyc_now()
 	n := tls_server.bio_read_net(p, ssl, dst)
+	t_bio1 := path_metrics_cyc_now()
+	path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, t_bio1 - t_bio0)
 	if n <= 0 {
 		pt_release(&conn.pt, u32(consumed))
 		return 0, consumed, true
@@ -536,9 +565,11 @@ tls_dual_ct_try_ahead :: proc(conn: ^Connection, plain: Tls_Seal_Plain) {
 		}
 		dual_ct_set_slab_plain(d, mark_hold, plain_n)
 		dual_ct_set_ready(d, mark_hold, n_ct)
+		path_metrics_note_ahead_seal()
 	case .Oneshot, .H2_Out:
 		if n_ct > 0 {
 			dual_ct_set_ready(d, mark_hold, n_ct)
+			path_metrics_note_ahead_seal()
 		}
 	}
 }

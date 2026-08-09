@@ -121,10 +121,18 @@ main :: proc() {
 	opts.h2_serial_dispatch = false
 
 	ep := net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port}
+	io_name := "io_uring"
+	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
+		io_name = "kqueue"
+	} else when ODIN_OS == .Windows {
+		io_name = "iocp"
+	}
 	fmt.printf(
-		"proactr tls-h2 on 0.0.0.0:%d workers=%d alpn=h2|http/1.1 tls=openssl-membio io=io_uring instrument=path_metrics\n",
+		"proactr tls-h2 on 0.0.0.0:%d workers=%d alpn=h2|http/1.1 tls=openssl-membio io=%s instrument=path_metrics phase_stats=%v\n",
 		port,
 		workers,
+		io_name,
+		http.HTTP_PHASE_STATS,
 	)
 	err := http.listen_and_serve_tls(&s, http.router_handler(&router), ep, cert_pem, key_pem, opts)
 	if err != .None {

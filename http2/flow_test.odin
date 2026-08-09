@@ -29,7 +29,7 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	// --- Client opens stream 1 (bodyless GET) ---
 	req_block: [dynamic]u8
 	defer delete(req_block)
-	hpack.encode(&req_block, []Header{{":method", "GET"}, {":scheme", "http"}, {":authority", "x"}, {":path", "/"}})
+	hpack.encode(&req_block, []Header{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":authority", value = "x"}, {name = ":path", value = "/"}})
 	hbuf: [dynamic]u8
 	defer delete(hbuf)
 	frame_write(&hbuf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
@@ -46,7 +46,7 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	for i in 0 ..< 25 do body[i] = u8('A') + u8(i)
 
 	clear(&out)
-	conn_send_headers(&srv, &out, 1, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
 	buffered := conn_send_body(&srv, &out, 1, body, true /* end_stream */)
 	testing.expect_value(t, buffered, 15)
 
@@ -103,7 +103,7 @@ test_h2_inbound_window_replenish :: proc(t: ^testing.T) {
 	// idle-stream protocol error.
 	scratch: [dynamic]u8
 	defer delete(scratch)
-	conn_send_request(&cli, &scratch, []Header{{":method", "GET"}, {":scheme", "http"}, {":authority", "x"}, {":path", "/"}})
+	conn_send_request(&cli, &scratch, []Header{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":authority", value = "x"}, {name = ":path", value = "/"}})
 
 	// Peer sends 100 bytes of DATA on stream 1, no END_STREAM.
 	in_buf: [dynamic]u8
@@ -205,10 +205,10 @@ test_h2_send_response_respects_window :: proc(t: ^testing.T) {
 	req_block: [dynamic]u8
 	defer delete(req_block)
 	hpack.encode(&req_block, []Header{
-		{":method", "GET"},
-		{":scheme", "http"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
 	out: [dynamic]u8
@@ -224,7 +224,7 @@ test_h2_send_response_respects_window :: proc(t: ^testing.T) {
 	for i in 0 ..< 25 do body[i] = u8('A') + u8(i)
 
 	clear(&out)
-	conn_send_response(&srv, &out, 1, []Header{{":status", "200"}}, body)
+	conn_send_response(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, body)
 
 	// HEADERS + DATA(10); 15 bytes remain in pending (flow path, not dump).
 	hf, _, c1, e1 := frame_decode(out[:])
@@ -259,10 +259,10 @@ test_h2_refuse_still_decodes_hpack :: proc(t: ^testing.T) {
 	req1: [dynamic]u8
 	defer delete(req1)
 	hpack.encode(&req1, []Header{
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req1[:])
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -275,10 +275,10 @@ test_h2_refuse_still_decodes_hpack :: proc(t: ^testing.T) {
 	req3: [dynamic]u8
 	defer delete(req3)
 	hpack.encode(&req3, []Header{
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	})
 	// 0x40 = Literal Header Field with Incremental Indexing — New Name.
 	name := "x-proactr-tag"
@@ -305,7 +305,7 @@ test_h2_refuse_still_decodes_hpack :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, saw_rst, "REFUSED_STREAM for over-limit new stream")
 	testing.expect_value(t, srv.open_streams, 1)
-	testing.expect(t, len(srv.dec.entries) >= 1, "refused block still indexed into HPACK table")
+	testing.expect(t, srv.dec.count >= 1, "refused block still indexed into HPACK table")
 	// Stream 3 must not be deliverable.
 	{
 		// Drain stream 1 first if present, ensure 3 never appears.
@@ -318,7 +318,7 @@ test_h2_refuse_still_decodes_hpack :: proc(t: ^testing.T) {
 
 	// Finish stream 1 so concurrent budget frees.
 	clear(&out)
-	conn_send_headers(&srv, &out, 1, []Header{{":status", "200"}}, true)
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, true)
 	testing.expect_value(t, srv.open_streams, 0)
 
 	// Stream 5: Indexed Header Field referencing dynamic index 62 (first
@@ -329,10 +329,10 @@ test_h2_refuse_still_decodes_hpack :: proc(t: ^testing.T) {
 	req5: [dynamic]u8
 	defer delete(req5)
 	hpack.encode(&req5, []Header{
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	})
 	append(&req5, 0xBE) // Indexed index 62 (0x80 | 62)
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 5, req5[:])
@@ -373,10 +373,10 @@ test_h2_flush_multi_pending_always_rr :: proc(t: ^testing.T) {
 		req_block: [dynamic]u8
 		req_block.allocator = context.temp_allocator
 		hpack.encode(&req_block, []Header{
-			{":method", "GET"},
-			{":scheme", "http"},
-			{":authority", "x"},
-			{":path", "/"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "http"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/"},
 		})
 		frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, sid, req_block[:])
 		testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -437,10 +437,10 @@ test_h2_flush_rr_two_pending_streams :: proc(t: ^testing.T) {
 		req_block: [dynamic]u8
 		req_block.allocator = context.temp_allocator
 		hpack.encode(&req_block, []Header{
-			{":method", "GET"},
-			{":scheme", "http"},
-			{":authority", "x"},
-			{":path", "/"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "http"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/"},
 		})
 		frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, sid, req_block[:])
 		testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -457,12 +457,12 @@ test_h2_flush_rr_two_pending_streams :: proc(t: ^testing.T) {
 
 	// Both bodies larger than conn window → both buffer after first send.
 	// Send stream 1 first: takes the full 10-byte conn window.
-	conn_send_headers(&srv, &out, 1, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
 	b1 := conn_send_body(&srv, &out, 1, body, true)
 	testing.expect(t, b1 > 0)
 	// Conn window is 0; stream 3 send buffers everything.
 	clear(&out)
-	conn_send_headers(&srv, &out, 3, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 3, []Header{{name = ":status", value = "200"}}, false)
 	b3 := conn_send_body(&srv, &out, 3, body, true)
 	testing.expect_value(t, b3, 40) // nothing flushed (conn window empty)
 	testing.expect(t, stream_pending_len(s1) > 0 && stream_pending_len(s3) > 0)
@@ -512,10 +512,10 @@ test_h2_peak_wire_o_window_two_large_bodies :: proc(t: ^testing.T) {
 		req_block: [dynamic]u8
 		req_block.allocator = context.temp_allocator
 		hpack.encode(&req_block, []Header{
-			{":method", "GET"},
-			{":scheme", "http"},
-			{":authority", "x"},
-			{":path", "/"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "http"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/"},
 		})
 		frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, sid, req_block[:])
 		testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -526,9 +526,9 @@ test_h2_peak_wire_o_window_two_large_bodies :: proc(t: ^testing.T) {
 	defer delete(body)
 	for i in 0 ..< 100 do body[i] = u8('A')
 
-	conn_send_headers(&srv, &out, 1, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
 	_ = conn_send_body(&srv, &out, 1, body, true)
-	conn_send_headers(&srv, &out, 3, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 3, []Header{{name = ":status", value = "200"}}, false)
 	_ = conn_send_body(&srv, &out, 3, body, true)
 
 	// Sum of DATA payload lengths without further WINDOW_UPDATE ≤ initial conn window (10).
@@ -570,10 +570,10 @@ test_h2_reaps_closed_streams :: proc(t: ^testing.T) {
 		req_block: [dynamic]u8
 		req_block.allocator = context.temp_allocator
 		hpack.encode(&req_block, []Header{
-			{":method", "GET"},
-			{":scheme", "https"},
-			{":authority", "x"},
-			{":path", "/"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "https"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/"},
 		})
 		frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, sid, req_block[:])
 		testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -583,7 +583,7 @@ test_h2_reaps_closed_streams :: proc(t: ^testing.T) {
 		testing.expect(t, ok, "take request")
 		testing.expect_value(t, got_sid, sid)
 		// Empty response: END_STREAM on HEADERS → closed + reaped.
-		conn_send_headers(&srv, &out, sid, []Header{{":status", "200"}}, true)
+		conn_send_headers(&srv, &out, sid, []Header{{name = ":status", value = "200"}}, true)
 		clear(&out)
 	}
 
@@ -594,10 +594,10 @@ test_h2_reaps_closed_streams :: proc(t: ^testing.T) {
 	req_block: [dynamic]u8
 	req_block.allocator = context.temp_allocator
 	hpack.encode(&req_block, []Header{
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 129, req_block[:])
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -624,10 +624,10 @@ test_h2_conn_send_goaway_no_error :: proc(t: ^testing.T) {
 	req_block: [dynamic]u8
 	req_block.allocator = context.temp_allocator
 	hpack.encode(&req_block, []Header{
-		{":method", "GET"},
-		{":scheme", "http"},
-		{":authority", "x"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -685,10 +685,10 @@ test_h2_goaway_refuses_new_stream_keeps_prior :: proc(t: ^testing.T) {
 	req_block: [dynamic]u8
 	req_block.allocator = context.temp_allocator
 	hpack.encode(&req_block, []Header{
-		{":method", "GET"},
-		{":scheme", "http"},
-		{":authority", "x"},
-		{":path", "/a"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/a"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -701,7 +701,7 @@ test_h2_goaway_refuses_new_stream_keeps_prior :: proc(t: ^testing.T) {
 	body := make([]u8, 40)
 	defer delete(body)
 	for i in 0 ..< 40 do body[i] = u8('A')
-	conn_send_headers(&srv, &out, 1, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
 	_ = conn_send_body(&srv, &out, 1, body, true)
 	testing.expect(t, conn_has_pending_body(&srv))
 	clear(&out)
@@ -715,10 +715,10 @@ test_h2_goaway_refuses_new_stream_keeps_prior :: proc(t: ^testing.T) {
 	req_block2: [dynamic]u8
 	req_block2.allocator = context.temp_allocator
 	hpack.encode(&req_block2, []Header{
-		{":method", "GET"},
-		{":scheme", "http"},
-		{":authority", "x"},
-		{":path", "/b"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/b"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 3, req_block2[:])
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -791,10 +791,10 @@ test_h2_flush_interactive_weight_vs_bulk :: proc(t: ^testing.T) {
 		req_block: [dynamic]u8
 		req_block.allocator = context.temp_allocator
 		hpack.encode(&req_block, []Header{
-			{":method", "GET"},
-			{":scheme", "http"},
-			{":authority", "x"},
-			{":path", "/"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "http"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/"},
 		})
 		frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, sid, req_block[:])
 		testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -868,10 +868,10 @@ test_h2_pending_cursor_large_body :: proc(t: ^testing.T) {
 	req_block: [dynamic]u8
 	defer delete(req_block)
 	hpack.encode(&req_block, []Header{
-		{":method", "GET"},
-		{":scheme", "http"},
-		{":authority", "x"},
-		{":path", "/big"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "http"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/big"},
 	})
 	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
@@ -888,7 +888,7 @@ test_h2_pending_cursor_large_body :: proc(t: ^testing.T) {
 	s.send_window = 32 * 1024
 	srv.send_window = 32 * 1024
 
-	conn_send_headers(&srv, &out, 1, []Header{{":status", "200"}}, false)
+	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
 	buffered := conn_send_body(&srv, &out, 1, body, true)
 	testing.expect(t, buffered == len(body) - 32*1024, "32KiB flushed, rest pending")
 	testing.expect_value(t, stream_pending_len(s), len(body) - 32*1024)

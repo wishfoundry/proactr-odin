@@ -38,7 +38,8 @@ conn_send_headers :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, sid: u32, hea
 	s := _get_or_make_stream(c, sid) // ensure the stream (and its window) exists
 	block: [dynamic]u8
 	block.allocator = context.temp_allocator
-	hpack.encode(&block, headers)
+	// Use connection encoder dynamic table so repeated response headers compress.
+	hpack.encode(&block, headers, &c.enc)
 	flags := FLAG_END_HEADERS
 	if end_stream do flags |= FLAG_END_STREAM
 	frame_write(dst, FRAME_HEADERS, flags, sid, block[:])

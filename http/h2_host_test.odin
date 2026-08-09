@@ -121,11 +121,11 @@ test_h2_request_from_headers_get :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	hdrs := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/hello?x=1"},
-		{"user-agent", "h2-test"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/hello?x=1"},
+		{name = "user-agent", value = "h2-test"},
 	}
 	req: Request
 	ok := h2_request_from_headers(&req, hdrs, nil, context.temp_allocator)
@@ -153,11 +153,11 @@ test_h2_request_from_headers_post_body :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	hdrs := []http2.Header {
-		{":method", "POST"},
-		{":scheme", "https"},
-		{":authority", "api.local"},
-		{":path", "/echo"},
-		{"content-type", "text/plain"},
+		{name = ":method", value = "POST"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "api.local"},
+		{name = ":path", value = "/echo"},
+		{name = "content-type", value = "text/plain"},
 	}
 	payload := transmute([]u8)string("payload")
 	req: Request
@@ -179,10 +179,10 @@ test_h2_request_from_headers_post_body :: proc(t: ^testing.T) {
 test_h2_pre_body_api :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	hdrs := []http2.Header {
-		{":method", "POST"},
-		{":scheme", "https"},
-		{":authority", "api.local"},
-		{":path", "/echo"},
+		{name = ":method", value = "POST"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "api.local"},
+		{name = ":path", value = "/echo"},
 	}
 	req: Request
 	testing.expect(t, h2_request_from_headers(&req, hdrs, transmute([]u8)string("xyz"), context.temp_allocator))
@@ -208,10 +208,10 @@ test_h2_request_from_headers_rejects_missing_pseudos :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	req: Request
 	// No :method
-	ok := h2_request_from_headers(&req, []http2.Header{{":path", "/"}, {":authority", "h"}}, nil)
+	ok := h2_request_from_headers(&req, []http2.Header{{name = ":path", value = "/"}, {name = ":authority", value = "h"}}, nil)
 	testing.expect(t, !ok)
 	// No host / :authority
-	ok2 := h2_request_from_headers(&req, []http2.Header{{":method", "GET"}, {":path", "/"}}, nil)
+	ok2 := h2_request_from_headers(&req, []http2.Header{{name = ":method", value = "GET"}, {name = ":path", value = "/"}}, nil)
 	testing.expect(t, !ok2)
 }
 
@@ -269,10 +269,10 @@ test_h2_host_offline_dispatch_get :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/"},
 	}
 	_ = http2.conn_send_request(&client, &c_out, req_h)
 
@@ -515,10 +515,10 @@ test_h2_concurrent_ignores_stale_serial_busy :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/"},
 	}
 	_ = http2.conn_send_request(&client, &c_out, req_h)
 
@@ -561,16 +561,16 @@ test_h2_host_concurrent_two_get_streams :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_a := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/a"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/a"},
 	}
 	req_b := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/b"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/b"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_a)
 	sid2 := http2.conn_send_request(&client, &c_out, req_b)
@@ -645,10 +645,10 @@ test_h2_host_serial_single_flight_two_ready :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/"},
 	}
 	_ = http2.conn_send_request(&client, &c_out, req_h)
 	_ = http2.conn_send_request(&client, &c_out, req_h)
@@ -696,10 +696,10 @@ test_h2_host_free_slot_after_finish_allows_third :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/"},
 	}
 	_ = http2.conn_send_request(&client, &c_out, req_h)
 	_ = http2.conn_send_request(&client, &c_out, req_h)
@@ -758,16 +758,16 @@ test_h2_host_long_lived_slot_allows_other_stream :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	hold_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/hold"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/hold"},
 	}
 	ok_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/ok"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/ok"},
 	}
 	_ = http2.conn_send_request(&client, &c_out, hold_h)
 	_ = http2.conn_send_request(&client, &c_out, ok_h)
@@ -878,16 +878,16 @@ test_h2_sse_two_sessions_data_frames :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_a := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/sse-a"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/sse-a"},
 	}
 	req_b := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/sse-b"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/sse-b"},
 	}
 	sid1 := http2.conn_send_request(&client, &c_out, req_a)
 	sid2 := http2.conn_send_request(&client, &c_out, req_b)
@@ -1003,10 +1003,10 @@ test_h2_sse_rst_client_gone_once :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/sse"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/sse"},
 	}
 	// Two streams.
 	sid1 := http2.conn_send_request(&client, &c_out, req_h)
@@ -1170,10 +1170,10 @@ test_h2_host_after_goaway_new_stream_refused :: proc(t: ^testing.T) {
 		&peer,
 		&peer_out,
 		[]http2.Header{
-			{":method", "GET"},
-			{":scheme", "http"},
-			{":authority", "x"},
-			{":path", "/hold"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "http"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/hold"},
 		},
 		nil,
 	)
@@ -1182,7 +1182,7 @@ test_h2_host_after_goaway_new_stream_refused :: proc(t: ^testing.T) {
 	testing.expect(t, ok1, "stream 1 opened")
 
 	// Buffer a large body so stream stays open under tight windows.
-	http2.conn_send_headers(&conn.h2, &conn.h2_out, 1, []http2.Header{{":status", "200"}}, false)
+	http2.conn_send_headers(&conn.h2, &conn.h2_out, 1, []http2.Header{{name = ":status", value = "200"}}, false)
 	body := make([]u8, 50)
 	defer delete(body)
 	_ = http2.conn_send_body(&conn.h2, &conn.h2_out, 1, body, true)
@@ -1203,10 +1203,10 @@ test_h2_host_after_goaway_new_stream_refused :: proc(t: ^testing.T) {
 		&peer,
 		&peer_out,
 		[]http2.Header{
-			{":method", "GET"},
-			{":scheme", "http"},
-			{":authority", "x"},
-			{":path", "/new"},
+			{name = ":method", value = "GET"},
+			{name = ":scheme", value = "http"},
+			{name = ":authority", value = "x"},
+			{name = ":path", value = "/new"},
 		},
 		nil,
 	)
@@ -1270,10 +1270,10 @@ test_h2_host_slot_full_refused_stream :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req_h := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/overflow"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/overflow"},
 	}
 	sid := http2.conn_send_request(&client, &c_out, req_h)
 	testing.expect(t, sid != 0)
@@ -1352,10 +1352,10 @@ test_h2_sse_start_soft_reject_over_cap :: proc(t: ^testing.T) {
 	defer delete(c_out)
 	http2.conn_send_preface(&client, &c_out)
 	req := []http2.Header {
-		{":method", "GET"},
-		{":scheme", "https"},
-		{":authority", "example.com"},
-		{":path", "/sse"},
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "example.com"},
+		{name = ":path", value = "/sse"},
 	}
 	sid := http2.conn_send_request(&client, &c_out, req)
 	http2.conn_send_preface(&conn.h2, &conn.h2_out)

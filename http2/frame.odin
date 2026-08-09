@@ -86,12 +86,17 @@ frame_decode :: proc(
 settings_write :: proc(dst: ^[dynamic]u8, s: Settings) {
 	payload: [dynamic]u8
 	payload.allocator = context.temp_allocator
+	// Advertise our decoder table capacity so peer encoder stays within limit.
+	put_setting(&payload, SETTINGS_HEADER_TABLE_SIZE, s.header_table_size)
 	put_setting(&payload, SETTINGS_INITIAL_WINDOW_SIZE, s.initial_window_size)
 	put_setting(&payload, SETTINGS_MAX_FRAME_SIZE, s.max_frame_size)
 	if s.max_concurrent_streams > 0 {
 		put_setting(&payload, SETTINGS_MAX_CONCURRENT_STREAMS, s.max_concurrent_streams)
 	}
 	put_setting(&payload, SETTINGS_ENABLE_PUSH, s.enable_push)
+	if s.max_header_list_size > 0 {
+		put_setting(&payload, SETTINGS_MAX_HEADER_LIST_SIZE, s.max_header_list_size)
+	}
 	frame_write(dst, FRAME_SETTINGS, 0, 0, payload[:])
 }
 

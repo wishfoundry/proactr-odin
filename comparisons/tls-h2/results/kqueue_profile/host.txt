@@ -1,0 +1,4 @@
+when=2026-08-09T13:52Z
+host=Darwin Benjamins-MacBook-Pro.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64
+hw=Mac14,9 ncpu=12
+openssl=OpenSSL 3.6.3 9 Jun 2026 (Library: OpenSSL 3.6.3 9 Jun 2026)

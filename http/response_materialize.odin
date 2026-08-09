@@ -49,7 +49,9 @@ _response_materialize_cmds :: proc(r: ^Response) {
 				resize(&r._buf.buf, hlen)
 			}
 			when HTTP_PHASE_STATS {
-				phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+				bc := phase_now() - t0_build
+				phase_add(0, 0, 0, 0, 0, bc, 0)
+				path_metrics_note_materialize_cycles(bc)
 			}
 			return
 		}
@@ -102,7 +104,9 @@ _response_materialize_cmds :: proc(r: ^Response) {
 	}
 
 	when HTTP_PHASE_STATS {
-		phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+		bc := phase_now() - t0_build
+		phase_add(0, 0, 0, 0, 0, bc, 0)
+		path_metrics_note_materialize_cycles(bc)
 	}
 }
 
