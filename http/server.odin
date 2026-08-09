@@ -547,13 +547,22 @@ Connection :: struct {
 	// Arm is idempotent; re-arm only after the matching CQE clears this bit.
 	// Prevents kqueue EV_ADD replace-udata orphan of a prior Recv (CQ-F1).
 	tls_ct_recv_inflight: bool,
-	// Remaining plaintext for windowed ciphered oneshot response (view into resp_buf).
-	tls_plain_rest: []u8,
+	// Remaining plaintext for windowed ciphered oneshot response.
+	// Heading (or full materialize) first; optional borrowed Static/Bytes body second
+	// so seal can avoid O(body) memcpy into resp_buf on single-cmd H1 oneshot.
+	tls_plain_rest:     []u8, // view into resp_buf (heading or full PT)
+	tls_plain_body:     []u8, // borrowed Static/Bytes body (not owned; valid until clean)
+	tls_plain_body_off: int,  // cursor into tls_plain_body
 	// pending_send is handshake CT (vs response CT) for send-complete demux.
 	tls_hs_send:    bool,
-	// Progressive stream (SSE/WS): plain bytes sealed into the current CT flight(s).
-	// Advanced into slot.stream_sent only after full CT for that seal is delivered.
-	tls_stream_plain_n: int,
+	// Progressive stream (SSE/WS) dual-CT plain accounting:
+	// tls_ct_tx_plain_n / tls_ct_hold_plain_n = plain sealed into that slab (set on
+	// SSL_write, cleared on CQE for the slab that completed). tls_stream_plain_n =
+	// deferred plain when multi-record residual CT of a seal is still outstanding
+	// (advance stream_sent only after full CT for that seal is delivered).
+	tls_ct_tx_plain_n:  int,
+	tls_ct_hold_plain_n: int,
+	tls_stream_plain_n:  int,
 	// H1 N=1 exchange ownership (Response + session + progressive stream). Pipe-only above;
 	// sole storage for exchange fields — no dual-write on Connection (Plan A §D).
 	slot:           Stream_Slot,
@@ -1172,6 +1181,8 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	c.slot.stream_sent = 0
 	c.slot.stream_flush_pending = false
 	c.slot.stream_respond_fired = false
+	c.tls_ct_tx_plain_n = 0
+	c.tls_ct_hold_plain_n = 0
 	c.tls_stream_plain_n = 0
 	// Return any in-flight Stream slab before forgetting the pointer.
 	_stream_pool_abandon(c)

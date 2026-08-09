@@ -7,11 +7,12 @@
 // Handshake: conn.tls_pipe.state = Handshake until SSL_accept OK → Open +
 // connection_enable_ciphered (lightweight: plan_policy only; no seal_q/CT[2]).
 // Response send (ciphered oneshot): windowed SSL_write + CT drain across CQEs
-// (tls_plain_rest cursor). Progressive Stream / SSE / WS: tls_host_stream_try_submit +
-// stream_sent / tls_stream_plain_n (same wire engine as clear; no plain-send bypass).
-// Live dual-CT seal∥send (PR5.1): while one CT sock send is in flight, seal the next
-// plain window into tls_ct_hold (second slab) so CQE can submit without re-encrypting
-// from scratch. Pure pipe Seal_SM remains the formal model; this is the live path.
+// (tls_plain_rest + optional tls_plain_body cursor). Progressive Stream / SSE / WS:
+// tls_host_stream_try_submit + dual-CT seal∥send (per-slab tls_ct_*_plain_n;
+// stream_sent after CT CQE). Same wire engine as clear; no plain-send bypass.
+// Live dual-CT seal∥send (PR5.1 / stream): while one CT sock send is in flight, seal
+// the next plain window into tls_ct_hold so CQE can submit without re-encrypting.
+// Pure pipe Seal_SM remains the formal model; this is the live path.
 package http
 
 import "core:c"
@@ -167,8 +168,10 @@ tls_host_on_accept :: proc(conn: ^Connection) -> bool {
 	conn.tls_ct_hold_n = 0
 	conn.tls_send_is_hold = false
 	conn.tls_ct_recv_inflight = false
-	conn.tls_plain_rest = nil
+	tls_plain_clear(conn)
 	conn.tls_hs_send = false
+	conn.tls_ct_tx_plain_n = 0
+	conn.tls_ct_hold_plain_n = 0
 	conn.tls_stream_plain_n = 0
 	tls_pipe_init(&conn.tls_pipe) // Handshake / Idle
 	conn.ciphered = false
@@ -212,8 +215,10 @@ tls_host_conn_destroy :: proc(conn: ^Connection) {
 	conn.tls_ct_tx_ready_n = 0
 	conn.tls_ct_hold_n = 0
 	conn.tls_send_is_hold = false
-	conn.tls_plain_rest = nil
+	tls_plain_clear(conn)
 	conn.tls_hs_send = false
+	conn.tls_ct_tx_plain_n = 0
+	conn.tls_ct_hold_plain_n = 0
 	conn.tls_stream_plain_n = 0
 	conn.tls_ct_recv_inflight = false
 	// Seal_q / CT double-buffer (Open path).
@@ -391,8 +396,13 @@ tls_host_stream_ct_recv :: proc(conn: ^Connection) {
 		return
 	}
 	// Resume progressive seal if plain remains or WANT_READ unblocked a write.
+	// stream_sent is the delivered plain cursor; dual-CT ready / residual CT also count.
 	more := len(conn.resp_buf) > conn.slot.stream_sent ||
 		conn.tls_stream_plain_n > 0 ||
+		conn.tls_ct_tx_plain_n > 0 ||
+		conn.tls_ct_hold_plain_n > 0 ||
+		conn.tls_ct_hold_n > 0 ||
+		conn.tls_ct_tx_ready_n > 0 ||
 		conn.slot.stream_flush_pending ||
 		conn.slot.stream_ending
 	if more && !_conn_wire_in_flight(conn) {
@@ -753,10 +763,134 @@ tls_host_stream_long_lived :: proc(conn: ^Connection) -> bool {
 	return conn != nil && (conn.slot.stream_open || conn.slot.session != nil)
 }
 
-// tls_host_stream_try_submit: progressive SSE/WS over TLS H1.
-// Encrypts plain from resp_buf[stream_sent:] via SSL_write (no stream_pool slabs),
-// drains wBIO CT into tls_ct_tx + host_submit_send (.Send — completion hits
-// tls_host_on_send_complete). CQE advances stream_sent by tls_stream_plain_n.
+// Plain offset for the next progressive SSL_write: stream_sent plus plain already
+// sealed into dual-CT slabs (or deferred residual) but not yet CQE-advanced.
+@(private)
+tls_host_stream_plain_off :: proc(conn: ^Connection) -> int {
+	if conn == nil {
+		return 0
+	}
+	return conn.slot.stream_sent +
+		conn.tls_stream_plain_n +
+		conn.tls_ct_tx_plain_n +
+		conn.tls_ct_hold_plain_n
+}
+
+// Associate plain_n with a CT slab (tx or hold). Residual drains leave plain at 0.
+@(private)
+tls_host_stream_set_slab_plain :: proc(conn: ^Connection, mark_hold: bool, plain_n: int) {
+	if conn == nil {
+		return
+	}
+	if mark_hold {
+		conn.tls_ct_hold_plain_n = plain_n
+	} else {
+		conn.tls_ct_tx_plain_n = plain_n
+	}
+}
+
+// Seal one progressive stream plain window into dst CT slab.
+// Plain starts at tls_host_stream_plain_off (not bare stream_sent) so dual-CT
+// ahead-seal does not re-encrypt in-flight plain. Does not set slab plain_n —
+// caller records plain_n on the slab that owns the CT.
+// Returns (n_ct, plain_consumed, ok).
+@(private)
+tls_host_seal_stream_window :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plain_n: int, ok: bool) {
+	if conn == nil || conn.tls_ssl == nil || len(dst) == 0 {
+		return 0, 0, false
+	}
+	off := tls_host_stream_plain_off(conn)
+	unsent := len(conn.resp_buf) - off
+	if unsent <= 0 {
+		return 0, 0, true
+	}
+	p := conn.server.tls_provider
+	ssl := conn.tls_ssl
+	win := unsent
+	if win > TLS_SEAL_WINDOW_DEFAULT {
+		win = TLS_SEAL_WINDOW_DEFAULT
+	}
+	plain := conn.resp_buf[off:][:win]
+	ret := tls_server.write(p, ssl, raw_data(plain), c.int(win))
+	if ret <= 0 {
+		ge := tls_server.get_error(p, ssl, ret)
+		if ge == p.ERROR_WANT_WRITE || ge == p.ERROR_WANT_READ {
+			if ge == p.ERROR_WANT_READ {
+				_ = tls_host_arm_recv(conn)
+			}
+			return 0, 0, true
+		}
+		log.debugf("TLS stream SSL_write error fd=%v ret=%d ge=%d", conn.socket, ret, ge)
+		return 0, 0, false
+	}
+	consumed := int(ret)
+	if consumed > win {
+		consumed = win
+	}
+
+	pending := tls_server.bio_pending_out(p, ssl)
+	if pending <= 0 {
+		// Sealed but no CT yet (OpenSSL internal buffer) — plain is done for cursor.
+		return 0, consumed, true
+	}
+	n := tls_server.bio_read_net(p, ssl, dst)
+	if n <= 0 {
+		// Fail-closed (CQ-M2): pending was > 0 but drain failed.
+		log.debugf(
+			"TLS stream bio_read_net fail after SSL_write fd=%v n=%d plain=%d",
+			conn.socket,
+			n,
+			consumed,
+		)
+		return 0, 0, false
+	}
+	tls_metrics_note_ct(conn.server, u64(n))
+	tls_metrics_inc_seal(conn.server)
+	path_metrics_note_ct_send(u64(n))
+	return n, consumed, true
+}
+
+// Dual-CT: seal next progressive window into free CT slab while sock send is inflight.
+@(private)
+tls_host_try_seal_hold_stream :: proc(conn: ^Connection) {
+	if conn == nil {
+		return
+	}
+	if len(conn.resp_buf) <= tls_host_stream_plain_off(conn) {
+		return
+	}
+	dst, mark_hold := tls_host_seal_dst_for_ahead(conn)
+	if len(dst) == 0 {
+		return
+	}
+	n_ct, plain_n, ok := tls_host_seal_stream_window(conn, dst)
+	if !ok {
+		tls_host_session_client_gone(conn)
+		return
+	}
+	if plain_n <= 0 {
+		return
+	}
+	if n_ct <= 0 {
+		// Rare: SSL_write accepted plain with no CT while a prior send is inflight.
+		// Do not advance stream_sent out of order; leave plain unaccounted only if
+		// we can re-seal — but OpenSSL already consumed it. Account as deferred so
+		// plain_off advances and CQE order still drains prior CT first.
+		conn.tls_stream_plain_n += plain_n
+		return
+	}
+	tls_host_stream_set_slab_plain(conn, mark_hold, plain_n)
+	if mark_hold {
+		conn.tls_ct_hold_n = n_ct
+	} else {
+		conn.tls_ct_tx_ready_n = n_ct
+	}
+}
+
+// tls_host_stream_try_submit: progressive SSE/WS over TLS H1 (dual-CT seal∥send).
+// Encrypts plain from resp_buf[plain_off:] via SSL_write (no stream_pool slabs),
+// drains wBIO CT into free slab + tls_host_submit_ct (.Send — completion hits
+// tls_host_on_send_complete). CQE advances stream_sent by the completed slab's plain_n.
 @(private)
 tls_host_stream_try_submit :: proc(conn: ^Connection) {
 	if conn == nil || conn.state >= .Closing {
@@ -774,32 +908,60 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		conn.resp_buf = r._buf.buf
 	}
 
-	// Wire already in flight (CT partial or prior seal): reflush after CQE.
+	// Live dual-CT: while a CT send is in flight, drain residual / seal ahead into free slab.
 	if _conn_wire_in_flight(conn) {
 		conn.slot.stream_flush_pending = true
+		if tls_server.bio_pending_out(conn.server.tls_provider, conn.tls_ssl) > 0 {
+			_ = tls_host_try_drain_out(conn, hs = false)
+		}
+		tls_host_try_seal_hold_stream(conn)
 		return
 	}
 
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
 
-	// Prefer draining residual CT from a prior SSL_write before sealing more plain.
-	if tls_server.bio_pending_out(p, ssl) > 0 {
-		if !tls_host_try_drain_out(conn, hs = false) {
-			return
-		}
-		if _conn_wire_in_flight(conn) {
+	// Ordering: promote already-sealed CT before residual wBIO / new seal (CRITIC C2).
+	if conn.tls_ct_hold_n > 0 || conn.tls_ct_tx_ready_n > 0 {
+		if tls_host_promote_hold(conn) {
+			tls_host_try_seal_hold_stream(conn)
 			return
 		}
 	}
 
-	unsent := len(conn.resp_buf) - conn.slot.stream_sent
+	// Prefer draining residual CT from a prior SSL_write before sealing more plain.
+	if tls_server.bio_pending_out(p, ssl) > 0 {
+		if !tls_host_try_drain_out(conn, hs = false) {
+			if _conn_wire_in_flight(conn) {
+				tls_host_try_seal_hold_stream(conn)
+			}
+			return
+		}
+		if _conn_wire_in_flight(conn) {
+			tls_host_try_seal_hold_stream(conn)
+			return
+		}
+	}
+
+	unsent := len(conn.resp_buf) - tls_host_stream_plain_off(conn)
 	if unsent <= 0 {
-		if conn.slot.stream_ending {
+		// No new plain to seal. Finish only when all sealed plain is CQE-advanced
+		// and no CT remains ready / inflight.
+		if conn.slot.stream_ending &&
+		   conn.slot.stream_sent >= len(conn.resp_buf) &&
+		   conn.tls_stream_plain_n == 0 &&
+		   conn.tls_ct_tx_plain_n == 0 &&
+		   conn.tls_ct_hold_plain_n == 0 {
 			_stream_finish(conn)
-		} else {
+		} else if !conn.slot.stream_ending &&
+		          conn.slot.stream_sent >= len(conn.resp_buf) &&
+		          conn.tls_stream_plain_n == 0 &&
+		          conn.tls_ct_tx_plain_n == 0 &&
+		          conn.tls_ct_hold_plain_n == 0 {
 			// Mid-session idle: arm CT recv for peer close/hangup.
 			_session_arm_hangup_watch(conn)
+		} else {
+			conn.slot.stream_flush_pending = true
 		}
 		return
 	}
@@ -813,60 +975,46 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		_response_fire_respond_hooks(r)
 	}
 
-	// Plain window: min(unsent, TLS_SEAL_WINDOW) from resp_buf[stream_sent:].
-	// Encrypt from resp_buf view — do not copy into stream_pool slabs.
-	win := unsent
-	if win > TLS_SEAL_WINDOW_DEFAULT {
-		win = TLS_SEAL_WINDOW_DEFAULT
+	dst := conn.tls_ct_tx
+	if len(dst) == 0 {
+		conn.slot.stream_flush_pending = true
+		return
 	}
-	plain := conn.resp_buf[conn.slot.stream_sent:][:win]
-
-	ret := tls_server.write(p, ssl, raw_data(plain), c.int(win))
-	if ret <= 0 {
-		ge := tls_server.get_error(p, ssl, ret)
-		if ge == p.ERROR_WANT_WRITE {
-			// Drain CT then retry seal on next CQE / immediately if idle.
-			if !tls_host_try_drain_out(conn, hs = false) {
-				conn.slot.stream_flush_pending = true
-				return
-			}
-			if !_conn_wire_in_flight(conn) {
-				tls_host_stream_try_submit(conn)
-			} else {
-				conn.slot.stream_flush_pending = true
-			}
-			return
-		}
-		if ge == p.ERROR_WANT_READ {
-			// Rare for server write: arm CT recv; seal resumes after decrypt path.
-			conn.slot.stream_flush_pending = true
-			if td != nil && !tls_host_arm_recv(conn) {
-				tls_host_session_client_gone(conn)
-			}
-			return
-		}
-		log.debugf("TLS stream SSL_write error fd=%v ret=%d ge=%d", conn.socket, ret, ge)
+	n_ct, plain_n, ok := tls_host_seal_stream_window(conn, dst)
+	if !ok {
 		tls_host_session_client_gone(conn)
 		return
 	}
-
-	consumed := int(ret)
-	if consumed > win {
-		consumed = win
+	if plain_n <= 0 {
+		// WANT_* or nothing sealed — drain / retry / arm.
+		if tls_server.bio_pending_out(p, ssl) > 0 {
+			if !tls_host_try_drain_out(conn, hs = false) {
+				if _conn_wire_in_flight(conn) {
+					tls_host_try_seal_hold_stream(conn)
+				} else {
+					conn.slot.stream_flush_pending = true
+				}
+				return
+			}
+			if _conn_wire_in_flight(conn) {
+				tls_host_try_seal_hold_stream(conn)
+				return
+			}
+		}
+		// WANT_READ path may have armed recv; keep flush_pending for resume.
+		if len(conn.resp_buf) > tls_host_stream_plain_off(conn) {
+			conn.slot.stream_flush_pending = true
+		}
+		return
 	}
-	// Remember plain sealed so CQE can advance stream_sent after full CT delivery.
-	conn.tls_stream_plain_n = consumed
 
-	pending := tls_server.bio_pending_out(p, ssl)
-	if pending <= 0 {
-		// Sealed but no CT yet (internal buffer) — advance plain cursor and continue.
-		conn.slot.stream_sent += consumed
-		conn.tls_stream_plain_n = 0
+	if n_ct <= 0 {
+		// Sealed but no CT yet — advance stream_sent (idle path; no prior pending plain).
+		conn.slot.stream_sent += plain_n
 		_stream_compact_delivered(conn)
 		if conn.slot.session != nil {
 			_session_on_writable(conn)
 		}
-		// Recurse while idle and more plain / ending.
 		more := len(conn.resp_buf) > conn.slot.stream_sent
 		if more || conn.slot.stream_ending {
 			tls_host_stream_try_submit(conn)
@@ -876,41 +1024,115 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		return
 	}
 
-	n := tls_server.bio_read_net(p, ssl, conn.tls_ct_tx)
-	if n <= 0 {
-		// Fail-closed (CQ-M2): pending was > 0 but drain failed — do not advance
-		// stream_sent (would desync plain vs peer / drop CT still in wBIO).
-		log.debugf(
-			"TLS stream bio_read_net fail after SSL_write fd=%v n=%d plain=%d",
-			conn.socket,
-			n,
-			consumed,
-		)
-		conn.tls_stream_plain_n = 0
-		tls_host_session_client_gone(conn)
-		return
-	}
-
-	tls_metrics_note_ct(conn.server, u64(n))
-	tls_metrics_inc_seal(conn.server)
-
+	// Record plain on primary slab, submit via shared dual-CT helper.
+	conn.tls_ct_tx_plain_n = plain_n
 	// Explicitly inactive multi-op queue so a prior path cannot leak exec_n.
 	conn.wire.exec_i = 0
 	conn.wire.exec_n = 0
-	conn.wire.pending_send = conn.tls_ct_tx[:n]
-	conn.tls_hs_send = false
-	// host_submit_send sets wire.kind = .Send — do NOT set .Stream so completion
-	// hits tls_host_on_send_complete via _host_on_wire_send.
-	if err := host_submit_send(conn); err != .None {
-		conn.wire.pending_send = nil
-		conn.tls_stream_plain_n = 0
-		// Same Client_Gone path as CQE send error when session owns the wire.
-		if conn.slot.session != nil {
+	if !tls_host_submit_ct(conn, dst, n_ct, hs = false) {
+		conn.tls_ct_tx_plain_n = 0
+		// submit_ct already _wire_fail'd; session Client_Gone if session owns wire.
+		if conn.slot.session != nil && conn.state < .Closing {
 			sync.atomic_add(&session_metrics_client_gone, 1)
 			_session_drive(conn, Session_Event{kind = .Client_Gone})
 		}
-		_wire_fail(conn, "TLS stream submit_send CT failed: %v", err)
+		return
 	}
+	// Dual-CT: seal next window into hold while this CT sends.
+	tls_host_try_seal_hold_stream(conn)
+}
+
+// ---------------------------------------------------------------------------
+// Ciphered oneshot plain cursor: heading (tls_plain_rest) then borrowed body.
+// ---------------------------------------------------------------------------
+
+// Total remaining plain bytes across rest + body parts.
+@(private)
+tls_plain_total_remaining :: proc(conn: ^Connection) -> int {
+	if conn == nil {
+		return 0
+	}
+	n := len(conn.tls_plain_rest)
+	body := conn.tls_plain_body
+	if len(body) > 0 {
+		off := conn.tls_plain_body_off
+		if off < 0 {
+			off = 0
+		}
+		if off < len(body) {
+			n += len(body) - off
+		}
+	}
+	return n
+}
+
+// View of the next contiguous plain bytes up to max (stops at part boundary).
+@(private)
+tls_plain_window :: proc(conn: ^Connection, max: int) -> []u8 {
+	if conn == nil || max <= 0 {
+		return nil
+	}
+	rest := conn.tls_plain_rest
+	if len(rest) > 0 {
+		n := min(len(rest), max)
+		return rest[:n]
+	}
+	body := conn.tls_plain_body
+	if len(body) == 0 {
+		return nil
+	}
+	off := conn.tls_plain_body_off
+	if off < 0 {
+		off = 0
+	}
+	if off >= len(body) {
+		return nil
+	}
+	rem := len(body) - off
+	n := min(rem, max)
+	return body[off:][:n]
+}
+
+// Advance plain cursor by n bytes across rest then body.
+@(private)
+tls_plain_advance :: proc(conn: ^Connection, n: int) {
+	if conn == nil || n <= 0 {
+		return
+	}
+	left := n
+	rest := conn.tls_plain_rest
+	if len(rest) > 0 {
+		take := min(left, len(rest))
+		conn.tls_plain_rest = rest[take:]
+		left -= take
+		if left == 0 {
+			return
+		}
+	}
+	body := conn.tls_plain_body
+	if len(body) == 0 {
+		return
+	}
+	off := conn.tls_plain_body_off
+	if off < 0 {
+		off = 0
+	}
+	if off >= len(body) {
+		return
+	}
+	take := min(left, len(body) - off)
+	conn.tls_plain_body_off = off + take
+}
+
+// Clear oneshot plain cursor (heading + borrowed body).
+@(private)
+tls_plain_clear :: proc(conn: ^Connection) {
+	if conn == nil {
+		return
+	}
+	conn.tls_plain_rest = nil
+	conn.tls_plain_body = nil
+	conn.tls_plain_body_off = 0
 }
 
 // Seal one oneshot plain window into OpenSSL; drain CT into dst (tx or hold).
@@ -920,24 +1142,34 @@ tls_host_seal_oneshot_window :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int
 	if conn == nil || conn.tls_ssl == nil || len(dst) == 0 {
 		return 0, 0, false
 	}
-	if len(conn.tls_plain_rest) == 0 {
+	if tls_plain_total_remaining(conn) == 0 {
 		return 0, 0, true
 	}
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
-	win := len(conn.tls_plain_rest)
-	if win > TLS_SEAL_WINDOW_DEFAULT {
-		win = TLS_SEAL_WINDOW_DEFAULT
+	win_slice := tls_plain_window(conn, TLS_SEAL_WINDOW_DEFAULT)
+	win := len(win_slice)
+	if win == 0 {
+		return 0, 0, true
 	}
 	if !pt_admit(&conn.pt, u32(win)) {
+		// Retry at one TLS record — re-window then admit exact slice size.
 		win = int(min(u32(win), TLS_RECORD_PLAIN))
-		if win == 0 || !pt_admit(&conn.pt, u32(win)) {
+		if win == 0 {
+			return 0, 0, false
+		}
+		win_slice = tls_plain_window(conn, win)
+		win = len(win_slice)
+		if win == 0 {
+			return 0, 0, true
+		}
+		if !pt_admit(&conn.pt, u32(win)) {
 			return 0, 0, false
 		}
 	}
 	tls_metrics_note_pt(conn.server, u64(conn.pt.admitted))
 
-	ret := tls_server.write(p, ssl, raw_data(conn.tls_plain_rest[:win]), c.int(win))
+	ret := tls_server.write(p, ssl, raw_data(win_slice), c.int(win))
 	if ret <= 0 {
 		pt_release(&conn.pt, u32(win))
 		ge := tls_server.get_error(p, ssl, ret)
@@ -959,7 +1191,7 @@ tls_host_seal_oneshot_window :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int
 	if consumed < win {
 		pt_release(&conn.pt, u32(win - consumed))
 	}
-	conn.tls_plain_rest = conn.tls_plain_rest[consumed:]
+	tls_plain_advance(conn, consumed)
 	path_metrics_note_ssl_write(u64(consumed))
 	sync.atomic_add(&path_seal_calls, 1)
 
@@ -983,7 +1215,7 @@ tls_host_seal_oneshot_window :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int
 // While sock send is in flight, seal next oneshot window into the free CT slab.
 @(private)
 tls_host_try_seal_hold_oneshot :: proc(conn: ^Connection) {
-	if conn == nil || len(conn.tls_plain_rest) == 0 {
+	if conn == nil || tls_plain_total_remaining(conn) == 0 {
 		return
 	}
 	dst, mark_hold := tls_host_seal_dst_for_ahead(conn)
@@ -1005,7 +1237,7 @@ tls_host_try_seal_hold_oneshot :: proc(conn: ^Connection) {
 }
 
 // tls_host_flush_response: window plain → SSL_write → drain CT → submit (dual-CT).
-// Multi-CQE: tls_plain_rest holds remaining plain. While send inflight, seals into hold.
+// Multi-CQE: tls_plain_* cursor holds remaining plain. While send inflight, seals into hold.
 @(private)
 tls_host_flush_response :: proc(conn: ^Connection) {
 	if conn == nil || conn.tls_ssl == nil {
@@ -1051,8 +1283,8 @@ tls_host_flush_response :: proc(conn: ^Connection) {
 		}
 	}
 
-	if len(conn.tls_plain_rest) == 0 {
-		conn.tls_plain_rest = nil
+	if tls_plain_total_remaining(conn) == 0 {
+		tls_plain_clear(conn)
 		if conn.pt.admitted > 0 {
 			pt_release(&conn.pt, conn.pt.admitted)
 		}
@@ -1083,18 +1315,19 @@ tls_host_flush_response :: proc(conn: ^Connection) {
 				return
 			}
 		}
-		if len(conn.tls_plain_rest) > 0 && !_conn_wire_in_flight(conn) {
+		if tls_plain_total_remaining(conn) > 0 && !_conn_wire_in_flight(conn) {
 			tls_host_flush_response(conn)
 			return
 		}
-		if len(conn.tls_plain_rest) == 0 {
+		if tls_plain_total_remaining(conn) == 0 {
+			tls_plain_clear(conn)
 			path_metrics_note_req()
 			clean_request_loop(conn)
 		}
 		return
 	}
 
-	if len(conn.tls_plain_rest) == 0 {
+	if tls_plain_total_remaining(conn) == 0 {
 		path_metrics_note_req()
 	}
 	if !tls_host_submit_ct(conn, dst, n_ct, hs = false) {
@@ -1156,38 +1389,74 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 		p := conn.server.tls_provider
 		ssl := conn.tls_ssl
 
-		// Dual-CT: promote any ready slab before residual drain (ordering).
-		if tls_host_promote_hold(conn) {
-			return true
+		// Which slab just completed (tls_send_is_hold still valid — promote clears it).
+		was_hold := conn.tls_send_is_hold
+		slab_plain := was_hold ? conn.tls_ct_hold_plain_n : conn.tls_ct_tx_plain_n
+		if was_hold {
+			conn.tls_ct_hold_plain_n = 0
+		} else {
+			conn.tls_ct_tx_plain_n = 0
 		}
-
-		// 1. More CT still in wBIO from the same plain seal → drain and submit.
-		if tls_server.bio_pending_out(p, ssl) > 0 {
-			if !tls_host_try_drain_out(conn, hs = false) {
-				return true
-			}
-			if _conn_wire_in_flight(conn) {
-				return true
-			}
-			// Drained without submit (empty read) — fall through to advance plain.
-		}
-
-		// 2. Full CT for current seal delivered: advance stream_sent.
-		if conn.tls_stream_plain_n > 0 {
-			conn.slot.stream_sent += conn.tls_stream_plain_n
+		// Legacy / residual-deferred single field: if no per-slab plain, use it.
+		if slab_plain == 0 && conn.tls_stream_plain_n > 0 {
+			slab_plain = conn.tls_stream_plain_n
 			conn.tls_stream_plain_n = 0
 		}
 
-		// 3. Compact delivered prefix when useful.
+		// 1. More CT still in wBIO from the same plain seal → drain (do not advance yet).
+		if tls_server.bio_pending_out(p, ssl) > 0 {
+			// Defer this slab's plain until residual CT is fully delivered.
+			conn.tls_stream_plain_n += slab_plain
+			if !tls_host_try_drain_out(conn, hs = false) {
+				if _conn_wire_in_flight(conn) {
+					tls_host_try_seal_hold_stream(conn)
+				}
+				return true
+			}
+			if _conn_wire_in_flight(conn) {
+				tls_host_try_seal_hold_stream(conn)
+				return true
+			}
+			// Drained without submit — fall through with deferred plain in tls_stream_plain_n.
+			slab_plain = 0
+		}
+
+		// 2. Ready residual CT of the same seal (plain_n == 0 on ready slab) — promote
+		//    before advancing so multi-record split across slabs stays ordered.
+		other_plain := was_hold ? conn.tls_ct_tx_plain_n : conn.tls_ct_hold_plain_n
+		other_ready := was_hold ? conn.tls_ct_tx_ready_n : conn.tls_ct_hold_n
+		if other_ready > 0 && other_plain == 0 {
+			conn.tls_stream_plain_n += slab_plain
+			if tls_host_promote_hold(conn) {
+				tls_host_try_seal_hold_stream(conn)
+				return true
+			}
+			slab_plain = 0
+		}
+
+		// 3. Full CT for this seal delivered: advance stream_sent by this slab + deferred.
+		adv := slab_plain + conn.tls_stream_plain_n
+		if adv > 0 {
+			conn.slot.stream_sent += adv
+			conn.tls_stream_plain_n = 0
+		}
+
+		// 4. Promote dual-CT ahead-seal (ready slab with its own plain_n > 0).
+		if tls_host_promote_hold(conn) {
+			tls_host_try_seal_hold_stream(conn)
+			return true
+		}
+
+		// 5. Compact delivered prefix when useful.
 		_stream_compact_delivered(conn)
 
-		// 4. Session backpressure relief.
+		// 6. Session backpressure relief.
 		if conn.slot.session != nil {
 			_session_on_writable(conn)
 		}
 
-		// 5. More plain / flush_pending / ending → seal next window.
-		more := len(conn.resp_buf) > conn.slot.stream_sent
+		// 7. More plain / flush_pending / ending → seal next window.
+		more := len(conn.resp_buf) > tls_host_stream_plain_off(conn)
 		if more || conn.slot.stream_flush_pending || conn.slot.stream_ending {
 			conn.slot.stream_flush_pending = false
 			if more || conn.slot.stream_ending {
@@ -1196,13 +1465,17 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 			}
 		}
 
-		// 6. Ending and all plain sent → finish (clean via _stream_finish).
-		if conn.slot.stream_ending && conn.slot.stream_sent >= len(conn.resp_buf) {
+		// 8. Ending and all plain sent (and no pending slab plain) → finish.
+		if conn.slot.stream_ending &&
+		   conn.slot.stream_sent >= len(conn.resp_buf) &&
+		   conn.tls_ct_tx_plain_n == 0 &&
+		   conn.tls_ct_hold_plain_n == 0 &&
+		   conn.tls_stream_plain_n == 0 {
 			_stream_finish(conn)
 			return true
 		}
 
-		// 7. Mid-session idle: arm CT recv for peer close (hangup path).
+		// 9. Mid-session idle: arm CT recv for peer close (hangup path).
 		_session_arm_hangup_watch(conn)
 		return true
 	}
@@ -1215,7 +1488,7 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 			return true
 		}
 		// Oneshot: continue windowed response flush (or residual / ready CT).
-		if len(conn.tls_plain_rest) > 0 ||
+		if tls_plain_total_remaining(conn) > 0 ||
 		   conn.tls_ct_hold_n > 0 ||
 		   conn.tls_ct_tx_ready_n > 0 ||
 		   tls_server.bio_pending_out(conn.server.tls_provider, conn.tls_ssl) > 0 {
@@ -1223,6 +1496,7 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 			return true
 		}
 		// Fully done.
+		tls_plain_clear(conn)
 		clean_request_loop(conn)
 		return true
 	}

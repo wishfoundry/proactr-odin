@@ -152,17 +152,94 @@ test_tls_host_ciphered_plan_and_flush_cursor :: proc(t: ^testing.T) {
 	testing.expect(t, !pol.sendfile_ok)
 	testing.expect_value(t, pol.max_write_unit, u32(PIPE_MAX_WRITE_UNIT_DEFAULT))
 
-	// Windowed send cursor semantics (no SSL_write).
+	// Windowed send cursor semantics (no SSL_write) — rest-only path.
 	plain := transmute([]u8)string("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
 	c.tls_plain_rest = plain
-	// Simulate multi-window advance as flush would do.
-	win := min(len(c.tls_plain_rest), 16)
-	c.tls_plain_rest = c.tls_plain_rest[win:]
-	testing.expect(t, len(c.tls_plain_rest) == len(plain) - win)
-	c.tls_plain_rest = nil
+	c.tls_plain_body = nil
+	c.tls_plain_body_off = 0
+	testing.expect_value(t, tls_plain_total_remaining(&c), len(plain))
+	win := min(tls_plain_total_remaining(&c), 16)
+	view := tls_plain_window(&c, win)
+	testing.expect_value(t, len(view), win)
+	tls_plain_advance(&c, win)
+	testing.expect_value(t, tls_plain_total_remaining(&c), len(plain) - win)
+	tls_plain_clear(&c)
+	testing.expect_value(t, tls_plain_total_remaining(&c), 0)
 
 	connection_disable_ciphered(&c)
 	testing.expect(t, !c.ciphered)
+}
+
+// Pure unit test: heading + borrowed body plain cursor (no OpenSSL).
+@(test)
+test_tls_plain_rest_then_body_cursor :: proc(t: ^testing.T) {
+	c: Connection
+	heading := transmute([]u8)string("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+	body := transmute([]u8)string("hello")
+	c.tls_plain_rest = heading
+	c.tls_plain_body = body
+	c.tls_plain_body_off = 0
+
+	total := len(heading) + len(body)
+	testing.expect_value(t, tls_plain_total_remaining(&c), total)
+
+	// First window is heading-only (part boundary).
+	w1 := tls_plain_window(&c, 1 << 20)
+	testing.expect_value(t, len(w1), len(heading))
+	testing.expect(t, raw_data(w1) == raw_data(heading))
+
+	// Advance past heading → body becomes next part.
+	tls_plain_advance(&c, len(heading))
+	testing.expect_value(t, tls_plain_total_remaining(&c), len(body))
+	testing.expect_value(t, len(c.tls_plain_rest), 0)
+
+	w2 := tls_plain_window(&c, 3)
+	testing.expect_value(t, len(w2), 3)
+	testing.expect(t, string(w2) == "hel")
+	tls_plain_advance(&c, 3)
+	testing.expect_value(t, c.tls_plain_body_off, 3)
+	testing.expect_value(t, tls_plain_total_remaining(&c), 2)
+
+	w3 := tls_plain_window(&c, 16)
+	testing.expect_value(t, len(w3), 2)
+	testing.expect(t, string(w3) == "lo")
+	tls_plain_advance(&c, 2)
+	testing.expect_value(t, tls_plain_total_remaining(&c), 0)
+	testing.expect(t, len(tls_plain_window(&c, 16)) == 0)
+
+	// Over-advance and clear are safe.
+	tls_plain_advance(&c, 10)
+	tls_plain_clear(&c)
+	testing.expect(t, c.tls_plain_rest == nil)
+	testing.expect(t, c.tls_plain_body == nil)
+	testing.expect_value(t, c.tls_plain_body_off, 0)
+}
+
+// Advance that straddles rest→body in one call.
+@(test)
+test_tls_plain_advance_across_parts :: proc(t: ^testing.T) {
+	c: Connection
+	heading := transmute([]u8)string("HDR\r\n\r\n")
+	body := transmute([]u8)string("BODYDATA")
+	c.tls_plain_rest = heading
+	c.tls_plain_body = body
+	c.tls_plain_body_off = 0
+
+	// Consume last 2 of heading + first 3 of body in one advance.
+	// First take only heading window (part-local).
+	win := tls_plain_window(&c, 4) // "HDR\r"
+	testing.expect_value(t, len(win), 4)
+	tls_plain_advance(&c, 4)
+	// Remaining heading: "\n\r\n" (3) + body 8 = 11
+	testing.expect_value(t, tls_plain_total_remaining(&c), 3+8)
+	// Cross the boundary: advance 5 (3 heading + 2 body).
+	tls_plain_advance(&c, 5)
+	testing.expect_value(t, len(c.tls_plain_rest), 0)
+	testing.expect_value(t, c.tls_plain_body_off, 2)
+	testing.expect_value(t, tls_plain_total_remaining(&c), 6)
+	rest := tls_plain_window(&c, 100)
+	testing.expect(t, string(rest) == "DYDATA")
+	tls_plain_clear(&c)
 }
 
 @(test)
@@ -236,26 +313,97 @@ test_server_tls_wanted :: proc(t: ^testing.T) {
 	testing.expect(t, server_tls_wanted(&s))
 }
 
-// Progressive stream cursor (no OpenSSL): plain_n holds sealed bytes until CT delivery.
+// Progressive stream cursor (no OpenSSL): per-slab plain_n holds sealed bytes until CT delivery.
 @(test)
 test_tls_stream_plain_n_cursor :: proc(t: ^testing.T) {
 	c: Connection
 	testing.expect(t, connection_enable_ciphered(&c))
 	c.slot.stream_open = true
 	c.slot.stream_sent = 0
-	// Simulate seal of 10 plain bytes into in-flight CT.
-	c.tls_stream_plain_n = 10
-	// After full CT CQE, host advances stream_sent and clears plain_n.
-	c.slot.stream_sent += c.tls_stream_plain_n
-	c.tls_stream_plain_n = 0
+	// Simulate seal of 10 plain bytes into primary CT in flight.
+	c.tls_ct_tx_plain_n = 10
+	testing.expect_value(t, tls_host_stream_plain_off(&c), 10)
+	// After full CT CQE, host advances stream_sent and clears slab plain_n.
+	c.slot.stream_sent += c.tls_ct_tx_plain_n
+	c.tls_ct_tx_plain_n = 0
 	testing.expect_value(t, c.slot.stream_sent, 10)
-	testing.expect_value(t, c.tls_stream_plain_n, 0)
+	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
+	testing.expect_value(t, tls_host_stream_plain_off(&c), 10)
 	// Long-lived gate used by send-complete demux.
 	testing.expect(t, tls_host_stream_long_lived(&c))
 	c.slot.stream_open = false
 	c.slot.session = nil
 	testing.expect(t, !tls_host_stream_long_lived(&c))
 	connection_disable_ciphered(&c)
+}
+
+// Dual-CT progressive plain bookkeeping (pure, no OpenSSL): per-slab plain_n +
+// plain_off cursor + CQE advance order (primary then hold).
+@(test)
+test_tls_stream_dual_ct_plain_n_bookkeeping :: proc(t: ^testing.T) {
+	c: Connection
+	c.slot.stream_open = true
+	c.slot.stream_sent = 100
+	// Seal N1 into primary (sending), N2 into hold (ready) — dual-CT overlap.
+	c.tls_ct_tx_plain_n = 40
+	c.tls_ct_hold_plain_n = 25
+	c.tls_send_is_hold = false
+	testing.expect_value(t, tls_host_stream_plain_off(&c), 165) // 100+40+25
+
+	// CQE for primary: advance by tx plain only (hold still outstanding).
+	was_hold := c.tls_send_is_hold
+	slab_plain := was_hold ? c.tls_ct_hold_plain_n : c.tls_ct_tx_plain_n
+	if was_hold {
+		c.tls_ct_hold_plain_n = 0
+	} else {
+		c.tls_ct_tx_plain_n = 0
+	}
+	// No residual bio / zero-plain ready → advance slab plain.
+	c.slot.stream_sent += slab_plain
+	testing.expect_value(t, c.slot.stream_sent, 140)
+	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
+	testing.expect_value(t, c.tls_ct_hold_plain_n, 25)
+	testing.expect_value(t, tls_host_stream_plain_off(&c), 165) // 140+25
+
+	// Promote hold then CQE for hold.
+	c.tls_send_is_hold = true
+	was_hold = c.tls_send_is_hold
+	slab_plain = was_hold ? c.tls_ct_hold_plain_n : c.tls_ct_tx_plain_n
+	if was_hold {
+		c.tls_ct_hold_plain_n = 0
+	} else {
+		c.tls_ct_tx_plain_n = 0
+	}
+	c.slot.stream_sent += slab_plain
+	testing.expect_value(t, c.slot.stream_sent, 165)
+	testing.expect_value(t, c.tls_ct_hold_plain_n, 0)
+	testing.expect_value(t, tls_host_stream_plain_off(&c), 165)
+
+	// Residual defer: multi-record same seal — plain parked in tls_stream_plain_n
+	// until residual CT (ready slab plain_n==0) completes.
+	c.slot.stream_sent = 0
+	c.tls_ct_tx_plain_n = 16
+	c.tls_ct_hold_plain_n = 0
+	c.tls_ct_hold_n = 8 // residual CT stashed, no new plain
+	c.tls_stream_plain_n = 0
+	c.tls_send_is_hold = false
+	was_hold = false
+	slab_plain = c.tls_ct_tx_plain_n
+	c.tls_ct_tx_plain_n = 0
+	// other ready with plain 0 → defer
+	c.tls_stream_plain_n += slab_plain
+	testing.expect_value(t, c.tls_stream_plain_n, 16)
+	testing.expect_value(t, c.slot.stream_sent, 0)
+	// Residual hold CQE: plain 0 on slab, take deferred.
+	c.tls_send_is_hold = true
+	slab_plain = c.tls_ct_hold_plain_n // 0
+	if slab_plain == 0 && c.tls_stream_plain_n > 0 {
+		slab_plain = c.tls_stream_plain_n
+		c.tls_stream_plain_n = 0
+	}
+	c.slot.stream_sent += slab_plain
+	testing.expect_value(t, c.slot.stream_sent, 16)
+	testing.expect_value(t, c.tls_stream_plain_n, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -284,12 +432,18 @@ test_tls_stream_plain_n_reset_on_ciphered_lifecycle :: proc(t: ^testing.T) {
 	c.server = nil
 	tls_pipe_init(&c.tls_pipe)
 	c.tls_stream_plain_n = 42
+	c.tls_ct_tx_plain_n = 3
+	c.tls_ct_hold_plain_n = 5
 	testing.expect(t, connection_enable_ciphered(&c))
 	// Field is independent of enable; destroy/clear path zeros it.
 	testing.expect_value(t, c.tls_stream_plain_n, 42)
 	c.tls_stream_plain_n = 7
+	c.tls_ct_tx_plain_n = 3
+	c.tls_ct_hold_plain_n = 5
 	tls_host_conn_destroy(&c)
 	testing.expect_value(t, c.tls_stream_plain_n, 0)
+	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
+	testing.expect_value(t, c.tls_ct_hold_plain_n, 0)
 	testing.expect(t, !c.ciphered)
 }
 
@@ -362,7 +516,9 @@ test_tls_host_on_send_complete_mid_session_no_clean :: proc(t: ^testing.T) {
 	c.slot.stream_open = true
 	c.slot.stream_ending = false
 	c.slot.stream_sent = 0
-	c.tls_stream_plain_n = 11
+	// Per-slab plain for primary (legacy tls_stream_plain_n also accepted).
+	c.tls_ct_tx_plain_n = 11
+	c.tls_send_is_hold = false
 	c.resp_buf = make([dynamic]u8, 0, 32)
 	defer delete(c.resp_buf)
 	append(&c.resp_buf, ..transmute([]u8)string("hello world")) // 11 bytes — all plain sealed
@@ -374,6 +530,7 @@ test_tls_host_on_send_complete_mid_session_no_clean :: proc(t: ^testing.T) {
 	testing.expect(t, handled, "TLS stream complete must be handled")
 	testing.expect(t, c.slot.stream_open, "mid-session must keep stream_open (no clean)")
 	testing.expect_value(t, c.tls_stream_plain_n, 0)
+	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
 	testing.expect_value(t, c.slot.stream_sent, 11)
 	// Must not have entered oneshot clean (which zeros stream_open / may close).
 	testing.expect(t, c.state < .Closing, "must not clean/close mid-session")
@@ -443,19 +600,26 @@ test_tls_ct_recv_inflight_close_defers :: proc(t: ^testing.T) {
 
 @(test)
 test_tls_stream_plain_n_cqe_advance_semantics :: proc(t: ^testing.T) {
-	// Documents CQE advance: after full CT for a seal, stream_sent += tls_stream_plain_n.
+	// Documents CQE advance: after full CT for a seal, stream_sent += completed slab plain_n.
 	// Pure (no OpenSSL) — same arithmetic as tls_host_on_send_complete mid-session branch.
 	c: Connection
 	c.slot.stream_open = true
 	c.slot.stream_sent = 100
-	c.tls_stream_plain_n = 4096
+	c.tls_ct_tx_plain_n = 4096
+	c.tls_send_is_hold = false
 	// Simulate completion advance (what on_send_complete does after CT fully delivered).
-	if c.tls_stream_plain_n > 0 {
-		c.slot.stream_sent += c.tls_stream_plain_n
-		c.tls_stream_plain_n = 0
+	was_hold := c.tls_send_is_hold
+	slab_plain := was_hold ? c.tls_ct_hold_plain_n : c.tls_ct_tx_plain_n
+	if was_hold {
+		c.tls_ct_hold_plain_n = 0
+	} else {
+		c.tls_ct_tx_plain_n = 0
+	}
+	if slab_plain > 0 {
+		c.slot.stream_sent += slab_plain
 	}
 	testing.expect_value(t, c.slot.stream_sent, 4196)
-	testing.expect_value(t, c.tls_stream_plain_n, 0)
+	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
 	testing.expect(t, tls_host_stream_long_lived(&c))
 }
 

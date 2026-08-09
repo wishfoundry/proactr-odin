@@ -404,7 +404,11 @@ like pre-Phase-1 (body already written).
 body_set_bytes :: proc(r: ^Response, byts: []byte, loc := #caller_location) {
 	// Preserve exclusive "set" semantics; multi-cmd is via body_static/body_bytes/body_file.
 	assert(r._cmd_count == 0, "the response body has already been written", loc)
-	// Borrowed for response lifetime; materialize copies into resp_buf at send.
+	// Static/Borrowed: buffer must stay valid until the response wire fully completes
+	// (final send CQE / clean_request_loop). Clear-H1 may materialize a copy; ciphered
+	// oneshot may seal from this view without copying the body (heading only in resp_buf).
+	// Stack/temp buffers that die when the handler returns are UNSAFE — use body_bytes
+	// (Owned) or body_reserve so send materializes a durable copy.
 	body_static(r, byts, loc)
 }
 
@@ -412,7 +416,7 @@ body_set_bytes :: proc(r: ^Response, byts: []byte, loc := #caller_location) {
 Prefer the procedure group `body_set`.
 */
 body_set_str :: proc(r: ^Response, str: string, loc := #caller_location) {
-	// Safe: materialize copies; we do not mutate the string bytes.
+	// Same borrow contract as body_set_bytes (Static). Prefer literals / process-static.
 	body_set_bytes(r, transmute([]byte)str, loc)
 }
 
@@ -898,6 +902,8 @@ _stream_finish :: proc(conn: ^Connection) {
 	conn.slot.stream_sent = 0
 	conn.slot.stream_flush_pending = false
 	conn.slot.stream_respond_fired = false
+	conn.tls_ct_tx_plain_n = 0
+	conn.tls_ct_hold_plain_n = 0
 	conn.tls_stream_plain_n = 0
 	_stream_pool_abandon(conn)
 	conn.wire.pending_send = nil
@@ -1913,7 +1919,8 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if r._cmd_count > 0 {
 			cmds := r._cmds[:r._cmd_count]
 			used_opt := false
-			// Ciphered: materialize only — no Writev/Sendfile (PT must pass SSL_write).
+			// Ciphered: no Writev/Sendfile (PT must pass SSL_write). Single borrowed
+			// Static/Bytes may seal without full-body materialize (see below).
 			if _response_wire_use_optimize(r) && !(conn != nil && conn.ciphered) {
 				plan := plan_body(cmds, plan_policy(r))
 				// Kernel/multi gather only pays off for ≥2 body segments (assembled).
@@ -1939,6 +1946,56 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 			if used_opt {
 				return
 			}
+			// Ciphered H1 oneshot: single borrowed Static/Bytes — heading only into
+			// resp_buf; body sealed from the cmd view (no O(body) memcpy). Lifetime:
+			// only when .Borrowed (Static or cmd_bytes owned=false). .Owned Bytes
+			// still materialize so stack/heap freed after respond cannot UAF.
+			// HEAD/streaming use materialize. Multi-cmd / File → materialize below.
+			if conn != nil &&
+			   conn.ciphered &&
+			   conn.tls_ssl != nil &&
+			   !conn.h2_active &&
+			   !r._streaming &&
+			   !_response_is_head(conn) &&
+			   r._cmd_count == 1 {
+				c := cmds[0]
+				borrow_ok := (c.kind == .Static || c.kind == .Bytes) &&
+					.Borrowed in c.flags &&
+					.Owned not_in c.flags
+				if borrow_ok {
+					body_len := len(c.bytes)
+					t0_build: u64
+					when HTTP_PHASE_STATS {
+						t0_build = phase_now()
+					}
+					hscratch: [512]byte
+					hlen := _response_format_heading(r, body_len, hscratch[:])
+					assert(hlen > 0 && hlen <= len(hscratch))
+					if cap(r._buf.buf) < hlen {
+						reserve(&r._buf.buf, hlen)
+					}
+					resize(&r._buf.buf, hlen)
+					copy(r._buf.buf[0:hlen], hscratch[:hlen])
+					r._heading_written = true
+					when HTTP_PHASE_STATS {
+						phase_add(0, 0, 0, 0, 0, phase_now() - t0_build, 0)
+					}
+
+					_conn_clear_exec(conn)
+					conn.resp_buf = r._buf.buf
+					conn.tls_plain_rest = r._buf.buf[:hlen]
+					if body_len > 0 {
+						conn.tls_plain_body = c.bytes
+						conn.tls_plain_body_off = 0
+					} else {
+						conn.tls_plain_body = nil
+						conn.tls_plain_body_off = 0
+					}
+					// Heading-only assemble — do not count full-body materialize.
+					tls_host_flush_response(conn)
+					return
+				}
+			}
 			_response_materialize_cmds(r)
 			// First arm only: full materialize into single pending_send.
 			plan_wire_inc_materialize()
@@ -1959,6 +2016,7 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	conn.resp_buf = r._buf.buf
 	buf := bytes.buffer_to_bytes(&r._buf)
 	if len(buf) == 0 {
+		tls_plain_clear(conn)
 		clean_request_loop(conn)
 		return
 	}
@@ -1966,6 +2024,9 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	// PR5 ciphered: window plain through SSL_write → CT drain → multi-CQE send.
 	// Clear-H1: single host_submit_send of full body.
 	if conn.ciphered && conn.tls_ssl != nil {
+		// Full materialize path: single plain part (no borrowed body).
+		conn.tls_plain_body = nil
+		conn.tls_plain_body_off = 0
 		conn.tls_plain_rest = buf
 		tls_host_flush_response(conn)
 		return
@@ -1997,6 +2058,9 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	// body/heading slice refs across temp reset / next request.
 	_conn_clear_exec(conn)
 
+	// Drop borrowed Static/Bytes plain body before request arena reset.
+	tls_plain_clear(conn)
+
 	// Progressive stream + session markers (D0/D1). Session should already be
 	// destroyed in _stream_finish; clear residual state for keep-alive reuse.
 	conn.slot.stream_open = false
@@ -2007,6 +2071,8 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	conn.slot.stream_send_slab = nil
 	conn.slot.stream_send_len = 0
 	conn.slot.stream_pin_armed = false
+	conn.tls_ct_tx_plain_n = 0
+	conn.tls_ct_hold_plain_n = 0
 	conn.tls_stream_plain_n = 0
 	// Do not free session here — _stream_finish / connection_close own that.
 	// Orphan sse_alloc pad (no session): free so keep-alive does not hold heap.
