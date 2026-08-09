@@ -1,7 +1,3 @@
-> **SCOREBOARD (rerank final):** dual-CT + 256KiB seal + plain-split (≥8KiB) + stream dual-CT  
-> WORKERS=8 · c=100 · z=15s · ranch-bastion · 2026-08-09  
-> Prior fair pre-bulk-opt: see FAIR / r1 artifacts.
-
 # TLS/H2 peer matrix results
 
 - **Host:** ranch-bastion · Linux 6.14.0-37-generic

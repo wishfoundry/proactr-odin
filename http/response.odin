@@ -1962,6 +1962,17 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 				borrow_ok := (c.kind == .Static || c.kind == .Bytes) &&
 					.Borrowed in c.flags &&
 					.Owned not_in c.flags
+				// Tiny bodies: split heading|body forces ≥2 SSL_write/CQE turns and
+				// tanks small-request RPS. Only skip full materialize for larger bodies.
+				// ≥8 KiB body: skip O(body) materialize. Smaller: one-shot materialize
+				// (heading+body) so tiny/4k keep single-seal RPS.
+				TLS_PLAIN_SPLIT_MIN_BODY :: 8 * 1024
+				if borrow_ok {
+					body_len := len(c.bytes)
+					if body_len < TLS_PLAIN_SPLIT_MIN_BODY {
+						borrow_ok = false
+					}
+				}
 				if borrow_ok {
 					body_len := len(c.bytes)
 					t0_build: u64
