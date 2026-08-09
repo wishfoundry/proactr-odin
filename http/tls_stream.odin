@@ -58,10 +58,14 @@ tls_host_stream_long_lived :: proc(conn: ^Connection) -> bool {
 
 // Stream plain_off / set_slab_plain live in tls_dual_ct.odin with the seal engine.
 
-// tls_host_stream_try_submit: progressive SSE/WS over TLS H1 (dual-CT seal∥send).
-// Encrypts plain from resp_buf[plain_off:] via SSL_write (no stream_pool slabs),
-// drains wBIO CT into free slab + tls_host_submit_ct (.Send — completion hits
-// tls_host_on_send_complete). CQE advances stream_sent by the completed slab's plain_n.
+// tls_host_stream_try_submit: progressive SSE/WS over TLS H1.
+// Encrypts plain from resp_buf[plain_off:] via SSL_write (no stream_pool slabs).
+//
+// Linux: dual-CT seal∥send (tls_host_submit_ct + try_ahead); CQE advances stream_sent.
+// Darwin (Plan R2 P4/P5-lite): residual-first CT write + reactor residual arm
+// (reactor_h1 → no soft_cq). dual_ct_try_ahead is a no-op. Multi-window continues
+// in-entry via residual-first loop re-entry; full shared reactor_tls_flush / D9
+// fairness for stream is deferred (INVENTORY).
 @(private)
 tls_host_stream_try_submit :: proc(conn: ^Connection) {
 	if conn == nil || conn.state >= .Closing {
@@ -79,14 +83,20 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		conn.resp_buf = r._buf.buf
 	}
 
-	// Live dual-CT: while a CT send is in flight, drain residual / seal ahead into free slab.
+	// Live dual-CT / reactor residual: while a CT send is in flight, drain residual;
+	// Linux may seal ahead into free slab. Darwin reactor residual forbids dual-CT ahead.
 	if _conn_wire_in_flight(conn) {
 		conn.slot.stream_flush_pending = true
 		if tls_server.bio_pending_out(conn.server.tls_provider, conn.tls_ssl) > 0 {
 			_ = tls_host_try_drain_out(conn, hs = false)
 		}
-		tls_dual_ct_try_ahead(conn, .Stream)
-		return
+		when ODIN_OS == .Darwin {
+			// No dual_ct_try_ahead over reactor residual / in-flight WRITE.
+			return
+		} else {
+			tls_dual_ct_try_ahead(conn, .Stream)
+			return
+		}
 	}
 
 	p := conn.server.tls_provider
@@ -94,23 +104,31 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 	d := &conn.dual_ct
 
 	// Ordering: promote already-sealed CT before residual wBIO / new seal (CRITIC C2).
-	if dual_ct_has_ready(d^) {
-		if tls_host_promote_hold(conn) {
-			tls_dual_ct_try_ahead(conn, .Stream)
-			return
+	// Linux dual-CT only; Darwin progressive does not stash hold ahead (INVENTORY).
+	when ODIN_OS != .Darwin {
+		if dual_ct_has_ready(d^) {
+			if tls_host_promote_hold(conn) {
+				tls_dual_ct_try_ahead(conn, .Stream)
+				return
+			}
 		}
 	}
 
 	// Prefer draining residual CT from a prior SSL_write before sealing more plain.
+	// Darwin: tls_host_try_drain_out → reactor residual-first (P4b).
 	if tls_server.bio_pending_out(p, ssl) > 0 {
 		if !tls_host_try_drain_out(conn, hs = false) {
-			if _conn_wire_in_flight(conn) {
-				tls_dual_ct_try_ahead(conn, .Stream)
+			when ODIN_OS != .Darwin {
+				if _conn_wire_in_flight(conn) {
+					tls_dual_ct_try_ahead(conn, .Stream)
+				}
 			}
 			return
 		}
 		if _conn_wire_in_flight(conn) {
-			tls_dual_ct_try_ahead(conn, .Stream)
+			when ODIN_OS != .Darwin {
+				tls_dual_ct_try_ahead(conn, .Stream)
+			}
 			return
 		}
 	}
@@ -162,14 +180,18 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		if tls_server.bio_pending_out(p, ssl) > 0 {
 			if !tls_host_try_drain_out(conn, hs = false) {
 				if _conn_wire_in_flight(conn) {
-					tls_dual_ct_try_ahead(conn, .Stream)
+					when ODIN_OS != .Darwin {
+						tls_dual_ct_try_ahead(conn, .Stream)
+					}
 				} else {
 					conn.slot.stream_flush_pending = true
 				}
 				return
 			}
 			if _conn_wire_in_flight(conn) {
-				tls_dual_ct_try_ahead(conn, .Stream)
+				when ODIN_OS != .Darwin {
+					tls_dual_ct_try_ahead(conn, .Stream)
+				}
 				return
 			}
 		}
@@ -196,11 +218,69 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		return
 	}
 
-	// Record plain on primary slab, submit via shared dual-CT helper.
-	d.tx_plain_n = plain_n
 	// Explicitly inactive multi-op queue so a prior path cannot leak exec_n.
 	conn.wire.exec_i = 0
 	conn.wire.exec_n = 0
+
+	when ODIN_OS == .Darwin {
+		// Residual-first CT write for this seal window (no soft-CQ; no dual-CT ahead).
+		// Advance stream_sent only after full CT of this window is on the wire — if
+		// EAGAIN mid-window, stash residual and arm WRITE via host_submit_send with
+		// reactor_h1 (documented residual arm; not charged as soft_cq).
+		d.tx_plain_n = 0
+		conn.tls_stream_plain_n += plain_n
+		off := 0
+		left := n_ct
+		for left > 0 {
+			sent, would_block, err := host_try_send_nb(conn, dst[off:][:left])
+			if err {
+				conn.tls_stream_plain_n = 0
+				_wire_fail(conn, "TLS stream reactor CT write failed fd=%v", conn.socket)
+				return
+			}
+			if would_block {
+				reactor_residual_set(conn, off, left)
+				if !reactor_arm_write_residual(conn) {
+					conn.tls_stream_plain_n = 0
+					return
+				}
+				conn.slot.stream_flush_pending = true
+				return
+			}
+			if sent <= 0 {
+				conn.tls_stream_plain_n = 0
+				_wire_fail(conn, "TLS stream reactor CT write zero fd=%v", conn.socket)
+				return
+			}
+			off += sent
+			left -= sent
+		}
+		// Full CT on wire — advance stream_sent for this window.
+		advance := plain_n
+		if conn.tls_stream_plain_n >= advance {
+			conn.tls_stream_plain_n -= advance
+		} else {
+			conn.tls_stream_plain_n = 0
+		}
+		conn.slot.stream_sent += advance
+		_stream_compact_delivered(conn)
+		if conn.slot.session != nil {
+			_session_on_writable(conn)
+		}
+		// Continue multi-window in this entry (light residual-first; not reactor_tls_flush).
+		// Progressive pads are typically small; deep recursion on multi-MiB single pad is
+		// deferred with full stream reactor fairness (INVENTORY). Product re-entry continues.
+		more := len(conn.resp_buf) > tls_host_stream_plain_off(conn)
+		if more || conn.slot.stream_ending {
+			tls_host_stream_try_submit(conn)
+		} else {
+			_session_arm_hangup_watch(conn)
+		}
+		return
+	}
+
+	// Linux dual-CT: record plain on primary slab, submit, seal ahead into hold.
+	d.tx_plain_n = plain_n
 	if !tls_host_submit_ct(conn, dst, n_ct, hs = false) {
 		d.tx_plain_n = 0
 		// submit_ct already _wire_fail'd; session Client_Gone if session owns wire.
@@ -210,7 +290,6 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 		}
 		return
 	}
-	// Dual-CT: seal next window into hold while this CT sends.
 	tls_dual_ct_try_ahead(conn, .Stream)
 }
 

@@ -47,7 +47,9 @@ h2_out_consume :: proc(conn: ^Connection, n: int) {
 // H2 seal window + try_seal_hold live in tls_dual_ct.odin (tls_seal_window /
 // tls_dual_ct_try_ahead with .H2_Out). h2_out cursor helpers stay here.
 
-// h2_host_flush_out: SSL_write frame bytes from h2_out (windowed; dual-CT seal∥send).
+// h2_host_flush_out: SSL_write frame bytes from h2_out (windowed).
+// Darwin: reactor residual-first until-EAGAIN (Plan R2 P4) — no dual_ct_try_ahead,
+// no soft-CQ between full windows. Linux: dual-CT seal∥send.
 // When tls_ssl is nil (unit tests), leaves bytes in h2_out for the test harness.
 @(private)
 h2_host_flush_out :: proc(conn: ^Connection) {
@@ -62,7 +64,14 @@ h2_host_flush_out :: proc(conn: ^Connection) {
 		return
 	}
 
-	// Live dual-CT: seal into free slab while a CT send is in flight.
+	when ODIN_OS == .Darwin {
+		// Reactor law: multi SSL_write(64KiB) + write until EAGAIN; single residual CT.
+		// Finishes with duplex CT recv arm (reactor_finish_h2 / residual re-arm path).
+		reactor_tls_flush(conn)
+		return
+	}
+
+	// Live dual-CT (Linux proactor): seal into free slab while a CT send is in flight.
 	if _conn_wire_in_flight(conn) {
 		if tls_server.bio_pending_out(conn.server.tls_provider, conn.tls_ssl) > 0 {
 			_ = tls_host_try_drain_out(conn, hs = false)
@@ -207,12 +216,29 @@ h2_host_flush_out :: proc(conn: ^Connection) {
 
 // h2_host_on_send_complete: after CT buffer delivered. Continue flush; re-arm recv.
 // Returns true if handled (caller skips H1 clean path).
+// Darwin reactor residual CQE is handled earlier via reactor_on_send_complete.
+// This path is dual-CT promote (Linux) or offline tests (nil SSL / no reactor_h1).
 @(private)
 h2_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	if conn == nil || !conn.h2_active {
 		return false
 	}
-	// Dual-CT: promote hold before general flush.
+	when ODIN_OS == .Darwin {
+		// Should rarely hit: residual CQE uses reactor_on_send_complete first.
+		// If product flush re-entered without residual flag, use reactor flush.
+		conn.wire.pending_send = nil
+		conn.dual_ct.send_is_hold = false
+		h2_host_flush_out(conn)
+		h2_host_maybe_finish_exchange(conn)
+		h2_host_dispatch_available(conn)
+		h2_host_maybe_goaway_from_closing(conn)
+		if conn.state < .Closing && conn.tls_pipe.state == .Open {
+			h2_test_arm_recv_count += 1
+			_ = tls_host_arm_recv(conn)
+		}
+		return true
+	}
+	// Dual-CT (Linux): promote hold before general flush.
 	if tls_host_promote_hold(conn) {
 		tls_dual_ct_try_ahead(conn, .H2_Out)
 	} else {
@@ -250,6 +276,12 @@ h2_host_conn_drained :: proc(conn: ^Connection) -> bool {
 	}
 	if dual_ct_has_ready(conn.dual_ct) {
 		return false
+	}
+	// Darwin reactor residual CT not yet on wire.
+	when ODIN_OS == .Darwin {
+		if conn.reactor_res_n > 0 || conn.reactor_h1 {
+			return false
+		}
 	}
 	if _conn_wire_in_flight(conn) {
 		return false

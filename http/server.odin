@@ -532,14 +532,15 @@ Connection :: struct {
 	tls_ssl:        tls_server.Conn,
 	// Network CT recv scratch (allocated on TLS accept; freed on destroy).
 	tls_ct_rx:      []u8,
-	// Live dual-CT seal∥send (PR5.1): primary + hold slabs; seal next window into
+	// Live dual-CT seal∥send (PR5.1 Linux): primary + hold slabs; seal next window into
 	// free slab while one sock send is in flight. See tls_dual_ct.odin.
-	// Darwin H1 oneshot reactor uses dual_ct.tx as the single residual CT slab only
-	// (hold unused for H1; H2/stream still dual-CT on façade until P4).
+	// Darwin H1+H2 reactor: dual_ct.tx is the single residual CT slab (hold unused on
+	// reactor product paths). Stream residual-first also uses tx; dual_ct_try_ahead no-op.
 	dual_ct:        Dual_Ct,
-	// Darwin H1 reactor residual: dual_ct.tx[reactor_res_off:][:reactor_res_n].
-	// reactor_h1: residual WRITE armed via façade (not charged as soft_cq_send_completes).
-	// reactor_fairness_yield: Nop soft re-entry after D9 fairness cap.
+	// Darwin reactor residual: dual_ct.tx[reactor_res_off:][:reactor_res_n].
+	// reactor_h1: residual WRITE armed via host_submit_send (façade re-entry); must be set
+	// before submit so soft_cq_send_completes is not charged and CQE demuxes to reactor.
+	// reactor_fairness_yield: reserved (fairness uses product re-entry, not soft-Nop).
 	reactor_res_off:         int,
 	reactor_res_n:           int,
 	reactor_h1:              bool,

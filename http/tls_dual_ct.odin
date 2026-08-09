@@ -224,6 +224,12 @@ tls_host_seal_dst_for_ahead :: proc(conn: ^Connection) -> (dst: []u8, mark_hold:
 // Drain wBIO into free slab; if sock free submit immediately, else mark ready.
 // Returns false if connection closed or send armed (caller must wait CQE).
 // Returns true if idle (no CT pending / nothing submitted).
+//
+// Darwin (Plan R2 P4b): when the sock is free, use reactor residual-first drain
+// (write until EAGAIN + single residual arm) — no dual-CT promote soup / soft-CQ
+// between full wBIO windows. While a non-reactor send is already in flight, fall
+// through to dual-CT stash only if hold is free (legacy); reactor residual arms
+// already own the wire via reactor_h1.
 @(private)
 tls_host_try_drain_out :: proc(conn: ^Connection, hs: bool) -> bool {
 	if conn == nil || conn.tls_ssl == nil {
@@ -237,6 +243,48 @@ tls_host_try_drain_out :: proc(conn: ^Connection, hs: bool) -> bool {
 	pending := tls_server.bio_pending_out(p, ssl)
 	if pending <= 0 {
 		return true
+	}
+
+	when ODIN_OS == .Darwin {
+		// Reactor residual already armed — do not dual-CT stash over it.
+		if conn.reactor_h1 || conn.reactor_res_n > 0 {
+			if _conn_wire_in_flight(conn) {
+				return false
+			}
+			// Residual meta without wire: write it first.
+			if conn.reactor_res_n > 0 {
+				again, hard := reactor_write_residual(conn)
+				if hard {
+					return false
+				}
+				if again {
+					if hs {
+						conn.tls_hs_send = true
+					}
+					_ = reactor_arm_write_residual(conn)
+					return false
+				}
+			}
+		}
+		// Sock free (or residual just cleared): drain wBIO until EAGAIN.
+		if !_conn_wire_in_flight(conn) {
+			again, hard := reactor_drain_wbio(conn)
+			if hard {
+				return false
+			}
+			if again {
+				if hs {
+					conn.tls_hs_send = true
+				}
+				_ = reactor_arm_write_residual(conn)
+				return false
+			}
+			// Fully drained.
+			return true
+		}
+		// Wire in flight without reactor residual: cannot dual-CT ahead-seal CT
+		// over an active clear/proactor send on Darwin product TLS — wait CQE.
+		return false
 	}
 
 	d := &conn.dual_ct
@@ -583,8 +631,14 @@ tls_seal_window_h2 :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plain_n:
 
 // tls_dual_ct_try_ahead: seal next plain window into free CT slab while send is inflight.
 // Failure: Stream → session Client_Gone; Oneshot/H2 → connection_close.
+// Darwin: no-op — product TLS uses reactor residual law (no ahead-seal over CQE).
 @(private)
 tls_dual_ct_try_ahead :: proc(conn: ^Connection, plain: Tls_Seal_Plain) {
+	when ODIN_OS == .Darwin {
+		_ = conn
+		_ = plain
+		return
+	}
 	if conn == nil {
 		return
 	}

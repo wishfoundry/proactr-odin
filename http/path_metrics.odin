@@ -29,10 +29,11 @@ path_ct_sends:       u64
 path_materialize:    u64
 
 // Duty-cycle / reactor law counters (Plan R2). Always live; atomic adds only.
-// seal_windows: SSL_write windows (reactor path; also dual-CT seal_calls cousin).
+// seal_windows: SSL_write windows on reactor_tls_flush (H1 oneshot + H2); not stream.
 // kevent_turns: reactor_tls_flush entries (proxy for seal_windows_per_kevent_turn).
-// soft_cq_send_completes: proactor send CQE path only — must stay 0 for Darwin H1 bulk.
-// eagain_arms: residual WRITE arms after EAGAIN on reactor (or façade residual arm).
+// soft_cq_send_completes: proactor send CQE without reactor_h1 — expect ~0 on Darwin
+//   pure H1/H2 TLS bulk matrix cells; clear-H1 cells still charge; residual arms do not.
+// eagain_arms: residual WRITE arms after EAGAIN (reactor_arm_write_residual).
 path_seal_windows:            u64
 path_kevent_turns:            u64
 path_soft_cq_send_completes:  u64
@@ -155,8 +156,8 @@ path_metrics_io_engine :: proc() -> string {
 	when ODIN_OS == .Linux {
 		return "proactor-uring"
 	} else when ODIN_OS == .Darwin {
-		// Honest hybrid (D7 not full cutover): H1 TLS send until-EAGAIN; rest façade.
-		return "reactor-kqueue-h1-send-hybrid"
+		// P5-lite: TLS product send law is reactor; accept/recv/close/timers/ring_wait façade.
+		return "reactor-kqueue"
 	} else when ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
 		return "proactor-kqueue-facade"
 	} else when ODIN_OS == .Windows {
@@ -166,9 +167,13 @@ path_metrics_io_engine :: proc() -> string {
 	}
 }
 
+// Operator scrape note (not APP_CONTRACT). Keep short; expand in INVENTORY.md.
 path_metrics_io_engine_note :: proc() -> string {
 	when ODIN_OS == .Darwin {
-		return "h1_tls_until_eagain;accept_recv_h2_hs_facade;no_soft_nop_fairness"
+		// Honest hybrid: TLS H1/H2 send + HS drain + stream residual-first on reactor law;
+		// accept/recv/close/timers/ring_wait + clear-H1 send still proactr façade;
+		// residual WRITE re-arm still host_submit_send with reactor_h1 (not soft_cq).
+		return "tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;accept_recv_close_timers_ring_wait_facade;clear_h1_facade;residual_arm_submit_send;no_dual_ct_ahead;no_soft_nop_fairness"
 	} else {
 		return ""
 	}

@@ -2,9 +2,9 @@
 package http
 
 // Darwin reactor I/O helpers: residual CT region + nonblocking write + WRITE arm.
-// Product sockets still share the worker proactr kqueue for accept/recv/timers (P2 hybrid).
+// Product sockets still share the worker proactr kqueue for accept/recv/timers (hybrid).
 // Residual EAGAIN arms EVFILT_WRITE via host_submit_send with conn.reactor_h1 set so
-// soft_cq_send_completes is not charged (H1 bulk law).
+// soft_cq_send_completes is not charged (H1/H2 bulk + HS/stream residual law).
 
 import "core:log"
 
@@ -80,9 +80,13 @@ reactor_write_residual :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	return false, false
 }
 
-// reactor_arm_write_residual: stash residual already set; arm façade WRITE for re-entry.
-// Does not soft-complete full windows — only residual remainder. Marks reactor_h1 so
-// soft_cq_send_completes stays 0 on this path.
+// reactor_arm_write_residual: residual already set; arm façade WRITE for re-entry.
+// Does not soft-complete full windows — only residual remainder.
+//
+// Contract: set reactor_h1 *before* host_submit_send so the eventual send CQE is
+// demuxed by reactor_on_send_complete and is **not** charged as soft_cq_send_completes
+// (see host_submit_send / _host_on_wire_send). This is still a proactr submit_send
+// (P5-lite hybrid: residual arm rides façade; bulk windows do not).
 @(private)
 reactor_arm_write_residual :: proc(conn: ^Connection) -> bool {
 	if conn == nil {
@@ -96,11 +100,11 @@ reactor_arm_write_residual :: proc(conn: ^Connection) -> bool {
 		return false
 	}
 	if _conn_wire_in_flight(conn) {
-		// Already armed — residual stays until CQE.
+		// Already armed — residual stays until CQE. Keep reactor_h1 if set.
 		return true
 	}
 	conn.wire.pending_send = view
-	conn.reactor_h1 = true
+	conn.reactor_h1 = true // must precede host_submit_send (metric + CQE demux)
 	if err := host_submit_send(conn); err != .None {
 		conn.reactor_h1 = false
 		_wire_fail(conn, "reactor residual arm submit_send failed: %v", err)

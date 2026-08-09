@@ -155,19 +155,20 @@ Tried **together** (plan critic APPROVE_WITH_AMENDMENTS):
 
 **Learning:** Even drogon-shaped dense + N=4 + peek does **not** buy ≥15% on this host under honest remeasure. Residual bulk gap is largely **AES + send + OpenSSL WPACKET** (sample), not free orchestration. Custom BIO_METHOD and true parity with drogon’s in-loop depth remain large eng bets, not next micro-flag.
 
-## Native kqueue reactor (Plan R2) — H1 send vertical slice
+## Native kqueue reactor (Plan R2) — P4 product TLS send law
 
-**Plan:** [`docs/design/native-kqueue-reactor/plan-r2.md`](../../docs/design/native-kqueue-reactor/plan-r2.md) — multi-critic **WOW** → implement.
+**Plan:** [`docs/design/native-kqueue-reactor/plan-r2.md`](../../docs/design/native-kqueue-reactor/plan-r2.md) (multi-critic WOW).
 
-**Shipped:** Darwin ciphered H1 oneshot residual-first multi `SSL_write(64KiB)` + write drain in one flush entry (no dual-CT ahead-seal). Label: `reactor-kqueue-h1-send-hybrid`.
+**Shipped:** Darwin H1 **and H2** TLS response send = residual-first until-EAGAIN (`reactor_tls_flush`); `dual_ct_try_ahead` no-op on Darwin; HS drain reactor. Accept/recv/close/timers still façade (`ring_wait`).
 
-| Metric (h1s s1m) | Result |
-|------------------|--------|
-| RPS (3×) | **~2478–2508** (flat vs P0c; **no +15% claim**) |
-| Matrix vs drogon | 2666 / 8946 ≈ **0.30×** (unchanged) |
-| `seal_windows_per_kevent_turn` | **~16.9** (**duty law moved**; was ~1 under dual-CT) |
+| Cell | RPS | duty note |
+|------|-----|-----------|
+| h1s s1m | **2648** | windows/turn **~16.9**, soft_cq_send **0** |
+| h2 s1m | **2256** | windows/turn **~8.5**, soft_cq_send **0** (was dual-CT dense) |
+| h1s plain | 94k | expected lower OK |
+| vs drogon h1s s1m | 0.29× | no parity claim |
 
-**Learning:** Windows/turn jumped (more AES per flush entry). **RPS did not.** Residual bulk gap is not free soft-CQ tax alone — OpenSSL/AES+send ceiling. Full reactor wait (P4–P5) is hygiene / D7, not a promised RPS unlock.
+**Learning:** Duty law fully engaged; RPS flat/lower accepted during cutover. Remaining plan: own kevent accept/recv + delete socket façade (P5-full).
 
 ## Next levers still open (honest, **no kTLS**)
 

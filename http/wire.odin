@@ -119,7 +119,19 @@ _wire_mem_done :: proc(conn: ^Connection) {
 // Submit paths
 // ---------------------------------------------------------------------------
 
-// host_submit_send enqueues send of conn.wire.pending_send.
+// host_submit_send enqueues send of conn.wire.pending_send via proactr
+// (io_uring on Linux; kqueue façade EVFILT_WRITE on Darwin).
+//
+// Darwin TLS residual arms (reactor_arm_write_residual in io_reactor_kqueue.odin)
+// set conn.reactor_h1 = true *before* calling this. That still uses the façade
+// WRITE interest for re-entry, but _host_on_wire_send does **not** charge
+// soft_cq_send_completes when reactor_h1 is set (Plan R2 duty gate = 0 for
+// H1/H2 bulk residual CQEs). Full CT windows on Darwin TLS never call this
+// between seals — they use host_try_send_nb until EAGAIN, then residual arm only.
+//
+// Clear-H1 (non-TLS) and Linux dual-CT product sends call this without
+// reactor_h1; those CQEs count as soft_cq_send_completes. Partial residual
+// resubmits leave reactor_h1 true so the metric stays honest.
 @(private)
 host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	assert_has_td()
@@ -732,8 +744,9 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 	// This CQE completes the prior SEND; clear until we re-arm (partial or next buffer).
 	conn.wire.kind = .None
 
-	// Duty metric: proactor send CQE only. Darwin H1 reactor residual arms set reactor_h1
-	// and must not increment soft_cq_send_completes (Plan R2 gate = 0 for H1 bulk).
+	// Duty metric: proactor send CQE only. Darwin TLS residual arms set reactor_h1
+	// before host_submit_send and must not increment soft_cq_send_completes
+	// (Plan R2 gate = 0 for H1/H2 bulk residual; clear-H1 still charges).
 	if !conn.reactor_h1 {
 		path_metrics_note_soft_cq_send_complete()
 	}

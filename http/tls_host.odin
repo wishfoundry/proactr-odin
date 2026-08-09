@@ -532,19 +532,7 @@ tls_host_ssl_read_burst :: proc(conn: ^Connection, dst: []u8) -> int {
 			break
 		}
 		if ge == p.ERROR_WANT_WRITE {
-			// Drain CT if any. Darwin H1 reactor residual must not use dual-CT drain.
-			when ODIN_OS == .Darwin {
-				if conn.reactor_h1 || conn.reactor_res_n > 0 {
-					again, hard := reactor_drain_wbio(conn)
-					if hard {
-						return 0
-					}
-					if again {
-						_ = reactor_arm_write_residual(conn)
-					}
-					break
-				}
-			}
+			// Drain CT if any. Darwin: always reactor residual path (P4b) via try_drain_out.
 			_ = tls_host_try_drain_out(conn, hs = false)
 			break
 		}
@@ -597,12 +585,21 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	if conn == nil || conn.tls_ssl == nil {
 		return false
 	}
+
+	// Darwin reactor residual WRITE CQE: single residual region — continue flush law
+	// (HS / H2 / oneshot demux inside reactor_on_send_complete). No dual-CT promote.
+	when ODIN_OS == .Darwin {
+		if conn.reactor_h1 {
+			return reactor_on_send_complete(conn)
+		}
+	}
+
 	hs := conn.tls_hs_send
 	conn.tls_hs_send = false
 	conn.wire.pending_send = nil
 
 	if hs || conn.tls_pipe.state == .Handshake {
-		// Dual-CT: promote any CT stashed during HS send before re-entering handshake.
+		// Dual-CT (Linux): promote any CT stashed during HS send before re-entering handshake.
 		if tls_host_promote_hold(conn) {
 			return true
 		}
@@ -631,6 +628,7 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	}
 
 	// PR8 H2 eng: continue windowed frame flush; duplex re-arm CT recv.
+	// Linux dual-CT promote path; Darwin residual already handled above.
 	if conn.h2_active {
 		return h2_host_on_send_complete(conn)
 	}
@@ -733,13 +731,8 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	}
 
 	if conn.ciphered || conn.tls_pipe.state == .Open {
-		when ODIN_OS == .Darwin {
-			// Reactor residual WRITE CQE → continue until-EAGAIN flush (not dual-CT promote).
-			if reactor_on_send_complete(conn) {
-				return true
-			}
-		}
-		// Dual-CT: if a slab was filled during flight, promote immediately.
+		// Dual-CT (Linux): if a slab was filled during flight, promote immediately.
+		// Darwin reactor residual already handled at top of this proc.
 		if tls_host_promote_hold(conn) {
 			// New send armed — seal further into free slab.
 			tls_dual_ct_try_ahead(conn, .Oneshot)
