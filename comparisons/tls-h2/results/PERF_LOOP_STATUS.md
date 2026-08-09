@@ -42,13 +42,26 @@ Cleartext kqueue profile matrix (older): proactr ahead on tiny/file sendfile; be
 - **Measure:** h1s s1m **2608** vs baseline **2778** (−6%); h1s plain regression  
 - **Decision:** **reset** (not committed)
 
-## Next levers still open (honest)
+## Round 3 — H2 send/rearm cleanup (no kTLS)
 
-1. **OpenSSL/send density ceiling** on bulk H1 — bare crypto calibration before more planner work  
-2. **Small H2:** remaining after HPACK is mostly **send/recv/rearm** (not second clone)  
-3. **H1 parse/maps** for h1s plaintext  
-4. **kTLS** (long pole) if AES+send stays ~90% of bulk samples  
-5. Do **not** re-implement plain-split / dual-CT (already live)
+| Stage | Result |
+|-------|--------|
+| Plan (coalesce heading) | **REJECT** — R2-adjacent, wrong cell for 0.73× H2 |
+| Alt plan (send/rearm density) | **APPROVED** by critic |
+| Impl | Collapse arm spray, empty flush fast-path, kqueue soft-CQ changelist flush |
+| Measure (proactr+ntex) | h2 plain **−0.1%**; s4k **−2.3%**; some h1s bulk **−6–9%** |
+| Gate | Need ≥+8% h2 plain — **FAIL** |
+| Decision | **RESET** (not committed) |
+
+**Learning:** arm_recv was already single-flight; remaining spray is cheap flag checks. Soft-CQ flush didn't move RPS. Small-H2 gap is not free “orchestration” — deeper (OpenSSL record setup + send density) without kTLS.
+
+## Next levers still open (honest, **no kTLS**)
+
+1. **Small H2:** residual first HPACK ownership into stream (still one clone); response path OpenSSL WPACKET; compare ntex connection reuse  
+2. **H1 parse/maps** for h1s plaintext (0.75× drogon)  
+3. **Bulk:** accept OpenSSL userspace AES+send ceiling vs drogon until different I/O architecture (not kTLS as product default)  
+4. **Calibration:** bare OpenSSL encrypt+send microbench to bound headroom  
+5. Do **not** re-do plain-split, dual-CT 256KiB, 1MiB window, or heading coalesce as main bets  
 
 ## Loop policy reminder
-Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction.
+Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix.
