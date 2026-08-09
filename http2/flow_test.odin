@@ -548,6 +548,48 @@ test_h2_peak_wire_o_window_two_large_bodies :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// After respond END_STREAM, stream stays until app_release so take slices remain valid.
+@(test)
+test_h2_headers_survive_respond_until_app_release :: proc(t: ^testing.T) {
+	srv: Http2_Connection
+	conn_init(&srv, true)
+	defer conn_destroy(&srv)
+	srv.preface_seen = true
+
+	out: [dynamic]u8
+	defer delete(out)
+	in_buf: [dynamic]u8
+	defer delete(in_buf)
+	req_block: [dynamic]u8
+	req_block.allocator = context.temp_allocator
+	hpack.encode(&req_block, []Header{
+		{name = ":method", value = "GET"},
+		{name = ":scheme", value = "https"},
+		{name = ":authority", value = "x"},
+		{name = ":path", value = "/pin"},
+	})
+	frame_write(&in_buf, FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, req_block[:])
+	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
+	sid, hdrs, _, ok := conn_take_request(&srv)
+	testing.expect(t, ok)
+	testing.expect_value(t, sid, u32(1))
+	// Find :path while stream still holds storage.
+	path := ""
+	for h in hdrs {
+		if h.name == ":path" {
+			path = h.value
+		}
+	}
+	testing.expect_value(t, path, "/pin")
+	conn_send_headers(&srv, &out, sid, []Header{{name = ":status", value = "200"}}, true)
+	// Still in map and path still readable after respond.
+	testing.expect(t, len(srv.streams) == 1, "stream held until app release")
+	testing.expect_value(t, path, "/pin")
+	conn_app_release(&srv, sid)
+	testing.expect_value(t, len(srv.streams), 0)
+	free_all(context.temp_allocator)
+}
+
 // Closed+delivered streams must leave the map (F16: unbounded map inverted
 // H2 RPS under concurrency — WINDOW_UPDATE scanned every historical stream).
 @(test)
@@ -582,8 +624,10 @@ test_h2_reaps_closed_streams :: proc(t: ^testing.T) {
 		got_sid, _, _, ok := conn_take_request(&srv)
 		testing.expect(t, ok, "take request")
 		testing.expect_value(t, got_sid, sid)
-		// Empty response: END_STREAM on HEADERS → closed + reaped.
+		// Empty response: END_STREAM on HEADERS → closed; free after app release
+		// (borrowed header lifetime ends when host finishes the take).
 		conn_send_headers(&srv, &out, sid, []Header{{name = ":status", value = "200"}}, true)
+		conn_app_release(&srv, sid)
 		clear(&out)
 	}
 

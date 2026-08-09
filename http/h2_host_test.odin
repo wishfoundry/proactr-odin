@@ -11,12 +11,28 @@ import http2 "../http2"
 
 // Package-level counters (Odin procs cannot capture test locals).
 // Shared with h2_m_gates_test.odin (package-private, not file-private).
+// Tests that use these must take _h2_test_counter_mu (parallel test runners race otherwise).
+@(private)
+_h2_test_counter_mu: sync.Mutex
 @(private)
 _h2_test_n_calls: int
 @(private)
 _h2_test_n_hold: int
 @(private)
 _h2_test_n_ok: int
+
+@(private)
+_h2_test_counters_begin :: proc() {
+	sync.mutex_lock(&_h2_test_counter_mu)
+	_h2_test_n_calls = 0
+	_h2_test_n_hold = 0
+	_h2_test_n_ok = 0
+}
+
+@(private)
+_h2_test_counters_end :: proc() {
+	sync.mutex_unlock(&_h2_test_counter_mu)
+}
 
 // Minimal worker + scrap arena so respond / server_date / dispatch work offline.
 @(private)
@@ -489,6 +505,8 @@ test_h2_serial_busy_blocks_second_take :: proc(t: ^testing.T) {
 @(test)
 test_h2_concurrent_ignores_stale_serial_busy :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	_h2_test_counters_begin()
+	defer _h2_test_counters_end()
 	st: Server_Thread
 	h2_test_install_worker(&st)
 	defer h2_test_uninstall_worker()
@@ -497,7 +515,6 @@ test_h2_concurrent_ignores_stale_serial_busy :: proc(t: ^testing.T) {
 	s.conn_allocator = context.allocator
 	s.opts = Default_Server_Opts
 	s.opts.h2_serial_dispatch = false
-	_h2_test_n_calls = 0
 	s.handler = handler(_h2_test_handler_count_ok)
 
 	conn: Connection
@@ -622,6 +639,8 @@ test_h2_host_concurrent_two_get_streams :: proc(t: ^testing.T) {
 @(test)
 test_h2_host_serial_single_flight_two_ready :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	_h2_test_counters_begin()
+	defer _h2_test_counters_end()
 	st: Server_Thread
 	h2_test_install_worker(&st)
 	defer h2_test_uninstall_worker()
@@ -630,7 +649,6 @@ test_h2_host_serial_single_flight_two_ready :: proc(t: ^testing.T) {
 	s.conn_allocator = context.allocator
 	s.opts = Default_Server_Opts
 	s.opts.h2_serial_dispatch = true
-	_h2_test_n_calls = 0
 	s.handler = handler(_h2_test_handler_count_one)
 
 	conn: Connection
@@ -673,6 +691,8 @@ test_h2_host_serial_single_flight_two_ready :: proc(t: ^testing.T) {
 @(test)
 test_h2_host_free_slot_after_finish_allows_third :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	_h2_test_counters_begin()
+	defer _h2_test_counters_end()
 	st: Server_Thread
 	h2_test_install_worker(&st)
 	defer h2_test_uninstall_worker()
@@ -681,7 +701,6 @@ test_h2_host_free_slot_after_finish_allows_third :: proc(t: ^testing.T) {
 	s.conn_allocator = context.allocator
 	s.opts = Default_Server_Opts
 	s.opts.h2_serial_dispatch = false
-	_h2_test_n_calls = 0
 	s.handler = handler(_h2_test_handler_count_x)
 
 	conn: Connection
@@ -734,6 +753,8 @@ test_h2_host_free_slot_after_finish_allows_third :: proc(t: ^testing.T) {
 @(test)
 test_h2_host_long_lived_slot_allows_other_stream :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	_h2_test_counters_begin()
+	defer _h2_test_counters_end()
 	st: Server_Thread
 	h2_test_install_worker(&st)
 	defer h2_test_uninstall_worker()
@@ -742,8 +763,6 @@ test_h2_host_long_lived_slot_allows_other_stream :: proc(t: ^testing.T) {
 	s.conn_allocator = context.allocator
 	s.opts = Default_Server_Opts
 	s.opts.h2_serial_dispatch = false
-	_h2_test_n_hold = 0
-	_h2_test_n_ok = 0
 	s.handler = handler(_h2_test_handler_hold_or_ok)
 
 	conn: Connection

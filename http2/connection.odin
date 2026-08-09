@@ -58,6 +58,9 @@ Http2_Stream :: struct {
 	headers_done: bool,
 	end_stream:   bool, // peer set END_STREAM (message complete from their side)
 	delivered:    bool, // server: handed to the application
+	// Host finished using slices from take (handler returned). Header/body
+	// storage must survive until this is set — respond may close+reap mid-handler.
+	app_released: bool,
 
 	// Outbound flow control (RFC 9113 §6.9). `send_window` is how many DATA
 	// bytes the PEER will currently accept on this stream; `pending` holds body
@@ -646,13 +649,21 @@ conn_refuse_stream :: proc(c: ^Http2_Connection, out: ^[dynamic]u8, sid: u32) {
 	if s, ok := c.streams[sid]; ok {
 		s.failed = true
 		s.error_code = H2_REFUSED_STREAM
+		// If already taken, host is dropping without a handler — release now.
+		if s.delivered {
+			s.app_released = true
+		}
 		stream_pending_clear(s)
 		s.end_pending = false
 		_stream_close(c, s)
 	}
+	conn_reap_streams(c)
 }
 
 // Server: next fully-received request not yet handed out.
+// Returned headers/body slices are borrowed from stream storage until
+// conn_app_release(c, sid) (or refuse/destroy). Do not free via headers_destroy
+// on the caller's side.
 conn_take_request :: proc(
 	c: ^Http2_Connection,
 ) -> (sid: u32, headers: []Header, body: []u8, ok: bool) {
@@ -660,10 +671,21 @@ conn_take_request :: proc(
 		if s.failed || s.closed do continue
 		if s.end_stream && s.headers_done && !s.delivered {
 			s.delivered = true
+			s.app_released = false
 			return id, s.headers[:], s.body[:], true
 		}
 	}
 	return 0, nil, nil, false
+}
+
+// Host finished using the slices from conn_take_request (after handler return).
+// Enables conn_reap_streams to free header/body storage once the stream is closed.
+conn_app_release :: proc(c: ^Http2_Connection, sid: u32) {
+	if c == nil || sid == 0 do return
+	if s, ok := c.streams[sid]; ok {
+		s.app_released = true
+	}
+	conn_reap_streams(c)
 }
 
 // Client: response for `sid`, once fully received. Marks the stream delivered
@@ -675,6 +697,7 @@ conn_response :: proc(
 	s, ok := c.streams[sid]
 	if !ok || !s.end_stream do return nil, nil, false
 	s.delivered = true
+	s.app_released = false
 	return s.headers[:], s.body[:], true
 }
 
@@ -707,16 +730,28 @@ conn_has_pending_body :: proc(c: ^Http2_Connection) -> bool {
 // the map does not grow with every exchange. Applies to both server and client:
 // server marks delivered via conn_take_request; client via conn_response.
 // WINDOW_UPDATE / has_pending scan every entry — unbounded growth inverted
-// H2 bulk RPS under concurrency (F16). Safe when no caller holds slices into
-// stream headers/body (i.e. after the handler / response consumer returns).
+// H2 bulk RPS under concurrency (F16).
+//
+// Header/body bytes are freed only when safe for the host:
+//   - failed and never delivered → free immediately when closed
+//   - delivered → free only after conn_app_release (handler finished)
+// This allows Request to borrow stream header strings without cloning.
 // Two-pass so map iteration is stable.
 conn_reap_streams :: proc(c: ^Http2_Connection) {
 	if len(c.streams) == 0 do return
 	ids: [dynamic]u32
 	ids.allocator = context.temp_allocator
 	for id, s in c.streams {
-		if s.closed && (s.delivered || s.failed) {
+		if !s.closed do continue
+		// Never taken: refuse/reset/GOAWAY can free when closed.
+		if s.failed && !s.delivered {
 			append(&ids, id)
+			continue
+		}
+		// Taken by app: wait until host releases borrowed header/body slices.
+		if s.delivered && s.app_released {
+			append(&ids, id)
+			continue
 		}
 	}
 	for id in ids {

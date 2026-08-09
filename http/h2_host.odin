@@ -353,6 +353,8 @@ h2_host_dispatch_available :: proc(conn: ^Connection) {
 			http2.conn_send_response(&conn.h2, &conn.h2_out, sid, bad, nil)
 			h2_host_flush_out(conn)
 			h2_host_maybe_finish_exchange(conn)
+			// Borrowed headers no longer needed (no handler ran on this request).
+			http2.conn_app_release(&conn.h2, sid)
 			if serial {
 				return // one flight in serial
 			}
@@ -364,6 +366,8 @@ h2_host_dispatch_available :: proc(conn: ^Connection) {
 
 		if !connection_set_state(conn, .Active) {
 			h2_host_slot_free(conn, slot_i)
+			http2.conn_refuse_stream(&conn.h2, &conn.h2_out, sid)
+			h2_host_flush_out(conn)
 			return
 		}
 
@@ -385,6 +389,7 @@ h2_host_dispatch_available :: proc(conn: ^Connection) {
 			if t, tok := rline.target.(string); tok && t == "*" {
 				slot.res.status = .OK
 				respond(&slot.res)
+				http2.conn_app_release(&conn.h2, sid)
 				if serial {
 					return
 				}
@@ -405,6 +410,10 @@ h2_host_dispatch_available :: proc(conn: ^Connection) {
 				respond(&slot.res)
 			}
 		}
+
+		// Release stream header/body borrow after handler (and any forced respond).
+		// Safe even if respond already closed the stream mid-handler.
+		http2.conn_app_release(&conn.h2, sid)
 
 		if serial {
 			return // max one in-flight oneshot under serial mode
@@ -737,10 +746,9 @@ h2_request_from_headers :: proc(
 			if len(h.name) > 0 && h.name[0] == ':' {
 				continue
 			}
-			// Clone key/value into request allocator.
-			k := strings.clone(h.name, allocator)
-			v := strings.clone(h.value, allocator)
-			headers_set_unsafe(&req.headers, k, v)
+			// Borrow stream-owned HPACK strings (valid until conn_app_release).
+			// No second clone — scrap arena must not free these (they live on c.allocator).
+			headers_set_unsafe(&req.headers, h.name, h.value)
 		}
 	}
 
@@ -752,9 +760,9 @@ h2_request_from_headers :: proc(
 		return false
 	}
 
-	// Host from :authority or host header.
+	// Host from :authority or host header. Key is static; value borrows :authority.
 	if auth_s != "" && !headers_has_unsafe(req.headers, "host") {
-		headers_set_unsafe(&req.headers, strings.clone("host", allocator), strings.clone(auth_s, allocator))
+		headers_set_unsafe(&req.headers, "host", auth_s)
 	}
 	_ = scheme_s
 
@@ -763,7 +771,8 @@ h2_request_from_headers :: proc(
 		return false
 	}
 
-	// Content-Length from body when missing (POST oneshot).
+	// Content-Length from body when missing (POST oneshot) — synthetic strings
+	// must live on the request allocator (not stream storage).
 	if len(body) > 0 && !headers_has_unsafe(req.headers, "content-length") {
 		buf: [20]byte
 		cl := strconv.write_int(buf[:], i64(len(body)), 10)
@@ -779,7 +788,8 @@ h2_request_from_headers :: proc(
 	}
 	req.headers.readonly = true
 
-	target := strings.clone(path_s, allocator)
+	// Borrow :path for request line / url views (same lifetime as headers).
+	target := path_s
 	req.line = Requestline {
 		method  = method,
 		target  = target,
@@ -789,10 +799,8 @@ h2_request_from_headers :: proc(
 	req.is_head = method == .Head
 
 	if len(body) > 0 {
-		// Copy body into request allocator so stream reaping cannot free it mid-handler.
-		owned := make([]u8, len(body), allocator)
-		copy(owned, body)
-		req._pre_body = owned
+		// Borrow stream body — freed only after conn_app_release (post-handler).
+		req._pre_body = body
 	} else {
 		req._pre_body = []u8{}
 	}
