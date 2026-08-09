@@ -517,10 +517,10 @@ Connection :: struct {
 	// Nested wire bag: mem queue, iovecs, file region, in-flight kind (see Wire_State).
 	// Clear-H1 path still drives Wire_State; Plan A pipe bags below are not yet wired.
 	wire:           Wire_State,
-	// Plan A pipe bags (POD; not yet driving clear-H1 wire path — Phase 2+)
-	// wire_conn is thin (~24 B); Seal_Queue / pipe CT[2] deferred until
-	// connection_enable_ciphered_pipe_sm (pure tests / future live seal∥send).
-	// Live oneshot only connection_enable_ciphered (flag + plan_policy). Clear-H1: Wire_State.
+	// Plan A pipe bags (POD; clear-H1 still uses Wire_State for mem/file send).
+	// wire_conn is thin (~24 B); pure-pipe Seal_Queue / Tls_Pipe CT[2] only via
+	// connection_enable_ciphered_pipe_sm (firehose tests). Live TLS seal∥send uses
+	// dual_ct slabs (tls_host_on_accept) + connection_enable_ciphered (flag + plan_policy).
 	pt:        Conn_Pt_Ring,
 	wire_conn: Wire_Conn_State,
 	// tls: Tls_Pipe SM + host mem-BIO engine (opaque Conn; no SSL* public).
@@ -530,19 +530,11 @@ Connection :: struct {
 	ciphered:  bool,
 	// Host-private TLS engine (0 / nil = clear). Opaque tls_server.Conn only.
 	tls_ssl:        tls_server.Conn,
-	// Network CT scratch (allocated on TLS accept; freed on destroy).
-	// Dual CT slabs: seal next window into the free slab while one sock send is
-	// in flight (live seal∥send / PR5.1). tls_ct_tx = primary; tls_ct_hold = second.
+	// Network CT recv scratch (allocated on TLS accept; freed on destroy).
 	tls_ct_rx:      []u8,
-	tls_ct_tx:      []u8,
-	tls_ct_hold:    []u8,
-	// Ready (sealed, not yet submitted) lengths. 0 = slab free for next seal.
-	// A slab that is currently in wire.pending_send is "sending" (not ready);
-	// do not overwrite it until its CQE completes.
-	tls_ct_tx_ready_n: int,
-	tls_ct_hold_n:     int,
-	// True when wire.pending_send aliases tls_ct_hold (else aliases tls_ct_tx).
-	tls_send_is_hold: bool,
+	// Live dual-CT seal∥send (PR5.1): primary + hold slabs; seal next window into
+	// free slab while one sock send is in flight. See tls_dual_ct.odin.
+	dual_ct:        Dual_Ct,
 	// True while a CT RECV SQE into tls_ct_rx is outstanding (hangup / HS / Open).
 	// Arm is idempotent; re-arm only after the matching CQE clears this bit.
 	// Prevents kqueue EV_ADD replace-udata orphan of a prior Recv (CQ-F1).
@@ -555,13 +547,9 @@ Connection :: struct {
 	tls_plain_body_off: int,  // cursor into tls_plain_body
 	// pending_send is handshake CT (vs response CT) for send-complete demux.
 	tls_hs_send:    bool,
-	// Progressive stream (SSE/WS) dual-CT plain accounting:
-	// tls_ct_tx_plain_n / tls_ct_hold_plain_n = plain sealed into that slab (set on
-	// SSL_write, cleared on CQE for the slab that completed). tls_stream_plain_n =
-	// deferred plain when multi-record residual CT of a seal is still outstanding
-	// (advance stream_sent only after full CT for that seal is delivered).
-	tls_ct_tx_plain_n:  int,
-	tls_ct_hold_plain_n: int,
+	// Progressive stream (SSE/WS): deferred plain when multi-record residual CT of a
+	// seal is still outstanding (advance stream_sent only after full CT for that
+	// seal is delivered). Per-slab plain lives on dual_ct.tx_plain_n / hold_plain_n.
 	tls_stream_plain_n:  int,
 	// H1 N=1 exchange ownership (Response + session + progressive stream). Pipe-only above;
 	// sole storage for exchange fields — no dual-write on Connection (Plan A §D).
@@ -1181,8 +1169,7 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	c.slot.stream_sent = 0
 	c.slot.stream_flush_pending = false
 	c.slot.stream_respond_fired = false
-	c.tls_ct_tx_plain_n = 0
-	c.tls_ct_hold_plain_n = 0
+	dual_ct_clear_meta(&c.dual_ct)
 	c.tls_stream_plain_n = 0
 	// Return any in-flight Stream slab before forgetting the pointer.
 	_stream_pool_abandon(c)

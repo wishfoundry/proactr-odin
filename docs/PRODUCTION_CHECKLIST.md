@@ -22,7 +22,7 @@ H2 product bar (M1–M6 offline): [`design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](
 | H2 slot cap | **Present** — `H2_SLOT_CAP` = 8; lazy `^[H2_SLOT_CAP]Stream_Slot` only on ALPN-h2 open (clear/TLS H1 leave `h2_slots` nil). Default concurrent (`h2_serial_dispatch=false`); serial opt-in for eng/debug. Slot full → REFUSED_STREAM (above). |
 | Fairness weights | **Done** — engine weighted RR (`flush_rr` / `_flush_pending_rr`); `Server_Opts.h2_weight_interactive` / `h2_weight_bulk` (defaults 2 / 1); `sse_start` marks stream interactive for RR quanta. Pipe `rr_cursor` for seal_q unchanged. |
 | Firehose / M1–M6 offline gates | **CI / scripts + tests** — `scripts/check_firehose_pipe.sh` (PR5 pure seal∥send O(window)); `odin test http` includes `h2_m_gates_test` M1–M6; `odin test http2` / `hpack` / `huffman`; E0 bans via `scripts/check_e0_bans.sh` + `check_app_contract_sample.sh`. |
-| **Not claimed** | **kTLS** (research only; never silent `sendfile_ok` under Ciphered). **WS-on-H2** (matrix ⏳). **Bastion multi-stream RPS / peer matrix** (optional evidence only; offline bar ≠ published H2 RPS). Live dual-CT bulk firehose on TLS wire. Full h2spec. Soft 503 on **stream pool** bytes / temp-slot admission (session-cap path is Done). |
+| **Not claimed** | **kTLS** (research only; never silent `sendfile_ok` under Ciphered). **WS-on-H2** (matrix ⏳). Full h2spec. Soft 503 on **stream pool** bytes / temp-slot admission (session-cap path is Done). Live dual-CT + bastion tls-h2 peer matrix: **Done** (see `comparisons/tls-h2/results/`). |
 
 ---
 

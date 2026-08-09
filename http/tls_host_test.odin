@@ -248,8 +248,7 @@ test_tls_host_conn_destroy_idempotent :: proc(t: ^testing.T) {
 	c.server = nil
 	c.tls_ssl = nil
 	c.tls_ct_rx = nil
-	c.tls_ct_tx = nil
-	c.tls_ct_hold = nil
+	c.dual_ct = {}
 	// Safe with no TLS state.
 	tls_host_conn_destroy(&c)
 	tls_host_conn_destroy(&c)
@@ -265,8 +264,8 @@ test_tls_dual_ct_seal_dst_for_ahead :: proc(t: ^testing.T) {
 	hold := make([]u8, 64)
 	defer delete(tx)
 	defer delete(hold)
-	c.tls_ct_tx = tx
-	c.tls_ct_hold = hold
+	c.dual_ct.tx = tx
+	c.dual_ct.hold = hold
 	// No wire flight → no ahead seal.
 	c.wire.kind = .None
 	dst, mark := tls_host_seal_dst_for_ahead(&c)
@@ -274,33 +273,33 @@ test_tls_dual_ct_seal_dst_for_ahead :: proc(t: ^testing.T) {
 
 	// Primary sending → seal into hold.
 	c.wire.kind = .Send
-	c.tls_send_is_hold = false
-	c.tls_ct_hold_n = 0
-	c.tls_ct_tx_ready_n = 0
+	c.dual_ct.send_is_hold = false
+	c.dual_ct.hold_n = 0
+	c.dual_ct.tx_ready_n = 0
 	dst, mark = tls_host_seal_dst_for_ahead(&c)
 	testing.expect(t, mark)
 	testing.expect(t, raw_data(dst) == raw_data(hold))
 
 	// Hold already ready → no free slab.
-	c.tls_ct_hold_n = 10
+	c.dual_ct.hold_n = 10
 	dst, mark = tls_host_seal_dst_for_ahead(&c)
 	testing.expect(t, len(dst) == 0)
 
 	// Hold sending → seal into primary.
-	c.tls_ct_hold_n = 0
-	c.tls_send_is_hold = true
-	c.tls_ct_tx_ready_n = 0
+	c.dual_ct.hold_n = 0
+	c.dual_ct.send_is_hold = true
+	c.dual_ct.tx_ready_n = 0
 	dst, mark = tls_host_seal_dst_for_ahead(&c)
 	testing.expect(t, !mark)
 	testing.expect(t, raw_data(dst) == raw_data(tx))
 
 	// Promote prefers hold over primary ready.
 	c.wire.kind = .None
-	c.tls_send_is_hold = false
-	c.tls_ct_hold_n = 7
-	c.tls_ct_tx_ready_n = 5
+	c.dual_ct.send_is_hold = false
+	c.dual_ct.hold_n = 7
+	c.dual_ct.tx_ready_n = 5
 	// Cannot submit without ring — only check ready selection via seal_dst idle path.
-	testing.expect(t, c.tls_ct_hold_n == 7 && c.tls_ct_tx_ready_n == 5)
+	testing.expect(t, c.dual_ct.hold_n == 7 && c.dual_ct.tx_ready_n == 5)
 }
 
 @(test)
@@ -321,13 +320,13 @@ test_tls_stream_plain_n_cursor :: proc(t: ^testing.T) {
 	c.slot.stream_open = true
 	c.slot.stream_sent = 0
 	// Simulate seal of 10 plain bytes into primary CT in flight.
-	c.tls_ct_tx_plain_n = 10
+	c.dual_ct.tx_plain_n = 10
 	testing.expect_value(t, tls_host_stream_plain_off(&c), 10)
 	// After full CT CQE, host advances stream_sent and clears slab plain_n.
-	c.slot.stream_sent += c.tls_ct_tx_plain_n
-	c.tls_ct_tx_plain_n = 0
+	c.slot.stream_sent += c.dual_ct.tx_plain_n
+	c.dual_ct.tx_plain_n = 0
 	testing.expect_value(t, c.slot.stream_sent, 10)
-	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.tx_plain_n, 0)
 	testing.expect_value(t, tls_host_stream_plain_off(&c), 10)
 	// Long-lived gate used by send-complete demux.
 	testing.expect(t, tls_host_stream_long_lived(&c))
@@ -345,58 +344,58 @@ test_tls_stream_dual_ct_plain_n_bookkeeping :: proc(t: ^testing.T) {
 	c.slot.stream_open = true
 	c.slot.stream_sent = 100
 	// Seal N1 into primary (sending), N2 into hold (ready) — dual-CT overlap.
-	c.tls_ct_tx_plain_n = 40
-	c.tls_ct_hold_plain_n = 25
-	c.tls_send_is_hold = false
+	c.dual_ct.tx_plain_n = 40
+	c.dual_ct.hold_plain_n = 25
+	c.dual_ct.send_is_hold = false
 	testing.expect_value(t, tls_host_stream_plain_off(&c), 165) // 100+40+25
 
 	// CQE for primary: advance by tx plain only (hold still outstanding).
-	was_hold := c.tls_send_is_hold
-	slab_plain := was_hold ? c.tls_ct_hold_plain_n : c.tls_ct_tx_plain_n
+	was_hold := c.dual_ct.send_is_hold
+	slab_plain := was_hold ? c.dual_ct.hold_plain_n : c.dual_ct.tx_plain_n
 	if was_hold {
-		c.tls_ct_hold_plain_n = 0
+		c.dual_ct.hold_plain_n = 0
 	} else {
-		c.tls_ct_tx_plain_n = 0
+		c.dual_ct.tx_plain_n = 0
 	}
 	// No residual bio / zero-plain ready → advance slab plain.
 	c.slot.stream_sent += slab_plain
 	testing.expect_value(t, c.slot.stream_sent, 140)
-	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
-	testing.expect_value(t, c.tls_ct_hold_plain_n, 25)
+	testing.expect_value(t, c.dual_ct.tx_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.hold_plain_n, 25)
 	testing.expect_value(t, tls_host_stream_plain_off(&c), 165) // 140+25
 
 	// Promote hold then CQE for hold.
-	c.tls_send_is_hold = true
-	was_hold = c.tls_send_is_hold
-	slab_plain = was_hold ? c.tls_ct_hold_plain_n : c.tls_ct_tx_plain_n
+	c.dual_ct.send_is_hold = true
+	was_hold = c.dual_ct.send_is_hold
+	slab_plain = was_hold ? c.dual_ct.hold_plain_n : c.dual_ct.tx_plain_n
 	if was_hold {
-		c.tls_ct_hold_plain_n = 0
+		c.dual_ct.hold_plain_n = 0
 	} else {
-		c.tls_ct_tx_plain_n = 0
+		c.dual_ct.tx_plain_n = 0
 	}
 	c.slot.stream_sent += slab_plain
 	testing.expect_value(t, c.slot.stream_sent, 165)
-	testing.expect_value(t, c.tls_ct_hold_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.hold_plain_n, 0)
 	testing.expect_value(t, tls_host_stream_plain_off(&c), 165)
 
 	// Residual defer: multi-record same seal — plain parked in tls_stream_plain_n
 	// until residual CT (ready slab plain_n==0) completes.
 	c.slot.stream_sent = 0
-	c.tls_ct_tx_plain_n = 16
-	c.tls_ct_hold_plain_n = 0
-	c.tls_ct_hold_n = 8 // residual CT stashed, no new plain
+	c.dual_ct.tx_plain_n = 16
+	c.dual_ct.hold_plain_n = 0
+	c.dual_ct.hold_n = 8 // residual CT stashed, no new plain
 	c.tls_stream_plain_n = 0
-	c.tls_send_is_hold = false
+	c.dual_ct.send_is_hold = false
 	was_hold = false
-	slab_plain = c.tls_ct_tx_plain_n
-	c.tls_ct_tx_plain_n = 0
+	slab_plain = c.dual_ct.tx_plain_n
+	c.dual_ct.tx_plain_n = 0
 	// other ready with plain 0 → defer
 	c.tls_stream_plain_n += slab_plain
 	testing.expect_value(t, c.tls_stream_plain_n, 16)
 	testing.expect_value(t, c.slot.stream_sent, 0)
 	// Residual hold CQE: plain 0 on slab, take deferred.
-	c.tls_send_is_hold = true
-	slab_plain = c.tls_ct_hold_plain_n // 0
+	c.dual_ct.send_is_hold = true
+	slab_plain = c.dual_ct.hold_plain_n // 0
 	if slab_plain == 0 && c.tls_stream_plain_n > 0 {
 		slab_plain = c.tls_stream_plain_n
 		c.tls_stream_plain_n = 0
@@ -432,18 +431,18 @@ test_tls_stream_plain_n_reset_on_ciphered_lifecycle :: proc(t: ^testing.T) {
 	c.server = nil
 	tls_pipe_init(&c.tls_pipe)
 	c.tls_stream_plain_n = 42
-	c.tls_ct_tx_plain_n = 3
-	c.tls_ct_hold_plain_n = 5
+	c.dual_ct.tx_plain_n = 3
+	c.dual_ct.hold_plain_n = 5
 	testing.expect(t, connection_enable_ciphered(&c))
 	// Field is independent of enable; destroy/clear path zeros it.
 	testing.expect_value(t, c.tls_stream_plain_n, 42)
 	c.tls_stream_plain_n = 7
-	c.tls_ct_tx_plain_n = 3
-	c.tls_ct_hold_plain_n = 5
+	c.dual_ct.tx_plain_n = 3
+	c.dual_ct.hold_plain_n = 5
 	tls_host_conn_destroy(&c)
 	testing.expect_value(t, c.tls_stream_plain_n, 0)
-	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
-	testing.expect_value(t, c.tls_ct_hold_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.tx_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.hold_plain_n, 0)
 	testing.expect(t, !c.ciphered)
 }
 
@@ -517,8 +516,8 @@ test_tls_host_on_send_complete_mid_session_no_clean :: proc(t: ^testing.T) {
 	c.slot.stream_ending = false
 	c.slot.stream_sent = 0
 	// Per-slab plain for primary (legacy tls_stream_plain_n also accepted).
-	c.tls_ct_tx_plain_n = 11
-	c.tls_send_is_hold = false
+	c.dual_ct.tx_plain_n = 11
+	c.dual_ct.send_is_hold = false
 	c.resp_buf = make([dynamic]u8, 0, 32)
 	defer delete(c.resp_buf)
 	append(&c.resp_buf, ..transmute([]u8)string("hello world")) // 11 bytes — all plain sealed
@@ -530,7 +529,7 @@ test_tls_host_on_send_complete_mid_session_no_clean :: proc(t: ^testing.T) {
 	testing.expect(t, handled, "TLS stream complete must be handled")
 	testing.expect(t, c.slot.stream_open, "mid-session must keep stream_open (no clean)")
 	testing.expect_value(t, c.tls_stream_plain_n, 0)
-	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.tx_plain_n, 0)
 	testing.expect_value(t, c.slot.stream_sent, 11)
 	// Must not have entered oneshot clean (which zeros stream_open / may close).
 	testing.expect(t, c.state < .Closing, "must not clean/close mid-session")
@@ -605,21 +604,21 @@ test_tls_stream_plain_n_cqe_advance_semantics :: proc(t: ^testing.T) {
 	c: Connection
 	c.slot.stream_open = true
 	c.slot.stream_sent = 100
-	c.tls_ct_tx_plain_n = 4096
-	c.tls_send_is_hold = false
+	c.dual_ct.tx_plain_n = 4096
+	c.dual_ct.send_is_hold = false
 	// Simulate completion advance (what on_send_complete does after CT fully delivered).
-	was_hold := c.tls_send_is_hold
-	slab_plain := was_hold ? c.tls_ct_hold_plain_n : c.tls_ct_tx_plain_n
+	was_hold := c.dual_ct.send_is_hold
+	slab_plain := was_hold ? c.dual_ct.hold_plain_n : c.dual_ct.tx_plain_n
 	if was_hold {
-		c.tls_ct_hold_plain_n = 0
+		c.dual_ct.hold_plain_n = 0
 	} else {
-		c.tls_ct_tx_plain_n = 0
+		c.dual_ct.tx_plain_n = 0
 	}
 	if slab_plain > 0 {
 		c.slot.stream_sent += slab_plain
 	}
 	testing.expect_value(t, c.slot.stream_sent, 4196)
-	testing.expect_value(t, c.tls_ct_tx_plain_n, 0)
+	testing.expect_value(t, c.dual_ct.tx_plain_n, 0)
 	testing.expect(t, tls_host_stream_long_lived(&c))
 }
 

@@ -432,9 +432,9 @@ _conn_pipe_allocator :: proc(conn: ^Connection, fallback := context.allocator) -
 // connection_enable_ciphered: lightweight host path after TLS Open.
 // Sets conn.ciphered so plan_policy_for forces no sendfile and
 // max_write_unit = PIPE_MAX_WRITE_UNIT_DEFAULT; raises PT high-water for
-// dual-CT large seal windows. Live oneshot uses dual CT slabs (tls_ct_tx +
-// tls_ct_hold), not pure-pipe Seal_Queue. Clear-H1 never calls this.
-// For pure firehose SM, call connection_enable_ciphered_pipe_sm.
+// dual-CT large seal windows. Live TLS (oneshot / stream / H2) uses Connection.dual_ct
+// slabs + tls_seal_window (tls_dual_ct.odin), not pure-pipe Seal_Queue.
+// Clear-H1 never calls this. For pure firehose SM, call connection_enable_ciphered_pipe_sm.
 connection_enable_ciphered :: proc(conn: ^Connection, allocator := context.allocator) -> bool {
 	if conn == nil {
 		return false
@@ -454,9 +454,9 @@ connection_enable_ciphered :: proc(conn: ^Connection, allocator := context.alloc
 	return true
 }
 
-// connection_enable_ciphered_pipe_sm: full SM bags for pure seal∥send tests / future live pipe.
+// connection_enable_ciphered_pipe_sm: full SM bags for pure seal∥send tests only.
 // Lightweight-enables ciphered, then allocates Seal_Queue + Tls_Pipe CT[2] slabs (~128 KiB).
-// Live HTTPS oneshot does not call this (avoids zombie dual-CT tax).
+// Live HTTPS does not call this — dual_ct slabs come from tls_host_on_accept.
 connection_enable_ciphered_pipe_sm :: proc(conn: ^Connection, allocator := context.allocator) -> bool {
 	if conn == nil {
 		return false

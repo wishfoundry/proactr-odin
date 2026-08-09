@@ -7,12 +7,13 @@ specs live under `docs/design/dual-tls-h2/` and are **not** product claims.
 **Product H2 (PR9):** offline M1–M6 gates are green (concurrent unary, deferred
 bodies + fair RR flush, duplex recv re-arm, peak on-wire O(window), multi-SSE +
 RST → Client_Gone). Matrix TLS H2 oneshot / concurrent unary / SSE cells are ✅.
-**Still not claimed:** WS-on-H2, live bastion multi-stream RPS / peer matrix,
-live dual-CT bulk firehose, full h2spec. Baseline:
+**Still not claimed:** WS-on-H2, full h2spec. Bastion tls-h2 peer matrix + live
+dual-CT bulk: **Done** (`comparisons/tls-h2/results/`). Baseline:
 [`design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](design/dual-tls-h2/H2_PRODUCT_BASELINE.md).
 
 TLS H1 covers **oneshot + long-lived SSE/WS** on the progressive ciphered stream
-path; it is **not** dual-CT seal∥send on the wire, **not** bulk firehose CI on ring.
+path with **live dual-CT** seal∥send (`http/tls_dual_ct.odin`). Pure-pipe firehose
+CI remains the O(window) detector (not a substitute for bastion RPS).
 
 Companion freeze gates: [`PHASE0_E0.md`](PHASE0_E0.md). Enforcement scripts:
 `scripts/check_e0_bans.sh`, `scripts/check_app_contract_sample.sh`,
@@ -39,10 +40,10 @@ Production edges (PR10): [`PRODUCTION_CHECKLIST.md`](PRODUCTION_CHECKLIST.md).
 | **PR5 pure seal∥send + firehose CI** | **Done** — pure `pipe_seal_step` / mock seal∥send / dual CT; firehose detector + 4 MiB windowed bulk sim; CI gate `scripts/check_firehose_pipe.sh` |
 | **PR5 tls_server (dynlib mem-BIO)** | **Done** — OpenSSL via `core:dynlib`, product path `setup_mem_bios` + BIO net R/W; set_fd fallback only |
 | **PR5 host ciphered + plan_policy** | **Done** — `Connection.ciphered`, lightweight `connection_enable_ciphered` (no seal_q/CT[2]), `plan_policy_for` no sendfile / pull-window unit; full SM bags via `connection_enable_ciphered_pipe_sm` (pure/tests) |
-| **PR5 TLS host wire (handshake + ciphered send)** | **Done (HTTPS H1 oneshot)** — mem-BIO accept/handshake/Open; CT recv → SSL_read → scanner; materialize → **serial** windowed `SSL_write` → `tls_ct_tx` drain → `submit_send` (**not** dual-CT seal∥send on wire); ALPN http/1.1; manual curl green (`examples/https_demo`) |
-| PR5 live dual-CT seal∥send on wire | **Not yet** — pure/CI only; live remains serial SSL_write window until PR5.1 |
+| **PR5 TLS host wire (handshake + ciphered send)** | **Done (HTTPS H1 oneshot)** — mem-BIO accept/handshake/Open; CT recv → SSL_read → scanner; response → dual-CT seal∥send (`dual_ct` + `tls_seal_window`); ALPN http/1.1; bastion tls-h2 matrix + `examples/https_demo` |
+| **PR5 live dual-CT seal∥send on wire** | **Done** — `http/tls_dual_ct.odin`; oneshot/stream/H2 share seal engine; pure `connection_enable_ciphered_pipe_sm` remains test-only |
 | **PR6 TLS H1 SSE / WS wire** | **Done** — same App Contract (`sse_start` / `ws_start` / Effects); progressive ciphered stream via `_stream_try_submit` → `tls_host_stream_try_submit`; hangup CT recv single-flight (`tls_ct_recv_inflight`; re-arm only after CQE); close defers on CT recv like wire send; fail-closed CT drain after `SSL_write`; session tests ciphered attach + hangup gate + inflight arm; mid-session CT complete does **not** oneshot-clean |
-| PR5/PR6 bulk firehose on live TLS wire | **Not yet** — pure firehose CI only; large-body TLS H1 still ⏳ in matrix |
+| PR5/PR6 bulk on live TLS wire | **Partial** — bastion large-body matrix green (dual-CT + 256 KiB seals); pure firehose CI remains O(window) only |
 | **PR7 H2 engine sans-I/O** | **Done** (engine unit surface) — packages `http2/` (`conn_feed` / flow-aware `conn_send_*`), `hpack/`, `huffman/`; offline unit tests (frame + connection + flow + strict subset). Residuals: inbound FC is 1:1 auto-credit (not recv windows); HPACK encoder is static/literal only; not full h2spec. See [`H2_ENGINE.md`](H2_ENGINE.md) |
 | **PR8 eng unary H2 host** | **Done** (superseded as product by PR9) — ALPN prefer `h2` / fallback `http/1.1`; after TLS Open, `h2` → `h2_host_*`; lazy multi-slot; GOAWAY on feed fail; oneshot via `server.handler` / `respond`. Serial remains opt-in (`h2_serial_dispatch=true`) for eng/debug |
 | **PR9 H2 product / M1–M6 / SSE-on-H2** | **Done (offline product bar)** — default concurrent unary (`h2_serial_dispatch=false`); multi-slot dispatch; fair RR flush (`Http2_Connection.flush_rr` / `_flush_pending_rr`); duplex CT recv re-arm; multi-SSE + RST → Client_Gone; gates `http/h2_m_gates_test.odin` M1–M6. Baseline: [`H2_PRODUCT_BASELINE.md`](design/dual-tls-h2/H2_PRODUCT_BASELINE.md). **Not** WS-on-H2; **not** bastion RPS peer matrix; **not** full h2spec |
@@ -72,16 +73,17 @@ fail detector) are **Done** and CI-gated. `Seal_Queue` + pipe CT[2] are heap-all
 only via `connection_enable_ciphered_pipe_sm` (or explicit `wire_conn_enable_seal_q` /
 `tls_pipe_alloc_buffers`); clear-H1 and live oneshot/session keep `q == nil` / `bufs == nil`.
 
-**Live** HTTPS is **serial** `SSL_write` + `tls_ct_tx` windowed CT send — **not**
-dual-CT seal∥send on the wire. Do not claim live seal∥send Done.
+**Live** HTTPS is **dual-CT** seal∥send (`Connection.dual_ct` primary+hold slabs,
+`tls_seal_window` / `tls_dual_ct_try_ahead`). Pure-pipe `Seal_Queue` + mock SM remain
+test-only (`connection_enable_ciphered_pipe_sm`); do not confuse pure CI with live path.
 
 ### PR5 (TLS host wire — HTTPS H1 oneshot)
 
 | Layer | Reality |
 |-------|---------|
 | `tls_server` | Dynlib OpenSSL + mem-BIO API; unit smoke (skips if no libssl) |
-| Host cipher flag | Lightweight `connection_enable_ciphered` → `conn.ciphered` + plan_policy; no seal_q/CT[2] |
-| Host wire | **Live oneshot** — accept → SSL mem-BIO → Handshake→Open → serial windowed SSL_write response |
+| Host cipher flag | Lightweight `connection_enable_ciphered` → `conn.ciphered` + plan_policy + TLS PT high-water |
+| Host wire | **Live dual-CT** — accept → SSL mem-BIO → Handshake→Open → seal window + hold while send inflight |
 | Pure seal∥send | **Done** (tests + `check_firehose_pipe.sh`); not wired to product send |
 | Manual e2e | `curl -k --http1.1 https://127.0.0.1:18443/` → `200` / `OK` (`examples/https_demo`) |
 | Clear H1 | Unchanged when PEMs empty or provider load fails (honest log + clear-H1 only) |
@@ -97,7 +99,7 @@ dual-CT seal∥send on the wire. Do not claim live seal∥send Done.
 | App Contract | Same `sse_start` / `ws_start` / Effects as clear H1; listen PEMs only (no handler `#if`) |
 | Tests | `odin test http` — ciphered attach (SSE/WS effects → plain `resp_buf`), hangup CT gate, stream long-lived / no-clean mid-session |
 | Manual | `examples/https_demo` `/` oneshot + `/sse` long-lived (`curl -kN … /sse`) |
-| Not yet | Live dual-CT seal∥send, bulk multi-MiB wire firehose CI on ring, CI same-handler TLS job, M6 |
+| Not yet | Pure-pipe multi-MiB firehose as *live* CI job, CI same-handler TLS job |
 
 See [`TLS_H1.md`](TLS_H1.md) for PEM knobs, progressive path, and demo commands.
 
@@ -152,7 +154,7 @@ See [`TLS_H1.md`](TLS_H1.md) for PEM knobs, progressive path, and demo commands.
   (`Server_Opts.tls_*_pem` or `listen_and_serve_tls`). Same handler API as clear H1.
 - **TLS H2** (ALPN `h2`): concurrent unary + multi-SSE offline product bar (M1–M6).
   Same handler API; stream ids stay host-private. WS-on-H2 and live RPS matrix still ⏳.
-- Large-body TLS bulk / dual-CT seal∥send: **not** product-proven (matrix ⏳).
+- Large-body TLS bulk / dual-CT: **product-proven** on bastion tls-h2 matrix; residual mem-BIO multi-copy / kTLS later.
 - Multi-worker TLS is the existing REUSEPORT + shared SSL_CTX host model. Soft session
   admission, H2 slot REFUSED, GOAWAY drain on shutdown, and optional fairness weights are
   landed host/operator edges (not matrix cells) — see [`PRODUCTION_CHECKLIST.md`](PRODUCTION_CHECKLIST.md).

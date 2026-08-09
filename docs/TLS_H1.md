@@ -18,11 +18,11 @@ Session Effects surface: [`SESSION_SSE.md`](SESSION_SSE.md).
 | `tls_server` dynlib + mem-BIO | Done |
 | `conn.ciphered` + `plan_policy_for` | **Done** — lightweight `connection_enable_ciphered` (no seal_q/CT[2]) |
 | Full SM bags (`connection_enable_ciphered_pipe_sm`) | Pure/tests only; not live host wire |
-| Host wire handshake + CT send (oneshot) | **Done** — serial windowed `SSL_write` + `tls_ct_tx` (**not** dual-CT seal∥send on wire) |
-| HTTPS oneshot e2e | **Done** (manual curl; `examples/https_demo` `/`) |
-| Progressive stream / SSE / WS on TLS (PR6) | **Done** — `tls_host_stream_try_submit`; same App Contract; hangup CT recv |
-| Live dual-CT seal∥send on wire | **Not yet** (PR5.1) |
-| Bulk multi-MiB firehose on live TLS wire | **Not yet** (matrix large-body ⏳) |
+| Host wire handshake + CT send (oneshot) | **Done** — dual-CT seal∥send (`Connection.dual_ct`, `tls_seal_window` / `tls_dual_ct_try_ahead` in `http/tls_dual_ct.odin`) |
+| HTTPS oneshot e2e | **Done** (manual curl; `examples/https_demo` `/`; bastion tls-h2 matrix) |
+| Progressive stream / SSE / WS on TLS (PR6) | **Done** — dual-CT stream path + hangup CT recv |
+| Live dual-CT seal∥send on wire | **Done** (PR5.1) — primary+hold CT slabs; pure `pipe` Seal_SM remains test-only |
+| Bulk multi-MiB firehose on live TLS wire | **Partial** — bastion large-body matrix green; pure firehose CI still O(window) detector only |
 | H2 / M1–M6 | **PR9 Done offline** — concurrent + multi-SSE; see `H2_PRODUCT_BASELINE.md` |
 
 ---
@@ -98,7 +98,7 @@ sse_start / ws_start / stream_* effects
 | Hangup | `_session_arm_hangup_watch` → CT recv when Open+ssl+long-lived; single-flight `tls_ct_recv_inflight` (no double-arm / kqueue orphan); peer FIN / close_notify / unexpected app data → `.Client_Gone`; close waits for CT CQE via `close_on_io` |
 | No SSL yet | `ciphered` without `tls_ssl`: mark `stream_flush_pending`, do not take clear pool |
 
-**Honesty:** live path remains **serial** seal (not dual-CT seal∥send). Pure firehose CI
+**Honesty:** live path is **dual-CT** seal∥send (not pure-pipe `Seal_Queue` SM). Pure firehose CI
 does not prove multi-MiB live TLS bulk.
 
 Key files: `http/tls_host.odin` (`tls_host_stream_try_submit`, `tls_host_on_send_complete`,
@@ -133,8 +133,8 @@ Requires system OpenSSL (dynlib). On Darwin, Homebrew OpenSSL@3 is probed first
 ./scripts/check_firehose_pipe.sh
 ```
 
-**Pure** seal∥send + firehose CI: **Done**. Live multi-MiB HTTPS bulk / dual-CT seal∥send
-on the ring is **not** a CI job and **not** claimed Done.
+**Pure** seal∥send + firehose CI: **Done**. Live dual-CT bulk is product-proven on the
+bastion tls-h2 matrix; pure firehose detector remains the O(window) CI gate.
 
 ---
 
@@ -147,7 +147,7 @@ on the ring is **not** a CI job and **not** claimed Done.
 | Accept | If `server_tls_live`: SSL + mem-BIO; arm CT recv; **no** clear parse yet |
 | Handshake | CT → rBIO; `SSL_accept`; WANT_WRITE drains wBIO → `submit_send`; Open → lightweight `connection_enable_ciphered` |
 | Recv Open | CT → rBIO; burst `SSL_read` PT into scanner (same parse path as clear) |
-| Send Open | After materialize: **serial** window plain ≤ `PULL_WINDOW` → `SSL_write` → `tls_ct_tx` drain → multi-CQE (**not** dual-CT seal∥send) |
+| Send Open | Dual-CT: window plain ≤ `TLS_SEAL_WINDOW` → `SSL_write` → CT slab; while send inflight, seal next into hold; promote on CQE (`tls_dual_ct.odin`) |
 | Destroy | `SSL_shutdown` best-effort; `conn_free`; free CT scratch; `connection_disable_ciphered` |
 
 ### Progressive / session (PR6)

@@ -249,14 +249,12 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	// TLS engine fields cleared; buffers allocated only on TLS accept.
 	c.tls_ssl = nil
 	c.tls_ct_rx = nil
-	c.tls_ct_tx = nil
+	c.dual_ct = {}
 	c.tls_ct_recv_inflight = false
 	c.tls_plain_rest = nil
 	c.tls_plain_body = nil
 	c.tls_plain_body_off = 0
 	c.tls_hs_send = false
-	c.tls_ct_tx_plain_n = 0
-	c.tls_ct_hold_plain_n = 0
 	c.tls_stream_plain_n = 0
 	// PR8 H2 eng fields (engine + slot slab only on ALPN h2 open; slots stay nil for H1).
 	c.h2_active = false
