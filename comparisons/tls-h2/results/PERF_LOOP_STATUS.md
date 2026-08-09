@@ -133,14 +133,35 @@ Artifacts: [`KQUEUE_TLS_H2_P0c.md`](KQUEUE_TLS_H2_P0c.md), `summary_P0c.tsv`.
 
 **Learning:** residual H2 bulk tax after P0c is **OpenSSL mem-BIO + WPACKET + AES + send**, not frame-buffer growth. Windowed encode is not a ≥10% RPS lever on this host. Do not re-run as RPS bet.
 
+## Round 7 — drogon density trifecta (RESET)
+
+Tried **together** (plan critic APPROVE_WITH_AMENDMENTS):
+
+1. H1 bulk-only seal/write-until-EAGAIN (`≥64 KiB` remaining)  
+2. Dual_Ct depth **N=4** + ready FIFO  
+3. BIO peek/reset MVP (`BIO_get_mem_data` + reset; not full custom BIO_METHOD)
+
+| Stage | Result |
+|-------|--------|
+| Plan critic | APPROVE_WITH_AMENDMENTS (bulk-only; no full BIO_METHOD; N evidence-gated) |
+| Impl | All three landed; `odin test http` 165 green |
+| Impl critic | **REJECT** C2 Full-promote fall-through + BIO_reset fail-open |
+| Fix | `continue` after promote Full; reset fail-closed |
+| Matrix (pre-C2-fix) | h1s s1m **3084** vs P0c 2772 (**+11%**); plain **102k** |
+| 3× after C2 fix | h1s s1m **2798/2814/2801** (~**+1%** vs P0c 2772) |
+| Gate ≥+15% s1m | **FAIL** |
+| Same-session post-reset | s1m ~2570 · plain ~99k (machine band; plain “reg” not R7-only) |
+| Decision | **RESET** all product code |
+
+**Learning:** Even drogon-shaped dense + N=4 + peek does **not** buy ≥15% on this host under honest remeasure. Residual bulk gap is largely **AES + send + OpenSSL WPACKET** (sample), not free orchestration. Custom BIO_METHOD and true parity with drogon’s in-loop depth remain large eng bets, not next micro-flag.
+
 ## Next levers still open (honest, **no kTLS**)
 
-1. **h1s s1m 0.30× drogon** — H1 density family **closed** for this loop; I/O-law / OpenSSL ceiling until new theory  
-2. **h2 plain 0.75× ntex** — sample: sendto+recv+frame/map (HPACK not dominant); need ≥10% named leaf  
-3. **h2 s1m vs go (~0.77×)** — mem-BIO + pure-Go AES gap; product RPS micro on frame path **exhausted** for now  
-4. Offline OpenSSL encrypt+send-until-EAGAIN microbench vs drogon (calibration, not matrix win)  
-5. Optional: custom wBIO → dual-CT (kill mem_read/write copies) — real eng, not a free flag  
-6. Do **not** re-run: H1 dense, windowed frame, HPACK free-size as RPS, NODELAY, 1 MiB seal  
+1. **h1s s1m ~0.30× drogon** — density trifecta **closed** for this loop without architecture change  
+2. Offline OpenSSL encrypt+send-until-EAGAIN microbench vs drogon (bound the ceiling)  
+3. Full custom wBIO_METHOD writing into CT slabs — only if microbench shows drain/copy still material  
+4. **h2 plain 0.75× ntex** — send/recv/frame named ≥10% leaf  
+5. Do **not** re-run: H1 dense, Dual_Ct N=4 as RPS, windowed frame, HPACK free-size, NODELAY, 1 MiB seal  
 
 ## Loop policy reminder
 Gate with **h2load RPS** same harness; peers flat when claiming win; no drogon H2 fiction; **no kTLS** as the peer-fair fix. **3× remeasure soft-band claims.**
