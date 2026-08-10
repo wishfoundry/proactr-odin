@@ -33,9 +33,11 @@ Dynlib_State :: struct {
 	BIO_new:         proc "c" (method: rawptr) -> rawptr,
 	BIO_new_mem_buf: proc "c" (buf: rawptr, len: c.int) -> rawptr,
 	BIO_free:        proc "c" (b: rawptr) -> c.int,
-	BIO_write:       proc "c" (b: rawptr, data: rawptr, n: c.int) -> c.int,
-	BIO_read:        proc "c" (b: rawptr, data: rawptr, n: c.int) -> c.int,
+	BIO_write:        proc "c" (b: rawptr, data: rawptr, n: c.int) -> c.int,
+	BIO_read:         proc "c" (b: rawptr, data: rawptr, n: c.int) -> c.int,
 	BIO_ctrl_pending: proc "c" (b: rawptr) -> c.size_t,
+	// BIO_ctrl: BIO_CTRL_RESET=1, BIO_CTRL_INFO=3 (BIO_get_mem_data).
+	BIO_ctrl:         proc "c" (b: rawptr, cmd: c.int, larg: c.long, parg: rawptr) -> c.long,
 
 	PEM_read_bio_X509:       proc "c" (bp, x, cb, u: rawptr) -> rawptr,
 	PEM_read_bio_PrivateKey: proc "c" (bp, x, cb, u: rawptr) -> rawptr,
@@ -201,6 +203,40 @@ provider_openssl_dynlib :: proc(
 		if wbio == nil do return 0
 		return c.int(s.BIO_ctrl_pending(wbio))
 	}
+	// Zero-copy wBIO view (drogon sendTLSData shape) when BIO_ctrl resolved.
+	if st.BIO_ctrl != nil {
+		p.bio_peek_out = proc(self: ^Provider, ssl: Conn, out_ptr: ^rawptr) -> c.int {
+			s := (^Dynlib_State)(self.user_data)
+			if s.BIO_ctrl == nil || out_ptr == nil {
+				return 0
+			}
+			wbio := s.SSL_get_wbio(rawptr(ssl))
+			if wbio == nil {
+				return 0
+			}
+			out_ptr^ = nil
+			// long BIO_ctrl(BIO *b, int cmd, long larg, void *parg) — BIO_CTRL_INFO=3
+			n := s.BIO_ctrl(wbio, 3, 0, out_ptr)
+			if n <= 0 || out_ptr^ == nil {
+				return 0
+			}
+			return c.int(n)
+		}
+		// BIO_reset(wbio) via BIO_CTRL_RESET=1.
+		p.bio_reset_out = proc(self: ^Provider, ssl: Conn) -> c.int {
+			s := (^Dynlib_State)(self.user_data)
+			if s.BIO_ctrl == nil {
+				return 0
+			}
+			wbio := s.SSL_get_wbio(rawptr(ssl))
+			if wbio == nil {
+				return 0
+			}
+			// OpenSSL BIO_reset: mem BIO returns 1 on success.
+			rc := s.BIO_ctrl(wbio, 1, 0, nil)
+			return 1 if rc >= 0 else 0
+		}
+	}
 	p.set_accept_state = proc(self: ^Provider, ssl: Conn) {
 		s := (^Dynlib_State)(self.user_data)
 		s.SSL_set_accept_state(rawptr(ssl))
@@ -261,6 +297,8 @@ _resolve_openssl_syms :: proc(st: ^Dynlib_State) -> bool {
 	ok = ok && _dlsym_raw(st.lib, "BIO_write", transmute(^rawptr)&st.BIO_write)
 	ok = ok && _dlsym_raw(st.lib, "BIO_read", transmute(^rawptr)&st.BIO_read)
 	ok = ok && _dlsym_raw(st.lib, "BIO_ctrl_pending", transmute(^rawptr)&st.BIO_ctrl_pending)
+	// Optional for peek drain (fails open: bio_peek stays nil if missing).
+	_ = _dlsym_raw(st.lib, "BIO_ctrl", transmute(^rawptr)&st.BIO_ctrl)
 	ok = ok && _dlsym_raw(st.lib, "PEM_read_bio_X509", transmute(^rawptr)&st.PEM_read_bio_X509)
 	ok = ok && _dlsym_raw(st.lib, "PEM_read_bio_PrivateKey", transmute(^rawptr)&st.PEM_read_bio_PrivateKey)
 	ok = ok && _dlsym_raw(st.lib, "SSL_CTX_use_certificate", transmute(^rawptr)&st.SSL_CTX_use_certificate)

@@ -50,6 +50,11 @@ Provider :: struct {
 	bio_write_net:    proc(self: ^Provider, ssl: Conn, data: rawptr, n: c.int) -> c.int,
 	bio_read_net:     proc(self: ^Provider, ssl: Conn, buf: rawptr, n: c.int) -> c.int,
 	bio_pending_out:  proc(self: ^Provider, ssl: Conn) -> c.int,
+	// Optional zero-copy wBIO view (mem-BIO BIO_get_mem_data). out_ptr → internal buf;
+	// returns len. Valid only until bio_reset_out or further SSL/BIO ops.
+	// nil procs = unsupported (callers fall back to bio_read_net).
+	bio_peek_out:     proc(self: ^Provider, ssl: Conn, out_ptr: ^rawptr) -> c.int,
+	bio_reset_out:    proc(self: ^Provider, ssl: Conn) -> c.int,
 	set_accept_state: proc(self: ^Provider, ssl: Conn),
 
 	accept:             proc(self: ^Provider, ssl: Conn) -> c.int,
@@ -184,6 +189,33 @@ bio_read_net :: proc(p: ^Provider, ssl: Conn, buf: []u8) -> int {
 bio_pending_out :: proc(p: ^Provider, ssl: Conn) -> int {
 	if p == nil || ssl == nil || p.bio_pending_out == nil do return 0
 	return int(p.bio_pending_out(p, ssl))
+}
+
+// Zero-copy view of outbound CT in the mem-BIO wBIO (OpenSSL BIO_get_mem_data).
+// Empty if unsupported or no data. Do not free; invalid after bio_reset_out / SSL_write.
+bio_peek_out :: proc(p: ^Provider, ssl: Conn) -> []u8 {
+	if p == nil || ssl == nil || p.bio_peek_out == nil {
+		return nil
+	}
+	data: rawptr
+	n := p.bio_peek_out(p, ssl, &data)
+	if n <= 0 || data == nil {
+		return nil
+	}
+	return ([^]u8)(data)[:int(n)]
+}
+
+// Discard all data in the wBIO (BIO_reset). Call after send or after residual stash copy.
+bio_reset_out :: proc(p: ^Provider, ssl: Conn) -> bool {
+	if p == nil || ssl == nil || p.bio_reset_out == nil {
+		return false
+	}
+	return p.bio_reset_out(p, ssl) == 1
+}
+
+// True when peek+reset are wired (Darwin reactor CT drain prefers this).
+bio_peek_supported :: proc(p: ^Provider) -> bool {
+	return p != nil && p.bio_peek_out != nil && p.bio_reset_out != nil
 }
 
 set_accept_state :: proc(p: ^Provider, ssl: Conn) {
