@@ -2,14 +2,14 @@
 // Darwin live path: tls_reactor_flush.odin (+build darwin). Linux ignores these for dual-CT.
 package http
 
-// Reactor TLS seal trunk (D8): start 64 KiB plain per SSL_write (drogon-shaped).
-REACTOR_SEAL_WINDOW :: 64 * 1024
+// Reactor TLS seal trunk (D8): 128 KiB plain per SSL_write (fewer setups vs drogon 64).
+// CT slab is 256KiB+; residual-first law unchanged. Measure vs BASELINE_P5 / CT_PEEK_R1.
+REACTOR_SEAL_WINDOW :: 128 * 1024
 
-// Fairness cap (D9): first of 2 MiB plain or 32 SSL_write windows per flush entry.
-// 32×64KiB covers 2 MiB without a soft-CQ yield (impl critic: no soft Nop between windows).
-// True kevent WRITE re-arm for fairness is a follow-up; do not soft-Nop.
+// Fairness cap (D9): first of 2 MiB plain or 16 SSL_write windows per flush entry.
+// 16×128KiB = 2 MiB. s1m (~8 windows) completes in one turn without fairness hit.
 REACTOR_FAIR_PLAIN_BYTES :: 2 * 1024 * 1024
-REACTOR_FAIR_WINDOWS :: 32
+REACTOR_FAIR_WINDOWS :: 16
 
 // R-ORDER residual gate: SSL_write forbidden while residual CT remains.
 reactor_may_ssl_write :: #force_inline proc(residual_n: int) -> bool {

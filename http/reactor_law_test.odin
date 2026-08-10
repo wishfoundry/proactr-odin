@@ -49,7 +49,8 @@ test_reactor_fairness_hit :: proc(t: ^testing.T) {
 
 @(test)
 test_reactor_seal_window_constant :: proc(t: ^testing.T) {
-	// D8: trunk starts at 64 KiB on reactor (not 256 KiB dual-CT default).
-	testing.expect_value(t, REACTOR_SEAL_WINDOW, 64 * 1024)
+	// D8: 128 KiB reactor trunk (still below dual-CT 256 KiB default).
+	testing.expect_value(t, REACTOR_SEAL_WINDOW, 128 * 1024)
 	testing.expect(t, REACTOR_SEAL_WINDOW < TLS_SEAL_WINDOW_DEFAULT)
+	testing.expect_value(t, REACTOR_FAIR_WINDOWS, 16)
 }

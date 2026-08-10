@@ -102,16 +102,11 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 			return
 		}
 
-		// Fairness preempt (D9): stop this entry (cap covers 2MiB / 32×64KiB).
-		// No soft-CQ yield (impl critic M1). Cap sized so matrix s1m completes without yield.
+		// Fairness preempt (D9): stop this entry (2 MiB / 16×128KiB). No soft-CQ.
+		// Re-arm WRITE for re-entry (bodies >2MiB / multi-conn); s1m stays under cap.
 		if reactor_fairness_hit(plain_sealed, windows) {
-			// Re-arm WRITE so kevent re-enters flush (H2 and H1 bulk).
 			if h2 || tls_plain_total_remaining(conn) > 0 {
-				// Empty residual arm is wrong; use a zero-len pending is banned.
-				// Fairness: submit a 0-byte WRITE is illegal — leave pending work;
-				// caller paths re-enter flush on next product event. For H2 duplex,
-				// arm CT recv so peer WINDOW_UPDATE can arrive; next flush from
-				// product entry (respond / window update) continues seal.
+				_ = reactor_arm_fairness_continue(conn)
 				if h2 {
 					_ = tls_host_arm_recv(conn)
 				}
@@ -119,7 +114,7 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 			return
 		}
 
-		// SSL_write one trunk window (64 KiB).
+		// SSL_write one trunk window (REACTOR_SEAL_WINDOW).
 		if !reactor_may_ssl_write(conn.reactor_res_n) {
 			// Should be unreachable (residual cleared above).
 			_ = reactor_arm_write_residual(conn)

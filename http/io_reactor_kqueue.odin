@@ -412,6 +412,21 @@ reactor_arm_write_residual :: proc(conn: ^Connection) -> bool {
 	return true
 }
 
+// reactor_arm_fairness_continue: more plain/h2 with empty residual — oneshot WRITE re-enters flush.
+@(private)
+reactor_arm_fairness_continue :: proc(conn: ^Connection) -> bool {
+	if conn == nil || conn.state >= .Closing || !reactor_host.active {
+		return false
+	}
+	conn.reactor_fairness_yield = true
+	if conn.reactor_write_armed {
+		return true
+	}
+	reactor_arm_filter(i32(conn.socket), .Write, nil)
+	conn.reactor_write_armed = true
+	return true
+}
+
 // reactor_host_close: purge kq interest, sync close + destroy (no submit_close).
 @(private)
 reactor_host_close :: proc(conn: ^Connection) {
@@ -585,6 +600,13 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 		if conn.state < .Closing {
 			connection_close(conn)
 		}
+		return
+	}
+
+	// Fairness continue (empty residual): re-enter multi-window flush.
+	if conn.reactor_fairness_yield && conn.tls_ssl != nil {
+		conn.reactor_fairness_yield = false
+		reactor_tls_flush(conn)
 		return
 	}
 
