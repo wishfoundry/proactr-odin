@@ -256,6 +256,7 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.reactor_fairness_yield = false
 	c.reactor_read_armed = false
 	c.reactor_write_armed = false
+	c.reactor_write_level = false
 	c.reactor_need_clean = false
 	c.reactor_scan_injected = false
 	c.reactor_recv_buf = nil

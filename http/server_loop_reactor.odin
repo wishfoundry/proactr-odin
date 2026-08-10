@@ -2,8 +2,9 @@
 package http
 
 // Darwin worker loop: native kqueue reactor wait ownership (Plan R2 P5).
-// Product sockets: reactor kqueue only. Timers: proactr soft_cq (ring_wait peek).
-// APP_CONTRACT unchanged.
+// Product sockets: reactor kqueue only. Timers: proactr soft_cq (D5).
+// Dual-wait merge: skip empty soft wait when no timer is due; single reactor
+// kevent holds the blocking wait with timer-aware timeout (drogon one-poll shape).
 
 import "core:log"
 import "core:sync"
@@ -11,9 +12,27 @@ import "core:time"
 
 import proactr "../proactr"
 
+@(private)
+server_reactor_dispatch_soft :: proc(s: ^Server, completions: []proactr.Completion) {
+	n_soft, werr := proactr.ring_wait(&td.ring, completions[:], 0, 0)
+	if werr != .None {
+		log.errorf("ring_wait(soft) error: %v", werr)
+		return
+	}
+	for i in 0 ..< n_soft {
+		c := completions[i]
+		op := proactr.complete_apply(&td.ring, c)
+		if op == nil {
+			continue
+		}
+		host_dispatch(s, op, c)
+		if op.status != .Submitted {
+			proactr.op_free(&td.ring, c.op_id)
+		}
+	}
+}
+
 // server_reactor_worker_loop: replaces façade ring_wait as the primary wait.
-// Call after ring_init, listen, and optional fixed-file install (same setup as
-// _server_thread_main prologue). Does not ring_init/destroy — caller owns that.
 @(private)
 server_reactor_worker_loop :: proc(s: ^Server) {
 	if !reactor_host_init(s.conn_allocator) {
@@ -24,7 +43,6 @@ server_reactor_worker_loop :: proc(s: ^Server) {
 
 	server_date_refresh()
 
-	// Prime accept on reactor kqueue (not proactr).
 	if !reactor_host_submit_accept(s) {
 		log.error("initial reactor accept arm failed; will retry")
 		td.needs_accept_rearm = true
@@ -59,43 +77,28 @@ server_reactor_worker_loop :: proc(s: ^Server) {
 			break
 		}
 
-		// Mailbox wake: non-blocking I/O wait.
 		loop_wait := wait_ms
 		if sync.atomic_load(&td.mail_pending) > 0 {
 			loop_wait = 0
 		}
 
-		// Timer budget: wake early for due software timers (D5 merge wait).
-		if tms, has := proactr.ring_next_timer_ms(&td.ring); has {
+		tms, has_timer := proactr.ring_next_timer_ms(&td.ring)
+		if has_timer {
 			if tms < loop_wait || loop_wait < 0 {
 				loop_wait = tms
 			}
 		}
 
-		// 1) Fire due timers + drain soft_cq only (no socket arms on proactr kq).
-		n_soft, werr := proactr.ring_wait(&td.ring, completions[:], 0, 0)
-		if werr != .None {
-			log.errorf("ring_wait(soft) error: %v", werr)
-			if !atomic_load(&s.closing) {
-				break
-			}
-		}
-		for i in 0 ..< n_soft {
-			c := completions[i]
-			op := proactr.complete_apply(&td.ring, c)
-			if op == nil {
-				continue
-			}
-			// Expect Timeout / Nop only; never Accept/Recv/Send on Darwin P5.
-			host_dispatch(s, op, c)
-			if op.status != .Submitted {
-				proactr.op_free(&td.ring, c.op_id)
-			}
+		// Pre-I/O soft harvest only when a timer is due now (avoid empty proactr kevent).
+		if has_timer && tms == 0 {
+			server_reactor_dispatch_soft(s, completions)
 		}
 
-		// 2) Product socket wait on reactor kqueue (drains deferred clean inside).
+		// One blocking wait: product sockets + timer deadline in kevent timeout.
 		_ = reactor_wait(s, loop_wait)
-		// Soft_cq path may also have finished oneshot via timer-driven work; drain again.
+
+		// Post-I/O: fire any timers that matured during wait + drain soft_cq.
+		server_reactor_dispatch_soft(s, completions)
 		reactor_drain_deferred_clean()
 
 		closing = server_reap_if_closing(s)

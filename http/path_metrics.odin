@@ -171,7 +171,7 @@ path_metrics_io_engine :: proc() -> string {
 path_metrics_io_engine_note :: proc() -> string {
 	when ODIN_OS == .Darwin {
 		// P5 full wait: product sockets on native reactor kqueue; timers soft_cq only.
-		return "reactor_kqueue_wait;accept_recv_write_close_native;timers_soft_cq;tls_h1_h2_send_reactor;wbio_peek_drain;stream_residual_first;hs_drain_reactor;no_proactr_socket_submit;no_dual_ct_ahead;no_soft_nop_fairness"
+		return "reactor_kqueue_wait;level_residual_write;timers_merged_wait;wbio_peek_drain;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead"
 	} else {
 		return ""
 	}

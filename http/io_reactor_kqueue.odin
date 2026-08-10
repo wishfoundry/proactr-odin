@@ -225,15 +225,20 @@ reactor_flush_changes :: proc() -> bool {
 	return true
 }
 
+// oneshot: accept/READ/fairness/clear. !oneshot: residual WRITE only (drogon level POLLOUT).
 @(private)
-reactor_arm_filter :: proc(fd: i32, filter: kqueue.Filter, udata: rawptr) {
+reactor_arm_filter :: proc(fd: i32, filter: kqueue.Filter, udata: rawptr, oneshot := true) {
 	if !reactor_host.active {
 		return
 	}
 	ev: kqueue.KEvent
 	ev.ident = uintptr(fd)
 	ev.filter = filter
-	ev.flags = {.Add, .One_Shot, .Enable}
+	if oneshot {
+		ev.flags = {.Add, .One_Shot, .Enable}
+	} else {
+		ev.flags = {.Add, .Enable}
+	}
 	// Client sockets: udata unused for dispatch (lookup by fd → td.conns).
 	// Accept: REACTOR_UDATA_ACCEPT sentinel.
 	ev.udata = udata
@@ -352,8 +357,7 @@ reactor_host_arm_recv :: proc(conn: ^Connection, buf: []u8) -> bool {
 	return true
 }
 
-// reactor_host_submit_send: arm EVFILT_WRITE for pending_send (residual or clear-H1).
-// Sets wire.kind = .Send (caller may overwrite to .Stream). Marks in-flight.
+// reactor_host_submit_send: arm oneshot EVFILT_WRITE (clear-H1 / non-residual).
 @(private)
 reactor_host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	if conn == nil || conn.state >= .Closing {
@@ -365,24 +369,20 @@ reactor_host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	if len(conn.wire.pending_send) == 0 {
 		return .None
 	}
-	if conn.reactor_write_armed || _conn_wire_in_flight(conn) {
-		// Already armed / in flight — keep pending; oneshot will re-enter.
-		if conn.wire.kind == .None {
-			conn.wire.kind = .Send
-		}
-		if !conn.reactor_write_armed {
-			reactor_arm_filter(i32(conn.socket), .Write, nil)
-			conn.reactor_write_armed = true
-		}
+	if conn.wire.kind == .None {
+		conn.wire.kind = .Send
+	}
+	// If residual level WRITE is up, leave it (covers clear after residual rare).
+	if conn.reactor_write_armed {
 		return .None
 	}
-	conn.wire.kind = .Send
-	reactor_arm_filter(i32(conn.socket), .Write, nil)
+	reactor_arm_filter(i32(conn.socket), .Write, nil, oneshot = true)
 	conn.reactor_write_armed = true
+	conn.reactor_write_level = false
 	return .None
 }
 
-// reactor_arm_write_residual: residual already set; native WRITE re-entry (no proactr).
+// reactor_arm_write_residual: level EVFILT_WRITE until residual empty (drogon enableWriting).
 // Contract: set reactor_h1 before arm so soft_cq_send_completes is never charged.
 @(private)
 reactor_arm_write_residual :: proc(conn: ^Connection) -> bool {
@@ -396,23 +396,41 @@ reactor_arm_write_residual :: proc(conn: ^Connection) -> bool {
 	if conn.state >= .Closing {
 		return false
 	}
-	if _conn_wire_in_flight(conn) || conn.reactor_write_armed {
-		// Already armed — residual stays until writable. Keep reactor_h1.
-		conn.reactor_h1 = true
-		return true
-	}
 	conn.wire.pending_send = view
 	conn.reactor_h1 = true
-	if err := reactor_host_submit_send(conn); err != .None {
-		conn.reactor_h1 = false
-		_wire_fail(conn, "reactor residual arm WRITE failed: %v", err)
-		return false
+	if conn.wire.kind == .None {
+		conn.wire.kind = .Send
 	}
+	if conn.reactor_write_armed && conn.reactor_write_level {
+		// Level already enabled — no re-arm.
+		return true
+	}
+	// Upgrade to level residual WRITE (delete oneshot if any, then level add).
+	if conn.reactor_write_armed && !conn.reactor_write_level {
+		reactor_delete_filters(i32(conn.socket), false, true)
+		conn.reactor_write_armed = false
+	}
+	reactor_arm_filter(i32(conn.socket), .Write, nil, oneshot = false)
+	conn.reactor_write_armed = true
+	conn.reactor_write_level = true
 	path_metrics_note_eagain_arm()
 	return true
 }
 
-// reactor_arm_fairness_continue: more plain/h2 with empty residual — oneshot WRITE re-enters flush.
+// reactor_disable_write_level: EV_DELETE when residual drained (drogon disableWriting).
+@(private)
+reactor_disable_write_level :: proc(conn: ^Connection) {
+	if conn == nil || !conn.reactor_write_level {
+		conn.reactor_write_armed = false
+		conn.reactor_write_level = false
+		return
+	}
+	conn.reactor_write_armed = false
+	conn.reactor_write_level = false
+	reactor_delete_filters(i32(conn.socket), false, true)
+}
+
+// reactor_arm_fairness_continue: oneshot WRITE re-enters flush (not residual level).
 @(private)
 reactor_arm_fairness_continue :: proc(conn: ^Connection) -> bool {
 	if conn == nil || conn.state >= .Closing || !reactor_host.active {
@@ -422,8 +440,9 @@ reactor_arm_fairness_continue :: proc(conn: ^Connection) -> bool {
 	if conn.reactor_write_armed {
 		return true
 	}
-	reactor_arm_filter(i32(conn.socket), .Write, nil)
+	reactor_arm_filter(i32(conn.socket), .Write, nil, oneshot = true)
 	conn.reactor_write_armed = true
+	conn.reactor_write_level = false
 	return true
 }
 
@@ -439,6 +458,7 @@ reactor_host_close :: proc(conn: ^Connection) {
 	del_w := conn.reactor_write_armed
 	conn.reactor_read_armed = false
 	conn.reactor_write_armed = false
+	conn.reactor_write_level = false
 	conn.reactor_need_clean = false
 	conn.reactor_recv_buf = nil
 	conn.tls_ct_recv_inflight = false
@@ -587,15 +607,18 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 	if conn == nil {
 		return
 	}
-	conn.reactor_write_armed = false
+	// Oneshot: clear armed. Level residual: stay armed until residual empty.
+	if !conn.reactor_write_level {
+		conn.reactor_write_armed = false
+	}
 	if conn.close_on_io {
-		// Account wire in-flight as completed abort path.
 		if conn.wire.kind == .Stream || conn.slot.stream_send_slab != nil {
 			_stream_pool_abandon(conn)
 		}
 		_conn_clear_exec(conn)
 		conn.reactor_h1 = false
 		reactor_residual_clear(conn)
+		reactor_disable_write_level(conn)
 		conn.close_on_io = false
 		if conn.state < .Closing {
 			connection_close(conn)
@@ -610,7 +633,7 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 		return
 	}
 
-	// TLS residual: drain residual first, then host_on_wire full delivery demux.
+	// TLS residual: drain residual first, then continue flush (level or oneshot).
 	if conn.reactor_h1 && conn.reactor_res_n > 0 {
 		again, hard := reactor_write_residual(conn)
 		if hard {
@@ -618,26 +641,22 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 			return
 		}
 		if again {
-			// Align pending with residual remainder; re-arm.
 			view := reactor_residual_view(conn)
 			conn.wire.pending_send = view
-			if !reactor_arm_write_residual(conn) {
-				return
+			conn.reactor_h1 = true
+			// Level: stay enabled. Oneshot: re-arm.
+			if !conn.reactor_write_level {
+				_ = reactor_arm_write_residual(conn)
 			}
 			return
 		}
-		// Residual fully on wire: synthetic full CQE through host_on_wire.
-		n := len(conn.wire.pending_send)
-		if n <= 0 {
-			// Residual meta empty; pending may already be empty after sync path.
-			reactor_residual_clear(conn)
-			conn.reactor_h1 = false
-			conn.wire.kind = .None
-			conn.wire.pending_send = nil
-			_ = reactor_on_send_complete(conn)
-			return
-		}
-		host_on_wire(conn, .Send, i32(n))
+		// Residual fully on wire — disable level WRITE, demux continue.
+		reactor_residual_clear(conn)
+		conn.wire.pending_send = nil
+		conn.wire.kind = .None
+		reactor_disable_write_level(conn)
+		conn.reactor_h1 = true
+		_ = reactor_on_send_complete(conn)
 		return
 	}
 
@@ -656,7 +675,6 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 		return
 	}
 	if would_block {
-		// Re-arm without consuming.
 		if err := reactor_host_submit_send(conn); err != .None {
 			_wire_fail(conn, "reactor WRITE re-arm failed: %v", err)
 		}
@@ -666,9 +684,6 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 		_wire_fail(conn, "reactor WRITE zero fd=%v pending=%d", conn.socket, len(conn.wire.pending_send))
 		return
 	}
-	// host_on_wire may re-arm partial via host_submit_send → reactor.
-	// Temporarily clear wire.kind so host_on_wire's in-flight bookkeeping is clean;
-	// _host_on_wire_* sets kind=None then re-arms.
 	host_on_wire(conn, kind, i32(sent))
 }
 

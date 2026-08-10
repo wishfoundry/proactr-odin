@@ -129,17 +129,20 @@ Key symbols:
 
 | Rank | Divergence | Likely impact | Status | Notes |
 |-----:|------------|---------------|--------|-------|
-| 1 | **Per-window CT copy (`BIO_read` vs peek+reset)** | **High** on busy memmove; honest **+10–25%** if eliminated without reordering | **Open / constrained** | Peer pattern clear; CLOSED as “BIO_peek_package RPS flag.” Need NEW LAW-shaped implement or non-peek copy cuts. |
-| 2 | **Seal window 64→128 KiB A/B** | **Med–High** setup tax cut (17→~9 SSL_write/req); baseline-licensed | **Open free win** | Prior 1 MiB seal failed under **old law**; 128 under reactor is allowed experiment (D8). |
-| 3 | **Level-triggered residual WRITE (vs oneshot re-arm)** | **Med** when EAGAIN frequent; **Low** on current s1m (few arms) | **Open structure** | Helps s64k / multi-conn more than perfect s1m. |
-| 4 | **Dual wait (soft ring + reactor)** | **Low–Med** idle/latency | Open | Not AES path. |
-| 5 | **Fairness H1 without WRITE re-arm** | **Correctness / large body**; **nil** for 1 MiB | Bugfix | Must fix before >2 MiB / fairness tests. |
-| 6 | **Keep-alive deferred clean** | **Low bulk; Med tiny** | Intentional | Reentrancy guard (P5 UAF); optimize carefully. |
-| 7 | **Dynlib OpenSSL vs static link** | **Low** | Product choice | Offline A/B only. |
-| 8 | **Body materialize / double copy** | proactr **already wins bulk**; tiny materialize=reqs | **Tiny track** | Separate PR from bulk. |
-| 9 | **TCP_NODELAY** | Negative historically | **CLOSED** | Leave. |
-| 10 | **Dual_Ct N>2 / soft-CQ density** | Law already multi-window | **CLOSED / converged** | Do not reopen. |
-| 11 | **kTLS** | Theoretical ceiling | **Out of scope** | Not fair fix. |
+| 1 | **Per-window CT copy (`BIO_read` vs peek+reset)** | **High** on busy memmove | **SHIPPED** | `reactor_drain_wbio` peek+reset; residual copy only on partial |
+| 2 | **Seal window 64→128 KiB A/B** | **Med–High** | **SHIPPED** | `REACTOR_SEAL_WINDOW=128KiB`; ~9 seals/s1m |
+| 3 | **Level-triggered residual WRITE** | **Med** mid-bulk | **SHIPPED** | Residual-only level WRITE; fairness/clear oneshot |
+| 4 | **Dual wait (soft ring + reactor)** | **Low–Med** idle | **SHIPPED** | Skip empty soft wait; post-I/O soft harvest |
+| 5 | **Fairness H1 WRITE re-arm** | Correctness | **SHIPPED** | `reactor_arm_fairness_continue` |
+| 6 | **Keep-alive deferred clean** | Intentional | **LEAVE** | Reentrancy guard |
+| 7 | **Dynlib OpenSSL vs static link** | Product | **LEAVE** | Offline only |
+| 8 | **Tiny plain-split floor 0** | Tiny RPS | **TRIED→REJECT** | Floor0 −27% plain; keep 8 KiB |
+| 8b | **Darwin no-hold slab** | RSS | **SHIPPED** | No hold alloc on Darwin |
+| 9 | **TCP_NODELAY** | Negative | **CLOSED** | Leave. |
+| 10 | **Dual_Ct N>2 / soft-CQ density** | — | **CLOSED** | Leave. |
+| 11 | **kTLS** | — | **Out of scope** | Leave. |
+
+**See `CONVERGENCE_COMPLETE.md` for final matrix + critics.**
 
 ### Already converged (law) — do not re-solve
 

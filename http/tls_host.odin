@@ -148,13 +148,18 @@ tls_host_on_accept :: proc(conn: ^Connection) -> bool {
 		tls_server.conn_free(p, ssl)
 		return false
 	}
-	// Second CT slab for seal∥send (hold next encrypt while primary sends).
-	hold, herr := make([]u8, TLS_CT_TX_DEFAULT, alloc)
-	if herr != nil || hold == nil {
-		delete(rx, alloc)
-		delete(tx, alloc)
-		tls_server.conn_free(p, ssl)
-		return false
+	// Second CT slab for seal∥send (Linux dual-CT). Darwin reactor: single residual
+	// in tx only — skip hold alloc (PR-G / plan D3).
+	hold: []u8
+	when ODIN_OS != .Darwin {
+		h, herr := make([]u8, TLS_CT_TX_DEFAULT, alloc)
+		if herr != nil || h == nil {
+			delete(rx, alloc)
+			delete(tx, alloc)
+			tls_server.conn_free(p, ssl)
+			return false
+		}
+		hold = h
 	}
 
 	conn.tls_ssl = ssl

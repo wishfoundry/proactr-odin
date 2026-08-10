@@ -7,9 +7,9 @@ package http
 // resp_buf. Tiny bodies stay on Materialize_Full so one SSL_write/CQE turn
 // keeps small-request RPS (split forces ≥2 seal/send turns).
 
-// Minimum body size for Heading_Plus_Borrowed_Body. Below this, full
-// materialize (heading+body) wins: split path costs an extra seal window and
-// tanks 4k/empty-body RPS under TLS. 8 KiB is the measured crossover.
+// Minimum body size for Heading_Plus_Borrowed_Body.
+// Split forces ≥2 SSL_write (heading part then body). Floor 0 regressed plain/s4k ~−27%
+// (conv-all). Keep 8 KiB crossover so tiny stays one materialize+one seal; bulk still borrows.
 TLS_PLAIN_SPLIT_MIN_BODY :: 8 * 1024
 
 // pure-ish policy for ciphered oneshot arm after writev/sendfile fail.

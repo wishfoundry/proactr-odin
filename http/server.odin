@@ -549,6 +549,9 @@ Connection :: struct {
 	reactor_fairness_yield:  bool,
 	reactor_read_armed:      bool,
 	reactor_write_armed:     bool,
+	// reactor_write_level: residual WRITE uses level EVFILT_WRITE (no One_Shot).
+	// Cleared when residual empty. Fairness/clear-H1 stay oneshot.
+	reactor_write_level:     bool,
 	// reactor_need_clean: oneshot finished sync inside scan/handler — defer
 	// clean_request_loop until end of kevent turn (avoid reentrant scanner UAF).
 	reactor_need_clean:      bool,
