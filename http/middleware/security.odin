@@ -79,7 +79,16 @@ security_headers_destroy :: proc(h: ^http.Handler, allocator := context.allocato
 security_headers_layer :: proc(opts: Security_Opts, allocator := context.allocator) -> Layer {
 	p := new(Security_Opts, allocator)
 	p^ = opts
-	return Layer{data = p, build = _security_layer_build}
+	return Layer {
+		data = p,
+		build = _security_layer_build,
+		free_built = _security_free_built,
+	}
+}
+
+@(private)
+_security_free_built :: proc(h: ^http.Handler, allocator: runtime.Allocator) {
+	security_headers_destroy(h, allocator)
 }
 
 @(private)

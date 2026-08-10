@@ -59,58 +59,58 @@ main :: proc() {
 	g_p64k = make_payload(64 * 1024)
 	g_p1m = make_payload(1024 * 1024)
 
-	router: http.Router
-	http.router_init(&router)
-	defer http.router_destroy(&router)
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
 
-	http.route_get(&router, "/plaintext", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	http.builder_get_fn(&b, "/plaintext", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		http.respond_plain(res, "Hello, World!")
-	}))
-	http.route_get(&router, "/api/tiny", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_get_fn(&b, "/api/tiny", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		http.respond_plain(res, "Hello, World!")
-	}))
-	http.route_get(&router, "/s/4k", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_get_fn(&b, "/s/4k", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		res.status = .OK
 		http.headers_set_content_type(&res.headers, "text/plain")
 		http.body_set_bytes(res, g_p4k)
 		http.respond(res)
-	}))
-	http.route_get(&router, "/s/64k", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_get_fn(&b, "/s/64k", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		res.status = .OK
 		http.headers_set_content_type(&res.headers, "text/plain")
 		http.body_set_bytes(res, g_p64k)
 		http.respond(res)
-	}))
-	http.route_get(&router, "/s/1m", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_get_fn(&b, "/s/1m", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		res.status = .OK
 		http.headers_set_content_type(&res.headers, "text/plain")
 		http.body_set_bytes(res, g_p1m)
 		http.respond(res)
-	}))
-	http.route_get(&router, "/sse", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_get_fn(&b, "/sse", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		http.headers_set_content_type(&res.headers, "text/event-stream")
 		http.respond_plain(res, "event: ping\ndata: 1\n\nevent: ping\ndata: 2\n\n")
-	}))
+	})
 	// Scrape path instrumentation (does not count as bench work when not under load).
-	http.route_get(&router, "/_matrix/stats", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	http.builder_get_fn(&b, "/_matrix/stats", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		s := http.path_metrics_format(context.temp_allocator)
 		res.status = .OK
 		http.headers_set_content_type(&res.headers, "text/plain")
 		http.body_set_bytes(res, transmute([]u8)s)
 		http.respond(res)
-	}))
-	http.route_post(&router, "/_matrix/reset", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_post_fn(&b, "/_matrix/reset", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		http.path_metrics_reset()
 		http.respond_plain(res, "ok\n")
-	}))
+	})
 
 	s: http.Server
 	http.server_shutdown_on_interrupt(&s)
@@ -130,9 +130,14 @@ main :: proc() {
 		io_name,
 		http.HTTP_PHASE_STATS,
 	)
-	err := http.listen_and_serve_tls(&s, http.router_handler(&router), ep, cert_pem, key_pem, opts)
+	// PEMs on opts; listen_builder → listen_and_serve (TLS path same as listen_and_serve_tls).
+	err, build_err := http.listen_builder(&s, &b, ep, opts)
+	if build_err.kind != .None {
+		log.errorf("route build: %s", http.builder_error_format(build_err))
+		os.exit(1)
+	}
 	if err != .None {
-		log.errorf("listen_and_serve_tls: %v", err)
+		log.errorf("listen_builder: %v", err)
 		os.exit(1)
 	}
 }

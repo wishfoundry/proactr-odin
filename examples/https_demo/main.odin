@@ -83,18 +83,18 @@ main :: proc() {
 		delete(p)
 	}
 
-	router: http.Router
-	http.router_init(&router)
-	defer http.router_destroy(&router)
-	http.route_get(&router, "/", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
+	http.builder_get_fn(&b, "/", proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "OK")
-	}))
+	})
 	// PR6: same App Contract as clear H1 — sse_start / Effects over ciphered stream.
-	http.route_get(&router, "/sse", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	http.builder_get_fn(&b, "/sse", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		pad := cast(^Tick)http.sse_alloc(res, size_of(Tick))
 		http.sse_start(res, on_sse_ticks, {user = pad})
-	}))
+	})
 
 	s: http.Server
 	http.server_shutdown_on_interrupt(&s)
@@ -104,12 +104,16 @@ main :: proc() {
 	opts.tls_key_pem = transmute([]u8)string(KEY)
 
 	log.infof("proactr HTTPS demo on :%d (self-signed; curl -k --http1.1 [/ and /sse])", port)
-	err := http.listen_and_serve(
+	err, build_err := http.listen_builder(
 		&s,
-		http.router_handler(&router),
+		&b,
 		net.Endpoint{address = net.IP4_Address{127, 0, 0, 1}, port = port},
 		opts,
 	)
+	if build_err.kind != .None {
+		fmt.eprintf("route build: %s\n", http.builder_error_format(build_err))
+		os.exit(1)
+	}
 	fmt.eprintf("server exited: %v\n", err)
 	if err == .Unsupported {
 		os.exit(2)

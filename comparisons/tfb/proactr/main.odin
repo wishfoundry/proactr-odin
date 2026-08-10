@@ -119,22 +119,22 @@ main :: proc() {
 	s: http.Server
 	http.server_shutdown_on_interrupt(&s)
 
-	router: http.Router
-	http.router_init(&router)
-	defer http.router_destroy(&router)
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
 
-	http.route_get(&router, "/plaintext", http.handler(on_plaintext))
-	http.route_get(&router, "/api/tiny", http.handler(on_plaintext))
-	http.route_get(&router, "/gen/ok", http.handler(on_gen))
-	http.route_get(&router, "/static/assembled", http.handler(on_assembled))
-	http.route_get(&router, "/static/blob/1m", http.handler(on_blob))
-	http.route_get(&router, "/file/1m", http.handler(on_file))
-	http.route_get(&router, "/sse", http.handler(on_sse))
-	http.route_get(&router, "/s/4k", http.handler(on_4k))
-	http.route_get(&router, "/s/64k", http.handler(on_64k))
-	http.route_get(&router, "/s/1m", http.handler(on_1m))
-	http.route_get(&router, "/s/4m", http.handler(on_4m))
-	http.route_get(&router, "/fortunes", http.handler(on_fortunes))
+	http.builder_get(&b, "/plaintext", http.handler(on_plaintext))
+	http.builder_get(&b, "/api/tiny", http.handler(on_plaintext))
+	http.builder_get(&b, "/gen/ok", http.handler(on_gen))
+	http.builder_get(&b, "/static/assembled", http.handler(on_assembled))
+	http.builder_get(&b, "/static/blob/1m", http.handler(on_blob))
+	http.builder_get(&b, "/file/1m", http.handler(on_file))
+	http.builder_get(&b, "/sse", http.handler(on_sse))
+	http.builder_get(&b, "/s/4k", http.handler(on_4k))
+	http.builder_get(&b, "/s/64k", http.handler(on_64k))
+	http.builder_get(&b, "/s/1m", http.handler(on_1m))
+	http.builder_get(&b, "/s/4m", http.handler(on_4m))
+	http.builder_get(&b, "/fortunes", http.handler(on_fortunes))
 
 	opts := http.Default_Server_Opts
 	opts.thread_count = workers
@@ -163,12 +163,16 @@ main :: proc() {
 		plan_s,
 		g_file_path,
 	)
-	err := http.listen_and_serve(
+	err, build_err := http.listen_builder(
 		&s,
-		http.router_handler(&router),
+		&b,
 		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
 		opts,
 	)
+	if build_err.kind != .None {
+		fmt.eprintf("route build: %s\n", http.builder_error_format(build_err))
+		os.exit(1)
+	}
 	fmt.eprintf("exited: %v\n", err)
 	if err == .Unsupported {
 		os.exit(2)

@@ -116,6 +116,118 @@ respond_json :: proc(r: ^Response, v: any, status: Status = .OK, opt: json.Marsh
 	return
 }
 
+// ---------------------------------------------------------------------------
+// Status / redirect / problem helpers (oneshot; App Contract body_* + respond)
+// ---------------------------------------------------------------------------
+
+/*
+Pure status with no body. Prefer this name over respond(r, status).
+
+Same as respond_with_status (also in the `respond` procedure group).
+Does not clear existing body cmds — call before body_set, or use when no body is set.
+*/
+respond_status :: proc(r: ^Response, status: Status, loc := #caller_location) {
+	respond_with_status(r, status, loc)
+}
+
+/*
+HTTP 204 No Content. No body (and no Content-Length on wire).
+
+Asserts no body cmds / reserve / writer have been started.
+*/
+respond_no_content :: proc(r: ^Response, loc := #caller_location) {
+	assert_has_td(loc)
+	assert(!r.sent, "response has already been sent", loc)
+	assert(r._cmd_count == 0, "respond_no_content: body cmds already set", loc)
+	assert(!r._heading_written, "respond_no_content: heading already written", loc)
+	assert(r._body_off == 0, "respond_no_content: body_reserve in progress", loc)
+	assert(!r._streaming, "respond_no_content: stream started", loc)
+	response_status(r, .No_Content)
+	respond(r, loc)
+}
+
+/*
+HTTP redirect: sets Location and a 3xx status, then sends with no body.
+
+Default status is .Found (302). Common: .Moved_Permanently (301), .See_Other (303),
+.Temporary_Redirect (307), .Permanent_Redirect (308).
+
+`location` must remain valid until the response wire completes (literal / request arena).
+*/
+respond_redirect :: proc(
+	r: ^Response,
+	location: string,
+	status: Status = .Found,
+	loc := #caller_location,
+) {
+	assert_has_td(loc)
+	assert(!r.sent, "response has already been sent", loc)
+	assert(r._cmd_count == 0, "respond_redirect: body cmds already set", loc)
+	assert(!r._heading_written, "respond_redirect: heading already written", loc)
+	assert(r._body_off == 0, "respond_redirect: body_reserve in progress", loc)
+	assert(!r._streaming, "respond_redirect: stream started", loc)
+	assert(status_is_redirect(status), "respond_redirect: status must be 3xx redirect", loc)
+	assert(location != "", "respond_redirect: empty location", loc)
+
+	headers_set(&r.headers, "location", location)
+	response_status(r, status)
+	respond(r, loc)
+}
+
+// RFC 7807 Problem Details (application/problem+json).
+// Empty optional strings are still marshaled (Odin json); pass only what you need.
+Problem :: struct {
+	type:     string, // URI; default "about:blank"
+	title:    string,
+	status:   int,    // HTTP status as number in the body
+	detail:   string,
+	instance: string, // URI of this occurrence
+}
+
+/*
+RFC 7807 problem+json error response.
+
+Sets Content-Type application/problem+json, marshals Problem, and responds.
+On marshal failure, closes connection and sends 500 (same pattern as respond_json).
+*/
+respond_problem :: proc(
+	r: ^Response,
+	status: Status,
+	title: string,
+	detail: string = "",
+	type: string = "about:blank",
+	instance: string = "",
+	loc := #caller_location,
+) -> (
+	err: json.Marshal_Error,
+) {
+	assert_has_td(loc)
+	assert(!r.sent, "response has already been sent", loc)
+
+	r.status = status
+	headers_set_content_type(&r.headers, "application/problem+json")
+
+	prob := Problem {
+		type     = type if type != "" else "about:blank",
+		title    = title,
+		status   = int(status),
+		detail   = detail,
+		instance = instance,
+	}
+
+	rw:  Response_Writer
+	buf: [128]byte
+	response_writer_init(&rw, r, buf[:])
+	defer io.close(rw.w)
+
+	opt: json.Marshal_Options
+	if err = json.marshal_to_writer(rw.w, prob, &opt); err != nil {
+		headers_set_close(&r.headers)
+		response_status(r, .Internal_Server_Error)
+	}
+	return
+}
+
 /*
 Prefer the procedure group `respond`.
 */
@@ -135,6 +247,7 @@ respond_with_none :: proc(r: ^Response, loc := #caller_location) {
 
 /*
 Prefer the procedure group `respond`.
+Also available as respond_status for a clearer product name.
 */
 respond_with_status :: proc(r: ^Response, status: Status, loc := #caller_location) {
 	response_status(r, status)

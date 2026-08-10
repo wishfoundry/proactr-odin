@@ -455,19 +455,19 @@ main :: proc() {
 		}
 	}
 
-	router: http.Router
-	http.router_init(&router)
-	defer http.router_destroy(&router)
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
 
-	http.route_get(&router, "/health", http.handler(on_health))
-	http.route_get(&router, "/metrics", http.handler(on_metrics))
-	http.route_get(&router, "/api/tiny", http.handler(on_tiny))
-	http.route_get(&router, "/gen/ok", http.handler(on_gen))
-	http.route_get(&router, "/static/assembled", http.handler(on_assembled))
-	http.route_get(&router, "/static/blob/1m", http.handler(on_blob))
-	http.route_get(&router, "/file/1m", http.handler(on_file))
-	http.route_get(&router, "/sse", http.handler(on_sse))
-	http.route_get(&router, "/plaintext", http.handler(on_tiny))
+	http.builder_get(&b, "/health", http.handler(on_health))
+	http.builder_get(&b, "/metrics", http.handler(on_metrics))
+	http.builder_get(&b, "/api/tiny", http.handler(on_tiny))
+	http.builder_get(&b, "/gen/ok", http.handler(on_gen))
+	http.builder_get(&b, "/static/assembled", http.handler(on_assembled))
+	http.builder_get(&b, "/static/blob/1m", http.handler(on_blob))
+	http.builder_get(&b, "/file/1m", http.handler(on_file))
+	http.builder_get(&b, "/sse", http.handler(on_sse))
+	http.builder_get(&b, "/plaintext", http.handler(on_tiny))
 
 	s: http.Server
 	http.server_shutdown_on_interrupt(&s)
@@ -493,12 +493,16 @@ main :: proc() {
 		g_file_path,
 	)
 
-	err := http.listen_and_serve(
+	err, build_err := http.listen_builder(
 		&s,
-		http.router_handler(&router),
+		&b,
 		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
 		opts,
 	)
+	if build_err.kind != .None {
+		fmt.eprintf("route build: %s\n", http.builder_error_format(build_err))
+		os.exit(1)
+	}
 	fmt.eprintf("server exited: %v\n", err)
 	if err == .Unsupported {
 		os.exit(2)

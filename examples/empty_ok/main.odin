@@ -2,7 +2,7 @@
 //
 // Env:
 //   PORT    listen port (default 8080)
-//   WORKERS worker threads / rings (default 1; pass via listen_and_serve opts)
+//   WORKERS worker threads / rings (default 1; pass via listen_builder opts)
 package main
 
 import "core:fmt"
@@ -23,7 +23,7 @@ main :: proc() {
 		}
 		delete(p)
 	}
-	// Must pass as listen_and_serve 4th arg — setting s.opts alone is overwritten.
+	// Must pass as listen_builder opts — setting s.opts alone is overwritten.
 	workers := 1
 	if p := os.get_env_alloc("WORKERS", context.allocator); p != "" {
 		if v, ok2 := strconv.parse_int(p); ok2 {
@@ -32,16 +32,16 @@ main :: proc() {
 		delete(p)
 	}
 
-	router: http.Router
-	http.router_init(&router)
-	defer http.router_destroy(&router)
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
 
-	http.route_get(&router, "/", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	http.builder_get_fn(&b, "/", proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "OK")
-	}))
-	http.route_get(&router, "/health", http.handler(proc(req: ^http.Request, res: ^http.Response) {
+	})
+	http.builder_get_fn(&b, "/health", proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "ok")
-	}))
+	})
 
 	s: http.Server
 	http.server_shutdown_on_interrupt(&s)
@@ -54,12 +54,16 @@ main :: proc() {
 		port,
 		workers,
 	)
-	err := http.listen_and_serve(
+	err, build_err := http.listen_builder(
 		&s,
-		http.router_handler(&router),
+		&b,
 		net.Endpoint{address = net.IP4_Address{0, 0, 0, 0}, port = port},
 		opts,
 	)
+	if build_err.kind != .None {
+		fmt.eprintf("route build: %s\n", http.builder_error_format(build_err))
+		os.exit(1)
+	}
 	fmt.eprintf("server exited: %v\n", err)
 	if err == .Unsupported {
 		os.exit(2)

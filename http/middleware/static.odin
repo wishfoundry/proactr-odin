@@ -98,7 +98,7 @@ static_middleware :: proc(opts: Static_Opts, next: ^http.Handler, allocator := c
 }
 
 // Convenience: static_handler with strip_prefix set (mount URL prefix → filesystem root).
-// Example: route_get(&r, "/assets/*", static_mount("/assets", "public/assets"))
+// Example: builder_get(&b, "/assets/{*path}", static_mount("/assets", "public/assets"))
 static_mount :: proc(prefix, root: string, allocator := context.allocator) -> http.Handler {
 	return static_handler(Static_Opts{root = root, strip_prefix = prefix}, allocator)
 }

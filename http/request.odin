@@ -16,8 +16,12 @@ Request :: struct {
 	url:        URL,
 	client:     net.Endpoint,
 
-	// Route params/captures.
-	url_params: []string,
+	// Named path captures (segment trie). Match fills; host clears n at exchange start.
+	params:        Path_Params,
+	// Middleware + Match_Proc bag. Host clears n at exchange start; match never clears.
+	ctx:           Request_Ctx,
+	// Optional interned template on radix hit; "" otherwise.
+	route_pattern: string,
 
 	// Internal usage only.
 	_scanner:   ^Scanner,
@@ -29,6 +33,9 @@ Request :: struct {
 
 request_init :: proc(r: ^Request, allocator := context.allocator) {
 	headers_init(&r.headers, allocator)
+	r.params.n = 0
+	r.ctx.n = 0
+	r.route_pattern = ""
 }
 
 // TODO: call it headers_sanitize because it modifies the headers.

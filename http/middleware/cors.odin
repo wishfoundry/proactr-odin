@@ -118,7 +118,18 @@ cors_layer :: proc(opts: Cors_Opts, allocator := context.allocator) -> Layer {
 	if opts.expose_headers != "" {
 		p.expose_headers = strings.clone(opts.expose_headers, allocator)
 	}
-	return Layer{data = p, build = _cors_layer_build, free_data = cors_layer_data_destroy}
+	return Layer {
+		data = p,
+		build = _cors_layer_build,
+		free_data = cors_layer_data_destroy,
+		free_built = _cors_free_built,
+	}
+}
+
+// free_built for Match_Table / Builder destroy — deep free Cors_State on wrap Handler.
+@(private)
+_cors_free_built :: proc(h: ^http.Handler, allocator: runtime.Allocator) {
+	cors_destroy(h, allocator)
 }
 
 @(private)

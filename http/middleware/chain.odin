@@ -43,10 +43,22 @@ call_next :: proc(next: ^http.Handler, req: ^http.Request, res: ^http.Response) 
 // Setup-time layer: build(data, next) → wrapping Handler.
 // data is optional heap opts; chain_use auto-tracks non-nil data for free.
 // free_data: optional deep free (CORS owned strings); nil → free(data) only.
+// Builders take http.Layer — use to_http_layer to adapt.
 Layer :: struct {
-	data:      rawptr,
-	build:     proc(data: rawptr, next: ^http.Handler, allocator: runtime.Allocator) -> http.Handler,
-	free_data: proc(data: rawptr, allocator: runtime.Allocator),
+	data:       rawptr,
+	build:      proc(data: rawptr, next: ^http.Handler, allocator: runtime.Allocator) -> http.Handler,
+	free_data:  proc(data: rawptr, allocator: runtime.Allocator),
+	free_built: proc(h: ^http.Handler, allocator: runtime.Allocator), // deep free Handler.user_data
+}
+
+// Adapt middleware.Layer → http.Layer for Builder APIs (same layout).
+to_http_layer :: proc(l: Layer) -> http.Layer {
+	return http.Layer {
+		data = l.data,
+		build = l.build,
+		free_data = l.free_data,
+		free_built = l.free_built,
+	}
 }
 
 @(private)

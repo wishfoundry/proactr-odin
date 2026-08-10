@@ -2,6 +2,7 @@
 
 **Package:** `http/middleware` (import as `middleware`)  
 **Host hooks:** `http.response_on_respond` / `http.response_on_complete`  
+**Routing:** `http.Builder` + `listen_builder` (canonical product boot)  
 **Chain:** `Chain`, `from_fn`, stock layers
 
 ## Model
@@ -15,19 +16,58 @@ on_respond / on_complete → host-fired; not a public resume API
 
 There is **no** `http.resume`. Schedule work by submitting ops (or pool work that soft-completes into the ring). Put `req` / `res` / `next` in `user` if the completion must continue the chain.
 
-## Quick start
+## Quick start (Builder + stock layers)
+
+Canonical product path: register routes on a `Builder`, attach middleware as `http.Layer`s, then `listen_builder`.
+
+Stock `*_layer` constructors return `middleware.Layer`. Adapt with `to_http_layer` before `builder_use`:
 
 ```odin
 import http "path/to/http"
 import mw   "path/to/http/middleware"
+import "core:net"
 
-// Terminal app
-router: http.Router
-http.router_init(&router)
-// ... routes ...
-terminal := http.router_handler(&router)
+main :: proc() {
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
 
-// Onion (outer-first): request_id → logger → security → cors → router
+	// Onion (outer-first): request_id → logger → security → cors → routes
+	http.builder_use(&b,
+		mw.to_http_layer(mw.request_id_layer({})),
+		mw.to_http_layer(mw.logger_layer({})),
+		mw.to_http_layer(mw.security_headers_layer({})),
+		mw.to_http_layer(mw.cors_layer(mw.Cors_Default)),
+	)
+
+	http.builder_get_fn(&b, "/", proc(req: ^http.Request, res: ^http.Response) {
+		http.respond_plain(res, "OK")
+	})
+	// Scoped MW under a group:
+	// g := http.builder_group_begin(&b, "/api")
+	// http.builder_use(g, mw.to_http_layer(mw.request_id_layer({})))
+	// http.builder_get_fn(g, "/users", list_users)
+
+	s: http.Server
+	http.server_shutdown_on_interrupt(&s)
+	err, build_err := http.listen_builder(&s, &b, net.Endpoint{port = 8080})
+	if build_err.kind != .None {
+		// format with http.builder_error_format(build_err)
+		return
+	}
+	_ = err
+}
+```
+
+Layer opts data is tracked on the expanded `Match_Table` and freed when the server tears down the table (under `listen_builder`).
+
+### Chain-only (power / tests)
+
+If you need a standalone onion without the Builder (e.g. unit tests):
+
+```odin
+terminal := http.handler(my_app)
+
 c: mw.Chain
 mw.chain_init(&c, terminal)
 // Keep `c` alive for the entire server lifetime (next pointers are heap nodes inside c).
@@ -39,14 +79,13 @@ mw.chain_wrap(&c, {
 	mw.security_headers_layer({}),
 	mw.cors_layer(mw.Cors_Default),
 })
-// Layer opts data is auto-tracked and freed in chain_destroy.
 
 s: http.Server
 http.serve(&s, mw.chain_handler(&c))
 // Prefer chain_root_ptr(&c) if you need a stable ^Handler for the process life.
 ```
 
-Manual nesting (no Chain):
+Manual nesting (no Chain / no Builder):
 
 ```odin
 app := http.handler(my_app)
@@ -69,7 +108,8 @@ nodes[0] = mw.request_id({}, &nodes[1])
 | `security_headers` / `security_headers_layer` | nosniff, frame options, referrer-policy, optional HSTS/CSP |
 | `static_*` | Elite static files (see `STATIC.md`) |
 | `http.rate_limit` | IP rate limit (package `http`) |
-| `from_fn` / `chain_use_fn` | Custom `(req, res, next)` layers |
+| `from_fn` / `chain_use_fn` / `builder_use_fn` | Custom `(req, res, next)` layers |
+| `to_http_layer` | Adapt `middleware.Layer` → `http.Layer` for `builder_use` |
 
 ## Hooks (package `http`)
 
@@ -100,6 +140,15 @@ my_mw :: proc(next: ^http.Handler, allocator := context.allocator) -> http.Handl
 }
 ```
 
+On a Builder without building a `Handler` yourself:
+
+```odin
+http.builder_use_fn(&b, proc(req: ^http.Request, res: ^http.Response, next: ^http.Handler) {
+	// before
+	next.handle(next, req, res)
+})
+```
+
 Async gate (session load) — pattern only:
 
 ```odin
@@ -111,8 +160,8 @@ Async gate (session load) — pattern only:
 
 ## Performance notes
 
-- Chain: each layer is a **heap `Handler` node** (stable `^Handler`); no `inject_at` into a shifting array.
-- Chain setup allocates once per process; hot path is pointer calls only.
+- Builder expand: each layer is a **heap `Handler` node** on the frozen table; hot path is pointer calls only.
+- Chain: same shape; setup allocates once per process.
 - Logger: one arena object + hook slot; formats only when logging; fires at **final** status (`response_send_got_body`).
 - Security/CORS: header sets with static or request-arena strings; CORS clones origin lists at construction.
 - Hooks: fixed `[4]` arrays on `Response` — no dynamic grow.

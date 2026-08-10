@@ -177,6 +177,9 @@ Server :: struct {
 	// Init in listen when PEMs set; freed in serve teardown via server_tls_destroy.
 	tls_provider:   ^tls_server.Provider,
 	tls_ctx:        tls_server.Ctx,
+	// Owned Match_Table when listen_builder expanded routes (destroyed after workers join).
+	match_table:       Match_Table,
+	match_table_owned: bool,
 }
 
 // Thread-local host state: one proactr ring per worker.
@@ -410,6 +413,11 @@ serve :: proc(s: ^Server, h: Handler) -> (err: proactr.Error) {
 		}
 	delete(s.threads)
 	s.threads = nil
+	// Free Match_Table owned by listen_builder after workers join.
+	if s.match_table_owned {
+		match_table_destroy(&s.match_table)
+		s.match_table_owned = false
+	}
 	// Free shared SSL_CTX (provider stays process-default if any).
 	server_tls_destroy(s)
 	return .None

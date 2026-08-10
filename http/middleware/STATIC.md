@@ -4,6 +4,7 @@ Serve local files with caching validators, resumable downloads (HTTP Range), and
 zero-copy wire where available (Linux/Darwin sendfile).
 
 **Package:** `http/middleware` (import as `middleware`)  
+**Routing:** `http.Builder` + `listen_builder` / `builder_get`  
 **Platform:** Elite path is **POSIX** (Linux/Darwin). Windows is best-effort full-read.
 
 ---
@@ -15,14 +16,15 @@ package main
 
 import http "path/to/http"
 import mw "path/to/http/middleware"
+import "core:net"
 
 main :: proc() {
-	router: http.Router
-	http.router_init(&router)
-	defer http.router_destroy(&router)
+	b: http.Builder
+	http.builder_init(&b)
+	defer http.builder_destroy(&b)
 
 	// Serve ./public under /static/* (strip URL prefix, terminal 404/405).
-	http.route_get(&router, "/static/*",
+	http.builder_get(&b, "/static/{*path}",
 		mw.static_mount("/static", "public"))
 
 	// Or full options:
@@ -31,7 +33,7 @@ main :: proc() {
 	// 	strip_prefix = "/static",
 	// 	max_age_secs = 3600,
 	// }
-	// http.route_get(&router, "/static/*", mw.static_handler(opts))
+	// http.builder_get(&b, "/static/{*path}", mw.static_handler(opts))
 
 	// API + SPA: try files first, then fall through.
 	// api := http.handler(api_handler)
@@ -39,9 +41,15 @@ main :: proc() {
 	// 	root = "public",
 	// 	spa_fallback = "index.html",
 	// }, &api)
-	// http.route_get(&router, "/*", root)
+	// http.builder_get(&b, "/{*path}", root)
 
-	http.listen_and_serve(&server, http.router_handler(&router), endpoint, opts)
+	s: http.Server
+	http.server_shutdown_on_interrupt(&s)
+	err, build_err := http.listen_builder(&s, &b, net.Endpoint{port = 8080})
+	if build_err.kind != .None {
+		return
+	}
+	_ = err
 }
 ```
 
@@ -126,7 +134,7 @@ opts := mw.Static_Opts{root = "public"}
 ### Pure asset mount
 
 ```odin
-http.route_get(&router, "/assets/*", mw.static_mount("/assets", "dist/assets"))
+http.builder_get(&b, "/assets/{*path}", mw.static_mount("/assets", "dist/assets"))
 ```
 
 Missing file → 404. POST → 405.
@@ -141,7 +149,7 @@ spa := mw.static_middleware(mw.Static_Opts{
 	root = "public",
 	spa_fallback = "index.html",
 }, &api)
-http.route_get(&router, "/*", spa)
+http.builder_get(&b, "/{*path}", spa)
 ```
 
 ### Long-cache fingerprinted assets
@@ -152,7 +160,7 @@ h := mw.static_handler(mw.Static_Opts{
 	strip_prefix = "/assets",
 	immutable = true, // Cache-Control: immutable (+ long max-age)
 })
-http.route_get(&router, "/assets/*", h)
+http.builder_get(&b, "/assets/{*path}", h)
 ```
 
 ---
