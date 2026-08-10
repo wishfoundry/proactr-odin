@@ -926,7 +926,9 @@ test_h2_pending_cursor_large_body :: proc(t: ^testing.T) {
 	defer delete(body)
 	for i in 0 ..< len(body) do body[i] = u8(i)
 
-	// Tight stream window: only 32 KiB first → 2 frames, rest buffered with cursor.
+	// Tight stream window: only 32 KiB first → direct-framed from caller slice
+	// (item 5 partial direct: no double-buffer of the sendable portion); only the
+	// unsendable remainder is pending.
 	s, ok := srv.streams[1]
 	testing.expect(t, ok)
 	s.send_window = 32 * 1024
@@ -934,11 +936,31 @@ test_h2_pending_cursor_large_body :: proc(t: ^testing.T) {
 
 	conn_send_headers(&srv, &out, 1, []Header{{name = ":status", value = "200"}}, false)
 	buffered := conn_send_body(&srv, &out, 1, body, true)
-	testing.expect(t, buffered == len(body) - 32*1024, "32KiB flushed, rest pending")
-	testing.expect_value(t, stream_pending_len(s), len(body) - 32*1024)
-	// Cursor advanced O(1); dead prefix still in the array until full drain/compact.
-	testing.expect_value(t, s.pending_off, 32 * 1024)
-	testing.expect_value(t, len(s.pending), len(body))
+	rest := len(body) - 32*1024
+	testing.expect(t, buffered == rest, "32KiB direct-framed, rest pending")
+	testing.expect_value(t, stream_pending_len(s), rest)
+	// Remainder only — no dead prefix (direct path never staged the first 32KiB).
+	testing.expect_value(t, s.pending_off, 0)
+	testing.expect_value(t, len(s.pending), rest)
+
+	// First 32 KiB of wire DATA must match body prefix (framed once from caller).
+	pos := 0
+	// Skip HEADERS
+	_, _, c0, e0 := frame_decode(out[pos:])
+	testing.expect_value(t, e0, Frame_Error.None)
+	pos += c0
+	got_direct: [dynamic]u8
+	defer delete(got_direct)
+	for pos < len(out) {
+		h, p, c, e := frame_decode(out[pos:])
+		testing.expect_value(t, e, Frame_Error.None)
+		if h.type == FRAME_DATA {
+			append(&got_direct, ..p)
+		}
+		pos += c
+	}
+	testing.expect_value(t, len(got_direct), 32 * 1024)
+	testing.expect(t, slice.equal(got_direct[:], body[:32*1024]), "direct DATA == body prefix")
 
 	// Grant remaining window → full drain + clear.
 	clear(&out)
@@ -952,6 +974,46 @@ test_h2_pending_cursor_large_body :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.pending_off, 0)
 	testing.expect(t, len(s.pending) == 0, "fully drained pending buffer cleared")
 	testing.expect(t, s.end_sent, "END_STREAM after full drain")
+	free_all(context.temp_allocator)
+}
+
+// Item 5: multi-DATA in one conn_feed coalesces WINDOW_UPDATE (same total credit,
+// fewer frames). Peer stall-prevention still 1:1 on total bytes.
+@(test)
+test_h2_inbound_window_coalesce :: proc(t: ^testing.T) {
+	cli: Http2_Connection
+	conn_init(&cli, false)
+	defer conn_destroy(&cli)
+
+	out: [dynamic]u8
+	defer delete(out)
+	scratch: [dynamic]u8
+	defer delete(scratch)
+	conn_send_request(&cli, &scratch, []Header{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":authority", value = "x"}, {name = ":path", value = "/"}})
+
+	// Two DATA frames on stream 1 in one feed (no END_STREAM).
+	in_buf: [dynamic]u8
+	defer delete(in_buf)
+	a := make([]u8, 40)
+	defer delete(a)
+	b := make([]u8, 60)
+	defer delete(b)
+	frame_write(&in_buf, FRAME_DATA, 0, 1, a)
+	frame_write(&in_buf, FRAME_DATA, 0, 1, b)
+	testing.expect_value(t, conn_feed(&cli, in_buf[:], &out), H2_Error.None)
+
+	// Expect one conn WU (+100) and one stream WU (+100), not four frames.
+	w1, p1, c1, e1 := frame_decode(out[:])
+	testing.expect_value(t, e1, Frame_Error.None)
+	testing.expect_value(t, w1.type, FRAME_WINDOW_UPDATE)
+	testing.expect_value(t, w1.stream_id, u32(0))
+	testing.expect_value(t, get_u32(p1), u32(100))
+	w2, p2, c2, e2 := frame_decode(out[c1:])
+	testing.expect_value(t, e2, Frame_Error.None)
+	testing.expect_value(t, w2.type, FRAME_WINDOW_UPDATE)
+	testing.expect_value(t, w2.stream_id, u32(1))
+	testing.expect_value(t, get_u32(p2), u32(100))
+	testing.expect_value(t, len(out), c1 + c2) // no more frames
 	free_all(context.temp_allocator)
 }
 

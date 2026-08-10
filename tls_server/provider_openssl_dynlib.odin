@@ -328,8 +328,9 @@ _resolve_openssl_syms :: proc(st: ^Dynlib_State) -> bool {
 	ok = ok && _dlsym_raw(st.lib, "BIO_write", transmute(^rawptr)&st.BIO_write)
 	ok = ok && _dlsym_raw(st.lib, "BIO_read", transmute(^rawptr)&st.BIO_read)
 	ok = ok && _dlsym_raw(st.lib, "BIO_ctrl_pending", transmute(^rawptr)&st.BIO_ctrl_pending)
-	// Optional for peek drain (fails open: bio_peek stays nil if missing).
-	_ = _dlsym_raw(st.lib, "BIO_ctrl", transmute(^rawptr)&st.BIO_ctrl)
+	// Required for product zero-copy wBIO drain (BIO_get_mem_data / BIO_reset via ctrl).
+	// Without BIO_ctrl, reactor_drain_wbio would BIO_read every window (memmove tax).
+	ok = ok && _dlsym_raw(st.lib, "BIO_ctrl", transmute(^rawptr)&st.BIO_ctrl)
 	ok = ok && _dlsym_raw(st.lib, "PEM_read_bio_X509", transmute(^rawptr)&st.PEM_read_bio_X509)
 	ok = ok && _dlsym_raw(st.lib, "PEM_read_bio_PrivateKey", transmute(^rawptr)&st.PEM_read_bio_PrivateKey)
 	ok = ok && _dlsym_raw(st.lib, "SSL_CTX_use_certificate", transmute(^rawptr)&st.SSL_CTX_use_certificate)

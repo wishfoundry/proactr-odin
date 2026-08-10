@@ -4,6 +4,10 @@
 //   Length(24) Type(8) Flags(8) R(1)+StreamID(31)  Payload(Length)
 //
 // Sans-I/O: encode/decode only; no sockets, TLS, or host wiring.
+//
+// Hot path (item 5): frame_write does one capacity check + one payload copy
+// (no multi-step append growth on DATA). Callers pre-size known body framing
+// via frame_dst_reserve_data to kill _append_elems reallocation churn on s1m.
 package http2
 
 // Client connection preface (RFC 9113 §3.4) — sent before the first SETTINGS.
@@ -53,12 +57,54 @@ get_u32 :: proc(b: []u8) -> u32 {
 	return u32(b[0]) << 24 | u32(b[1]) << 16 | u32(b[2]) << 8 | u32(b[3])
 }
 
+// Pre-size `dst` for `payload_bytes` of DATA (or any payload) under `max_frame`
+// frame caps: payload + N×9-byte headers. Idempotent when capacity already
+// covers `len(dst)+need`. Host/bulk paths call this before multi-frame body
+// encode so geometric append growth does not dominate s1m CPU.
+frame_dst_reserve_data :: proc(dst: ^[dynamic]u8, payload_bytes: int, max_frame: int = DEFAULT_MAX_FRAME_SIZE) {
+	if dst == nil || payload_bytes <= 0 {
+		return
+	}
+	mf := max_frame
+	if mf <= 0 {
+		mf = DEFAULT_MAX_FRAME_SIZE
+	}
+	n_frames := (payload_bytes + mf - 1) / mf
+	if n_frames < 1 {
+		n_frames = 1
+	}
+	need := payload_bytes + n_frames * FRAME_HEADER_LEN
+	want := len(dst^) + need
+	if cap(dst^) < want {
+		reserve(dst, want)
+	}
+}
+
 // Write a complete frame: header + payload.
+// Single capacity grow + one payload copy (no put_u24/append cascade).
 frame_write :: proc(dst: ^[dynamic]u8, type, flags: u8, stream_id: u32, payload: []u8) {
-	put_u24(dst, u32(len(payload)))
-	append(dst, type, flags)
-	put_u32(dst, stream_id & 0x7fff_ffff)
-	append(dst, ..payload)
+	n := len(payload)
+	total := FRAME_HEADER_LEN + n
+	old := len(dst^)
+	if cap(dst^) < old + total {
+		reserve(dst, old + total)
+	}
+	resize(dst, old + total)
+	buf := dst^
+	sid := stream_id & 0x7fff_ffff
+	ln := u32(n)
+	buf[old + 0] = u8(ln >> 16)
+	buf[old + 1] = u8(ln >> 8)
+	buf[old + 2] = u8(ln)
+	buf[old + 3] = type
+	buf[old + 4] = flags
+	buf[old + 5] = u8(sid >> 24)
+	buf[old + 6] = u8(sid >> 16)
+	buf[old + 7] = u8(sid >> 8)
+	buf[old + 8] = u8(sid)
+	if n > 0 {
+		copy(buf[old + FRAME_HEADER_LEN:][:n], payload)
+	}
 }
 
 // Decode one complete frame. `payload` is a slice into `buf`; `consumed` is the
@@ -159,11 +205,15 @@ goaway_write :: proc(dst: ^[dynamic]u8, last_sid: u32, error_code: u32) {
 
 // ---- WINDOW_UPDATE (§6.9) --------------------------------------------------
 
+// 13-byte WINDOW_UPDATE: length=4, type=0x8, flags=0, stream_id, increment.
+// Hot inbound path writes these often; avoid a 4-byte stack payload + general
+// frame_write path overhead when possible (still one grow via frame_write).
 window_update_write :: proc(dst: ^[dynamic]u8, stream_id: u32, increment: u32) {
+	inc := increment & 0x7fff_ffff
 	payload: [4]u8
-	payload[0] = u8(increment >> 24) & 0x7f
-	payload[1] = u8(increment >> 16)
-	payload[2] = u8(increment >> 8)
-	payload[3] = u8(increment)
+	payload[0] = u8(inc >> 24)
+	payload[1] = u8(inc >> 16)
+	payload[2] = u8(inc >> 8)
+	payload[3] = u8(inc)
 	frame_write(dst, FRAME_WINDOW_UPDATE, 0, stream_id, payload[:])
 }

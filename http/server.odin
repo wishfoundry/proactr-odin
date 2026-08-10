@@ -535,11 +535,12 @@ Connection :: struct {
 	// Darwin H1+H2 reactor: dual_ct.tx is the single residual CT slab (hold unused on
 	// reactor product paths). Stream residual-first also uses tx; dual_ct_try_ahead no-op.
 	dual_ct:        Dual_Ct,
-	// Darwin reactor residual: dual_ct.tx[reactor_res_off:][:reactor_res_n].
-	// reactor_h1: residual WRITE armed (native EVFILT_WRITE on reactor kq); must be set
-	// before arm so soft_cq_send_completes is not charged and write demuxes to reactor.
-	// reactor_fairness_yield: reserved (fairness uses product re-entry, not soft-Nop).
-	// reactor_read/write_armed: native interest on the reactor kqueue (P5).
+	// Dense residual: dual_ct.tx[reactor_res_off:][:reactor_res_n].
+	// reactor_h1: residual WRITE armed — Darwin: EVFILT_WRITE on reactor kq;
+	// Linux H1 oneshot: host_submit_send (io_uring). Must be set before arm so
+	// soft_cq_send_completes is not charged and write demuxes to reactor_on_send_complete.
+	// reactor_fairness_yield: Darwin fairness WRITE re-entry; Linux dense continues in-entry.
+	// reactor_read/write_armed: native interest on the reactor kqueue (Darwin P5).
 	// Product READ always level; residual WRITE level; fairness WRITE oneshot.
 	// reactor_recv_buf: buffer for next native RECV (CT or clear scanner window).
 	reactor_res_off:         int,

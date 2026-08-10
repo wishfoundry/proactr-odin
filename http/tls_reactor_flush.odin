@@ -1,11 +1,15 @@
-#+build darwin
 package http
 
-// Darwin TLS bulk flush — reactor law (Plan R2 §4), H1 oneshot + H2 frame out.
-// residual-first → SSL_write(64KiB) → drain wBIO write until EAGAIN → single residual.
-// NO soft_cq between full CT windows. NO dual_ct_try_ahead. Dual-CT remains Linux-only.
-// Progressive stream: residual-first in tls_stream.odin (not this multi-window loop);
-// residual WRITE arm still host_submit_send+reactor_h1 (P5-lite hybrid).
+// Dense TLS bulk flush — reactor law (Plan R2 §4).
+// residual-first → SSL_write(REACTOR_SEAL_WINDOW) → drain wBIO write until EAGAIN → single residual.
+// NO soft_cq between full CT windows. NO dual_ct_try_ahead on this path.
+//
+// Platforms:
+//   Darwin H1 oneshot + H2: product path (EVFILT_WRITE residual arm via kqueue).
+//   Linux H1 oneshot only: same dense loop; residual arm = host_submit_send + reactor_h1
+//     so residual CQE is not charged as soft_cq_send_completes (CRITIC_IO_URING A5).
+//   Linux H2 / stream: stay dual-CT (not this multi-window loop).
+// Progressive stream: residual-first in tls_stream.odin (Darwin).
 
 import "core:c"
 import "core:log"
@@ -115,15 +119,21 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 		}
 
 		// Fairness preempt (D9): stop this entry (2 MiB / 16×128KiB). No soft-CQ.
-		// Re-arm WRITE for re-entry (bodies >2MiB / multi-conn); s1m stays under cap.
+		// Darwin: re-arm WRITE for re-entry (bodies >2MiB / multi-conn); s1m under cap.
+		// Linux: no empty-residual WRITE; keep sealing until EAGAIN residual arm or done
+		// (natural yield at residual CQE re-entry resets counters).
 		if reactor_fairness_hit(plain_sealed, windows) {
-			if h2 || tls_plain_total_remaining(conn) > 0 {
-				_ = reactor_arm_fairness_continue(conn)
-				if h2 {
-					_ = tls_host_arm_recv(conn)
+			when ODIN_OS == .Darwin {
+				if h2 || tls_plain_total_remaining(conn) > 0 {
+					_ = reactor_arm_fairness_continue(conn)
+					if h2 {
+						_ = tls_host_arm_recv(conn)
+					}
 				}
+				return
+			} else {
+				// Continue dense multi-window until backpressure or plain drained.
 			}
-			return
 		}
 
 		// SSL_write one trunk window (REACTOR_SEAL_WINDOW).
@@ -368,10 +378,14 @@ reactor_send_ct_view :: proc(conn: ^Connection, view: []u8) -> (again: bool, har
 
 // reactor_drain_wbio: push wBIO CT to the socket until empty or EAGAIN.
 //
-// Single product path (cached tls_wbio):
-//   bio_pending_out_bio / bio_peek_out_bio → reactor_send_ct_view → bio_reset_out_bio
-// Else ssl-based peek; else BIO_read into dual_ct.tx.
-// Peek: BIO_get_mem_data view → send → on partial copy rem only into residual → BIO_reset.
+// Product bulk path (item 3 — peek-only, no full CT memmove):
+//   cached tls_wbio + bio_pending/peek/reset_out_bio → reactor_send_ct_view → bio_reset
+//   Full window: zero-copy send from mem-BIO; partial: copy rem only into residual.
+// Never falls through to BIO_read when peek is available (healthy OpenSSL product).
+//
+// Cold path only: provider without peek support → BIO_read into dual_ct.tx (counted;
+// expect 0 on bulk matrix). Dual-CT seal engines still use bio_read_net for hold staging
+// (not this drain).
 //
 // R-ORDER: residual in dual_ct.tx forbids SSL_write until drained (caller residual-first).
 // Used by H1/H2 reactor flush and Darwin HS WANT_WRITE drain.
@@ -383,13 +397,22 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
 	wbio := conn.tls_wbio
-	dst := conn.dual_ct.tx
 	// Prefer direct-bio ops when wbio cached and Provider wires bio_*_out_bio.
 	use_bio := wbio != nil && p != nil && p.bio_pending_out_bio != nil &&
 		p.bio_peek_out_bio != nil && p.bio_reset_out_bio != nil
+	// Lazy re-cache: accept always sets tls_wbio; if cleared but get_wbio lives, recover.
+	if !use_bio && wbio == nil && p != nil && p.get_wbio != nil && ssl != nil {
+		wbio = tls_server.get_wbio(p, ssl)
+		if wbio != nil {
+			conn.tls_wbio = wbio
+			use_bio = p.bio_pending_out_bio != nil &&
+				p.bio_peek_out_bio != nil && p.bio_reset_out_bio != nil
+		}
+	}
+	use_peek := use_bio || tls_server.bio_peek_supported(p)
 
-	// --- Peek path (one loop; bio or ssl-based) ---
-	if use_bio || tls_server.bio_peek_supported(p) {
+	// --- Zero-copy peek path (product bulk; no BIO_read) ---
+	if use_peek {
 		for {
 			pending := 0
 			if use_bio {
@@ -410,7 +433,10 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 			t_bio1 := path_metrics_cyc_now()
 			path_metrics_note_seal_cycles(0, t_bio1 - t_bio0)
 			if len(view) == 0 {
-				break // fall through to BIO_read
+				// Pending but no mem view — pathological; do not BIO_read (memmove tax).
+				path_metrics_note_wbio_peek_empty()
+				_wire_fail(conn, "reactor wBIO peek empty pending=%d fd=%v", pending, conn.socket)
+				return false, true
 			}
 			tls_metrics_note_ct(conn.server, u64(len(view)))
 			tls_metrics_inc_seal(conn.server)
@@ -430,12 +456,11 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 				return true, false
 			}
 		}
-		if reactor_bio_pending(conn) <= 0 {
-			return false, false
-		}
 	}
 
-	// --- Fallback: BIO_read into dual_ct.tx then send ---
+	// --- Cold: no peek support → BIO_read into dual_ct.tx (counted; product expect 0) ---
+	path_metrics_note_wbio_bio_read_fallback()
+	dst := conn.dual_ct.tx
 	if len(dst) == 0 {
 		return false, true
 	}
@@ -475,8 +500,9 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 }
 
 // reactor_finish_oneshot: clean oneshot exchange after full CT + plain drained.
-// Defer clean_request_loop to end of kevent turn — sync finish often runs nested
-// inside scanner/handler (respond → flush → here); reentrant conn_handle_req UAF.
+// Darwin: defer clean_request_loop to end of kevent turn — sync finish often runs
+// nested inside scanner/handler (respond → flush → here); reentrant conn_handle_req UAF.
+// Linux: dual-CT already finished with direct clean_request_loop; same here.
 @(private)
 reactor_finish_oneshot :: proc(conn: ^Connection) {
 	if conn == nil {
@@ -490,7 +516,11 @@ reactor_finish_oneshot :: proc(conn: ^Connection) {
 		pt_release(&conn.pt, conn.pt.admitted)
 	}
 	path_metrics_note_req()
-	reactor_defer_clean(conn)
+	when ODIN_OS == .Darwin {
+		reactor_defer_clean(conn)
+	} else {
+		clean_request_loop(conn)
+	}
 }
 
 // reactor_finish_h2: duplex arm + exchange finish after h2_out/wBIO/residual empty.

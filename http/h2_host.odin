@@ -458,6 +458,37 @@ h2_host_send_response :: proc(conn: ^Connection, r: ^Response) {
 	hdrs.allocator = context.temp_allocator
 	h2_response_headers_from(r, &hdrs)
 
+	// Item 5: pre-size h2_out for HEADERS scrap + framed body under current
+	// send windows (not full multi-MiB when windows are still 64 KiB — flush
+	// re-reserves as WINDOW_UPDATE drains pending). Stops geometric
+	// _append_elems growth on bulk oneshot.
+	{
+		max_frame := int(conn.h2.peer_settings.max_frame_size)
+		if max_frame <= 0 {
+			max_frame = http2.DEFAULT_MAX_FRAME_SIZE
+		}
+		// HEADERS block is small after HPACK; 256B headroom is enough for matrix
+		// response headers (:status + content-type + date).
+		http2.frame_dst_reserve_data(&conn.h2_out, 256, max_frame)
+		if len(body) > 0 {
+			// Only reserve for what we can emit now (stream + conn windows).
+			// Remainder lands in stream.pending and is framed on WINDOW_UPDATE.
+			win := min(conn.h2.send_window, i64(len(body)))
+			// Stream may not exist yet; peer initial window is the bound.
+			sw := i64(conn.h2.peer_settings.initial_window_size)
+			if s, ok := conn.h2.streams[sid]; ok && s != nil {
+				sw = s.send_window
+			}
+			win = min(win, sw)
+			if win < 0 {
+				win = 0
+			}
+			if win > 0 {
+				http2.frame_dst_reserve_data(&conn.h2_out, int(win), max_frame)
+			}
+		}
+	}
+
 	http2.conn_send_response(&conn.h2, &conn.h2_out, sid, hdrs[:], body)
 	h2_host_flush_out(conn)
 	h2_host_maybe_finish_exchange(conn)

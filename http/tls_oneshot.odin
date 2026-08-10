@@ -103,9 +103,10 @@ tls_plain_clear :: proc(conn: ^Connection) {
 // tls_dual_ct_try_ahead with .Oneshot).
 
 // tls_host_flush_response: window plain → SSL_write → drain CT → submit.
-// Linux: dual-CT (try_ahead while send inflight). Darwin H1 oneshot: reactor_tls_flush
-// (until-EAGAIN + single residual; no soft-CQ between windows). Clear-H1 is non-TLS
-// and never enters here. Stream/H2 use their own flush entry points.
+// H1 oneshot product (Darwin + Linux): reactor_tls_flush — dense multi-window
+// until-EAGAIN + single residual; no soft_cq between seals; no dual_ct_try_ahead.
+// Linux residual arm: host_submit_send + reactor_h1 (CQE not soft_cq).
+// Linux H2 / stream: dual-CT below. Clear-H1 is non-TLS and never enters here.
 @(private)
 tls_host_flush_response :: proc(conn: ^Connection) {
 	if conn == nil || conn.tls_ssl == nil {
@@ -115,8 +116,8 @@ tls_host_flush_response :: proc(conn: ^Connection) {
 		return
 	}
 
-	when ODIN_OS == .Darwin {
-		// H1 oneshot product path → reactor. (H2: h2_host_flush_out; stream: tls_stream.)
+	// H1 oneshot product path → dense reactor flush (H2: h2_host_flush_out; stream: tls_stream).
+	when ODIN_OS == .Darwin || ODIN_OS == .Linux {
 		if !conn.h2_active && !tls_host_stream_long_lived(conn) {
 			reactor_tls_flush(conn)
 			return

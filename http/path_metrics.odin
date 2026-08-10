@@ -32,12 +32,17 @@ path_materialize:    u64
 // seal_windows: SSL_write windows on reactor_tls_flush (H1 oneshot + H2); not stream.
 // kevent_turns: reactor_tls_flush entries (proxy for seal_windows_per_kevent_turn).
 // soft_cq_send_completes: proactor send CQE without reactor_h1 — expect ~0 on Darwin
-//   pure H1/H2 TLS bulk matrix cells; clear-H1 cells still charge; residual arms do not.
+//   pure H1/H2 TLS bulk and Linux H1 oneshot dense flush; clear-H1 / dual-CT H2 still charge;
+//   residual arms (reactor_h1) do not.
 // eagain_arms: residual WRITE arms after EAGAIN (reactor_arm_write_residual).
+// wbio_bio_read_fallback: reactor_drain_wbio took BIO_read cold path (expect 0 on product bulk).
+// wbio_peek_empty: pending>0 but BIO_get_mem_data view empty (pathological; expect 0).
 path_seal_windows:            u64
 path_kevent_turns:            u64
 path_soft_cq_send_completes:  u64
 path_eagain_arms:             u64
+path_wbio_bio_read_fallback:  u64
+path_wbio_peek_empty:         u64
 // First SSL_write plain bytes per oneshot response (coalesce / density honesty).
 path_first_seal_pt_sum:       u64
 path_first_seal_n:            u64
@@ -154,6 +159,16 @@ path_metrics_note_eagain_arm :: #force_inline proc "contextless" () {
 	sync.atomic_add(&path_eagain_arms, 1)
 }
 
+// Cold BIO_read drain entry (product bulk must stay peek-only → expect 0).
+path_metrics_note_wbio_bio_read_fallback :: #force_inline proc "contextless" () {
+	sync.atomic_add(&path_wbio_bio_read_fallback, 1)
+}
+
+// Peek drain: pending CT but empty mem view (should not happen on mem-BIO).
+path_metrics_note_wbio_peek_empty :: #force_inline proc "contextless" () {
+	sync.atomic_add(&path_wbio_peek_empty, 1)
+}
+
 // First successful SSL_write plain size for an oneshot response (after arm).
 path_metrics_note_first_seal_pt :: #force_inline proc "contextless" (pt: u64) {
 	if pt != 0 {
@@ -182,7 +197,10 @@ path_metrics_io_engine :: proc() -> string {
 path_metrics_io_engine_note :: proc() -> string {
 	when ODIN_OS == .Darwin {
 		// Honesty: shared multi-kq listen (scale), level R/W, wBIO peek+cache, 128KiB seal.
-		return "reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_drain;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead"
+		return "reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_only;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead"
+	} else when ODIN_OS == .Linux {
+		// H1 oneshot dense flush (soft_cq=0 between seals); residual arm = submit_send+reactor_h1.
+		return "dense_tls_flush_h1;host_try_send_nb;residual_submit_send_reactor_h1;no_soft_cq_between_seals;seal_128k;wbio_peek_only;no_dual_ct_ahead_h1;h2_dual_ct"
 	} else {
 		return ""
 	}
@@ -202,6 +220,8 @@ path_metrics_reset :: proc() {
 	sync.atomic_store(&path_kevent_turns, 0)
 	sync.atomic_store(&path_soft_cq_send_completes, 0)
 	sync.atomic_store(&path_eagain_arms, 0)
+	sync.atomic_store(&path_wbio_bio_read_fallback, 0)
+	sync.atomic_store(&path_wbio_peek_empty, 0)
 	sync.atomic_store(&path_first_seal_pt_sum, 0)
 	sync.atomic_store(&path_first_seal_n, 0)
 	sync.atomic_store(&path_seal_cyc, 0)
@@ -237,6 +257,8 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	kturns := sync.atomic_load(&path_kevent_turns)
 	soft_cq := sync.atomic_load(&path_soft_cq_send_completes)
 	eagain := sync.atomic_load(&path_eagain_arms)
+	wbio_br := sync.atomic_load(&path_wbio_bio_read_fallback)
+	wbio_pe := sync.atomic_load(&path_wbio_peek_empty)
 	// Expansion ratios help spot seal overhead.
 	ratio: f64 = 0
 	if pt > 0 {
@@ -274,6 +296,8 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	fmt.sbprintf(&b, "seal_windows_per_kevent_turn=%.3f\n", sw_per_turn)
 	fmt.sbprintf(&b, "soft_cq_send_completes=%d\n", soft_cq)
 	fmt.sbprintf(&b, "eagain_arms=%d\n", eagain)
+	fmt.sbprintf(&b, "wbio_bio_read_fallback=%d\n", wbio_br)
+	fmt.sbprintf(&b, "wbio_peek_empty=%d\n", wbio_pe)
 	first_sum := sync.atomic_load(&path_first_seal_pt_sum)
 	first_n := sync.atomic_load(&path_first_seal_n)
 	first_avg: f64 = 0

@@ -50,9 +50,9 @@ Provider :: struct {
 	bio_write_net:    proc(self: ^Provider, ssl: Conn, data: rawptr, n: c.int) -> c.int,
 	bio_read_net:     proc(self: ^Provider, ssl: Conn, buf: rawptr, n: c.int) -> c.int,
 	bio_pending_out:  proc(self: ^Provider, ssl: Conn) -> c.int,
-	// Optional zero-copy wBIO view (mem-BIO BIO_get_mem_data). out_ptr → internal buf;
+	// Zero-copy wBIO view (mem-BIO BIO_get_mem_data). out_ptr → internal buf;
 	// returns len. Valid only until bio_reset_out or further SSL/BIO ops.
-	// nil procs = unsupported (callers fall back to bio_read_net).
+	// Product OpenSSL requires these (reactor_drain_wbio peek-only). nil = cold BIO_read only.
 	bio_peek_out:     proc(self: ^Provider, ssl: Conn, out_ptr: ^rawptr) -> c.int,
 	bio_reset_out:    proc(self: ^Provider, ssl: Conn) -> c.int,
 	// Hot-path: SSL_get_wbio once; then bio_*_out_bio(wbio) avoids get_wbio each drain.

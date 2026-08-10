@@ -1,279 +1,151 @@
---- stats proactr h2.plaintext ---
-peer=proactr
-reqs=2689133
-seal_calls=2689133
-ssl_write_ok=1
-pt_bytes=180162146
-ct_bytes=239323072
-ct_pt_ratio=1.3284
-h2_flush=2689132
-h2_pt_bytes=180162044
-ct_sends=2689133
-materialize=1
---- stats proactr h2.s4k ---
-peer=proactr
-reqs=2302957
-seal_calls=2302957
-ssl_write_ok=1
-pt_bytes=9556441102
-ct_bytes=9607106156
-ct_pt_ratio=1.0053
-h2_flush=2302956
-h2_pt_bytes=9556441000
-ct_sends=2302957
-materialize=1
---- stats proactr h2.s64k ---
-peer=proactr
-reqs=88082
-seal_calls=175963
-ssl_write_ok=1
-pt_bytes=5766491279
-ct_bytes=5768429083
-ct_pt_ratio=1.0003
-h2_flush=175962
-h2_pt_bytes=5766491177
-ct_sends=175963
-materialize=1
---- stats proactr h2.s1m ---
-peer=proactr
-reqs=14879
-seal_calls=249899
-ssl_write_ok=1
-pt_bytes=15411389460
-ct_bytes=15411716798
-ct_pt_ratio=1.0000
-h2_flush=249898
-h2_pt_bytes=15411389358
-ct_sends=249899
-materialize=1
 --- stats proactr h1s.plaintext ---
 peer=proactr
-reqs=3112416
-seal_calls=3112416
-ssl_write_ok=3112416
-pt_bytes=351702997
-ct_bytes=420176149
-ct_pt_ratio=1.1947
+io_engine=proactor-uring
+io_engine_note=dense_tls_flush_h1;host_try_send_nb;residual_submit_send_reactor_h1;no_soft_cq_between_seals;seal_128k;wbio_peek_drain;no_dual_ct_ahead_h1;h2_dual_ct
+reqs=1911017
+seal_calls=1911017
+seals_per_req=1.000
+ssl_write_ok=1911017
+pt_bytes=215944910
+ct_bytes=258081274
+ct_pt_ratio=1.1951
 h2_flush=0
 h2_pt_bytes=0
-ct_sends=3112416
-materialize=3112416
+ct_sends=1911119
+materialize=1911017
+seal_windows=1911017
+kevent_turns=1911017
+seal_windows_per_kevent_turn=1.000
+soft_cq_send_completes=102
+eagain_arms=0
+first_seal_pt_sum=215944910
+first_seal_n=1911017
+first_seal_pt_avg=113.0
 --- stats proactr h1s.s4k ---
 peer=proactr
-reqs=2809505
-seal_calls=2809505
-ssl_write_ok=2809505
-pt_bytes=11794297894
-ct_bytes=11856107004
-ct_pt_ratio=1.0052
+io_engine=proactor-uring
+io_engine_note=dense_tls_flush_h1;host_try_send_nb;residual_submit_send_reactor_h1;no_soft_cq_between_seals;seal_128k;wbio_peek_drain;no_dual_ct_ahead_h1;h2_dual_ct
+reqs=1780149
+seal_calls=1780149
+seals_per_req=1.000
+ssl_write_ok=1780149
+pt_bytes=7473061406
+ct_bytes=7512318674
+ct_pt_ratio=1.0053
 h2_flush=0
 h2_pt_bytes=0
-ct_sends=2809505
-materialize=2809505
+ct_sends=1780251
+materialize=1780149
+seal_windows=1780149
+kevent_turns=1780149
+seal_windows_per_kevent_turn=1.000
+soft_cq_send_completes=102
+eagain_arms=0
+first_seal_pt_sum=7473061406
+first_seal_n=1780149
+first_seal_pt_avg=4198.0
 --- stats proactr h1s.s64k ---
 peer=proactr
-reqs=159556
-seal_calls=319111
-ssl_write_ok=319111
-pt_bytes=10473030747
-ct_bytes=10476540979
-ct_pt_ratio=1.0003
+io_engine=proactor-uring
+io_engine_note=dense_tls_flush_h1;host_try_send_nb;residual_submit_send_reactor_h1;no_soft_cq_between_seals;seal_128k;wbio_peek_drain;no_dual_ct_ahead_h1;h2_dual_ct
+reqs=517630
+seal_calls=1035259
+seals_per_req=2.000
+ssl_write_ok=1035259
+pt_bytes=33976650033
+ct_bytes=34033683235
+ct_pt_ratio=1.0017
 h2_flush=0
 h2_pt_bytes=0
-ct_sends=319111
-materialize=159556
+ct_sends=1035361
+materialize=1
+seal_windows=1035259
+kevent_turns=517630
+seal_windows_per_kevent_turn=2.000
+soft_cq_send_completes=102
+eagain_arms=0
+first_seal_pt_sum=53315889
+first_seal_n=517630
+first_seal_pt_avg=103.0
 --- stats proactr h1s.s1m ---
 peer=proactr
-reqs=57186
-seal_calls=972219
-ssl_write_ok=972219
-pt_bytes=59973607215
-ct_bytes=59974865307
-ct_pt_ratio=1.0000
+io_engine=proactor-uring
+io_engine_note=dense_tls_flush_h1;host_try_send_nb;residual_submit_send_reactor_h1;no_soft_cq_between_seals;seal_128k;wbio_peek_drain;no_dual_ct_ahead_h1;h2_dual_ct
+reqs=48635
+seal_calls=437718
+seals_per_req=9.000
+ssl_write_ok=437718
+pt_bytes=51002731714
+ct_bytes=51072373974
+ct_pt_ratio=1.0014
 h2_flush=0
 h2_pt_bytes=0
-ct_sends=972219
-materialize=57192
+ct_sends=437820
+materialize=1
+seal_windows=437718
+kevent_turns=48637
+seal_windows_per_kevent_turn=9.000
+soft_cq_send_completes=102
+eagain_arms=0
+first_seal_pt_sum=5106882
+first_seal_n=48637
+first_seal_pt_avg=105.0
 --- stats proactr final ---
 peer=proactr
-reqs=57187
-seal_calls=972220
-ssl_write_ok=972220
-pt_bytes=59973607498
-ct_bytes=59974865612
-ct_pt_ratio=1.0000
+io_engine=proactor-uring
+io_engine_note=dense_tls_flush_h1;host_try_send_nb;residual_submit_send_reactor_h1;no_soft_cq_between_seals;seal_128k;wbio_peek_drain;no_dual_ct_ahead_h1;h2_dual_ct
+reqs=48636
+seal_calls=437719
+seals_per_req=9.000
+ssl_write_ok=437719
+pt_bytes=51002732387
+ct_bytes=51072376559
+ct_pt_ratio=1.0014
 h2_flush=0
 h2_pt_bytes=0
-ct_sends=972220
-materialize=57193
---- stats ntex h2.plaintext ---
-peer=ntex
-reqs=1956778
-bytes=25438114
-tls=openssl
-io=neon-uring
---- stats ntex h2.s4k ---
-peer=ntex
-reqs=1875599
-bytes=7682453504
-tls=openssl
-io=neon-uring
---- stats ntex h2.s64k ---
-peer=ntex
-reqs=526742
-bytes=34520563712
-tls=openssl
-io=neon-uring
---- stats ntex h2.s1m ---
-peer=ntex
-reqs=17310
-bytes=18150850560
-tls=openssl
-io=neon-uring
---- stats ntex h1s.plaintext ---
-peer=ntex
-reqs=2837789
-bytes=36891257
-tls=openssl
-io=neon-uring
---- stats ntex h1s.s4k ---
-peer=ntex
-reqs=2295162
-bytes=9400983552
-tls=openssl
-io=neon-uring
---- stats ntex h1s.s64k ---
-peer=ntex
-reqs=633893
-bytes=41542811648
-tls=openssl
-io=neon-uring
---- stats ntex h1s.s1m ---
-peer=ntex
-reqs=27340
-bytes=28668067840
-tls=openssl
-io=neon-uring
---- stats ntex final ---
-peer=ntex
-reqs=27340
-bytes=28668067840
-tls=openssl
-io=neon-uring
---- stats drogon h2.plaintext ---
+ct_sends=437823
+materialize=2
+seal_windows=437719
+kevent_turns=48638
+seal_windows_per_kevent_turn=9.000
+soft_cq_send_completes=104
+eagain_arms=0
+first_seal_pt_sum=5107555
+first_seal_n=48638
+first_seal_pt_avg=105.0
+--- stats drogon h1s.plaintext ---
 peer=drogon
-reqs=3007626
-bytes=39099138
+reqs=2065631
+bytes=26853203
 tls=openssl
 io=trantor/epoll
 h2=limited_or_none
-y0~pBsx0`p0`pupqupI~pquprup`p`p uupBs--- stats drogon h2.s4k ---
+y0ms-TIx@ms@msomsomsImsomsoms@msms oms-TIx--- stats drogon h1s.s4k ---
 peer=drogon
-reqs=2901456
-bytes=11884363776
+reqs=1738173
+bytes=7119556608
 tls=openssl
 io=trantor/epoll
 h2=limited_or_none
-pBsxPTpPTpupaupI~paupbup	TpTp eupBs--- stats drogon h2.s64k ---
+ms-TIx|ms|msomsaomsImsaomsboms|ms|ms eoms-TIx--- stats drogon h1s.s64k ---
 peer=drogon
-reqs=794492
-bytes=52067827712
+reqs=441237
+bytes=28916908032
 tls=openssl
 io=trantor/epoll
 h2=limited_or_none
-~pBsx`	pp`	pp|p|pI~p|p|pppzpp |pBs--- stats drogon h2.s1m ---
+ms-TIxmsmsomsomsImsomsoms (ms ms oms-TIx--- stats drogon h1s.s1m ---
 peer=drogon
-reqs=65347
-bytes=68521295872
+reqs=35422
+bytes=37142659072
 tls=openssl
 io=trantor/epoll
 h2=limited_or_none
-0~pBsx`pp`pp|p|pI~p|p|p@ppzpp |pBs--- stats drogon h1s.plaintext ---
+0ms-TIxdmsdmswmswmsImswmswmsPdmsydms wms-TIx--- stats drogon final ---
 peer=drogon
-reqs=3190520
-bytes=41476760
+reqs=35422
+bytes=37142659072
 tls=openssl
 io=trantor/epoll
 h2=limited_or_none
-y0~pBsx\p\pvpvpI~pvpvp6\p \p vpBs--- stats drogon h1s.s4k ---
-peer=drogon
-reqs=2758402
-bytes=11298414592
-tls=openssl
-io=trantor/epoll
-h2=limited_or_none
-pBsxpppp|p|pI~p|p|pppPpp |pBs--- stats drogon h1s.s64k ---
-peer=drogon
-reqs=738306
-bytes=48385622016
-tls=openssl
-io=trantor/epoll
-h2=limited_or_none
-~pBsxhphpvpvpI~pvpvp0hp hp vpBs--- stats drogon h1s.s1m ---
-peer=drogon
-reqs=68157
-bytes=71467794432
-tls=openssl
-io=trantor/epoll
-h2=limited_or_none
-0~pBsx0`p0`pupqupI~pquprupp`p0`p uupBs--- stats drogon final ---
-peer=drogon
-reqs=68157
-bytes=71467794432
-tls=openssl
-io=trantor/epoll
-h2=limited_or_none
-0~pBsx'hp'hpvpvpI~pvpvpphpPhp vpBs--- stats go h2.plaintext ---
-peer=go
-reqs=1366699
-bytes=17767087
-tls=crypto/tls
-io=net/http
---- stats go h2.s4k ---
-peer=go
-reqs=1312301
-bytes=5375184896
-tls=crypto/tls
-io=net/http
---- stats go h2.s64k ---
-peer=go
-reqs=482193
-bytes=31600934912
-tls=crypto/tls
-io=net/http
---- stats go h2.s1m ---
-peer=go
-reqs=51139
-bytes=53589573632
-tls=crypto/tls
-io=net/http
---- stats go h1s.plaintext ---
-peer=go
-reqs=2532004
-bytes=32916052
-tls=crypto/tls
-io=net/http
---- stats go h1s.s4k ---
-peer=go
-reqs=1529525
-bytes=6264934400
-tls=crypto/tls
-io=net/http
---- stats go h1s.s64k ---
-peer=go
-reqs=683704
-bytes=44807225344
-tls=crypto/tls
-io=net/http
---- stats go h1s.s1m ---
-peer=go
-reqs=70549
-bytes=73975988224
-tls=crypto/tls
-io=net/http
---- stats go final ---
-peer=go
-reqs=70549
-bytes=73975988224
-tls=crypto/tls
-io=net/http
+0ms-TIxcxmscxmsmsqmsImsqmsrms%xmsyxms ums-TIx

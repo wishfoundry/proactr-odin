@@ -632,6 +632,7 @@ tls_seal_window_h2 :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plain_n:
 // tls_dual_ct_try_ahead: seal next plain window into free CT slab while send is inflight.
 // Failure: Stream → session Client_Gone; Oneshot/H2 → connection_close.
 // Darwin: no-op — product TLS uses reactor residual law (no ahead-seal over CQE).
+// Linux H1 oneshot dense path never calls this; guard residual/reactor_h1 anyway.
 @(private)
 tls_dual_ct_try_ahead :: proc(conn: ^Connection, plain: Tls_Seal_Plain) {
 	when ODIN_OS == .Darwin {
@@ -640,6 +641,10 @@ tls_dual_ct_try_ahead :: proc(conn: ^Connection, plain: Tls_Seal_Plain) {
 		return
 	}
 	if conn == nil {
+		return
+	}
+	// Dense residual owns dual_ct.tx — do not ahead-seal over it.
+	if conn.reactor_h1 || conn.reactor_res_n > 0 {
 		return
 	}
 	switch plain {

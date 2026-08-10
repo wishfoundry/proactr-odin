@@ -123,8 +123,19 @@ tls_host_on_accept :: proc(conn: ^Connection) -> bool {
 		tls_server.conn_free(p, ssl)
 		return false
 	}
-	// Cache wBIO once — reactor drain/pending avoid SSL_get_wbio per iteration.
+	// Cache wBIO once — product bulk drain uses bio_*_out_bio (peek-only, no BIO_read).
 	wbio := tls_server.get_wbio(p, ssl)
+	if wbio == nil {
+		// Product OpenSSL always wires get_wbio after mem-BIO setup; nil → no peek-only path.
+		log.errorf("TLS: get_wbio nil after setup_mem_bios fd=%v (peek drain unavailable)", conn.socket)
+		tls_server.conn_free(p, ssl)
+		return false
+	}
+	if !tls_server.bio_peek_supported(p) {
+		log.errorf("TLS: bio peek unsupported fd=%v (product requires zero-copy wBIO drain)", conn.socket)
+		tls_server.conn_free(p, ssl)
+		return false
+	}
 	// Accepting server; partial write for windowed response seal.
 	_ = tls_server.set_mode(
 		p,
@@ -606,9 +617,10 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 		return false
 	}
 
-	// Darwin reactor residual WRITE CQE: single residual region — continue flush law
-	// (HS / H2 / oneshot demux inside reactor_on_send_complete). No dual-CT promote.
-	when ODIN_OS == .Darwin {
+	// Residual WRITE CQE (Darwin EVFILT_WRITE or Linux io_uring submit_send+reactor_h1):
+	// single residual region — continue flush law (HS / H2 / oneshot demux inside
+	// reactor_on_send_complete). No dual-CT promote; CQE not charged as soft_cq.
+	when ODIN_OS == .Darwin || ODIN_OS == .Linux {
 		if conn.reactor_h1 {
 			return reactor_on_send_complete(conn)
 		}

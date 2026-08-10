@@ -90,6 +90,11 @@ Http2_Stream :: struct {
 	// Fairness (PR10): SSE / session streams get more RR quanta than bulk oneshots.
 	// Set by host (e.g. sse_start); default false = bulk weight.
 	interactive:  bool,
+
+	// Inbound WINDOW_UPDATE credit coalesced across DATA frames in one
+	// conn_feed (item 5). Flushed at end of feed — fewer 13-byte frames than
+	// 1:1 per DATA when a peer ships multi-frame bodies in one read.
+	wu_pending:   u32,
 }
 
 Http2_Connection :: struct {
@@ -156,6 +161,10 @@ Http2_Connection :: struct {
 	// bulk gets weight_bulk. Host copies from Server_Opts on open.
 	weight_interactive: u8,
 	weight_bulk:        u8,
+
+	// Connection-level inbound WINDOW_UPDATE credit pending flush (item 5).
+	// Coalesced across all DATA in one conn_feed; see _flush_window_credits.
+	wu_conn_pending: u32,
 }
 
 conn_init :: proc(c: ^Http2_Connection, is_server: bool, allocator := context.allocator) {
@@ -260,6 +269,10 @@ conn_send_response :: proc(
 
 // Feed received bytes; parse all complete frames, update state, and append any
 // automatic replies (SETTINGS/PING ACKs) to `out`.
+//
+// Inbound DATA WINDOW_UPDATE grants are coalesced for the duration of this
+// call and flushed once before return (item 5) — same total credit, fewer frames
+// when a peer ships multi-frame bodies in one read.
 conn_feed :: proc(c: ^Http2_Connection, data: []u8, out: ^[dynamic]u8) -> H2_Error {
 	append(&c.rx, ..data)
 
@@ -280,13 +293,64 @@ conn_feed :: proc(c: ^Http2_Connection, data: []u8, out: ^[dynamic]u8) -> H2_Err
 		if ferr == .Incomplete do break
 		if ferr == .Too_Large do return _fail(c, H2_FRAME_SIZE_ERROR, .Frame)
 		if ferr != .None do return _fail(c, H2_PROTOCOL_ERROR, .Frame)
-		_handle_frame(c, h, payload, out) or_return
+		if err := _handle_frame(c, h, payload, out); err != .None {
+			// Drop unflushed credits on hard fail (GOAWAY path); peer is done.
+			c.wu_conn_pending = 0
+			return err
+		}
 		pos += consumed
 	}
 	if pos > 0 do remove_range(&c.rx, 0, pos)
+	// Coalesced inbound flow-control grants for this feed.
+	_flush_window_credits(c, out)
 	// WINDOW_UPDATE / RST / completed responses may have closed streams.
 	conn_reap_streams(c)
 	return .None
+}
+
+// Emit pending connection + stream WINDOW_UPDATE frames accumulated during
+// conn_feed. Cap each increment at 2^31-1 (RFC 9113 §6.9.1).
+@(private)
+_flush_window_credits :: proc(c: ^Http2_Connection, out: ^[dynamic]u8) {
+	if c == nil || out == nil {
+		return
+	}
+	// Rough upper bound: 1 conn WU + 1 per open stream (13 bytes each).
+	n_stream := 0
+	for _, s in c.streams {
+		if s != nil && s.wu_pending > 0 {
+			n_stream += 1
+		}
+	}
+	if c.wu_conn_pending > 0 || n_stream > 0 {
+		// Reserve once so multi-stream bulk feed doesn't grow per WU.
+		want := len(out^) + (1 + n_stream) * (FRAME_HEADER_LEN + 4)
+		if cap(out^) < want {
+			reserve(out, want)
+		}
+	}
+	if c.wu_conn_pending > 0 {
+		inc := c.wu_conn_pending
+		c.wu_conn_pending = 0
+		// Split if somehow over the max legal increment (pathological).
+		for inc > 0 {
+			chunk := min(inc, u32(0x7fff_ffff))
+			window_update_write(out, 0, chunk)
+			inc -= chunk
+		}
+	}
+	for id, s in c.streams {
+		if s == nil || s.wu_pending == 0 {
+			continue
+		}
+		inc := s.wu_pending
+		s.wu_pending = 0
+		for inc > 0 {
+			chunk := min(inc, u32(0x7fff_ffff))
+			window_update_write(out, id, chunk)
+			inc -= chunk
+		}
+	}
 }
 
 @(private)
@@ -409,9 +473,16 @@ _handle_frame :: proc(c: ^Http2_Connection, h: Frame_Header, payload: []u8, out:
 		// peer back exactly what this frame consumed (the FULL payload length —
 		// padding counts, §6.9.1). Without this the peer stalls after one
 		// initial window (65535 bytes) and gives up.
+		//
+		// Coalesce across DATA frames in this conn_feed (item 5); flushed once
+		// in _flush_window_credits — same total credit, fewer frames on bulk.
 		if h.length > 0 {
-			window_update_write(out, 0, h.length)
-			if !s.end_stream do window_update_write(out, h.stream_id, h.length)
+			c.wu_conn_pending += h.length
+			// Stream credit only while the stream remains open remotely; the
+			// END_STREAM DATA itself still needs connection credit only.
+			if !s.end_stream {
+				s.wu_pending += h.length
+			}
 		}
 
 	case FRAME_PING:
@@ -443,6 +514,7 @@ _handle_frame :: proc(c: ^Http2_Connection, h: Frame_Header, payload: []u8, out:
 				s.error_code = H2_FLOW_CONTROL_ERROR
 				stream_pending_clear(s)
 				s.end_pending = false
+				s.wu_pending = 0
 				_stream_close(c, s)
 				return .None
 			}
@@ -465,6 +537,7 @@ _handle_frame :: proc(c: ^Http2_Connection, h: Frame_Header, payload: []u8, out:
 		s.error_code = get_u32(payload[:4])
 		stream_pending_clear(s)
 		s.end_pending = false
+		s.wu_pending = 0 // no stream WU after RST
 		_stream_close(c, s)
 
 	case FRAME_GOAWAY:

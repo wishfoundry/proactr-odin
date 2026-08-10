@@ -1,5 +1,5 @@
 // Plan R2 pure reactor law helpers (OS-invariant; unit-testable without kqueue/OpenSSL).
-// Darwin live path: tls_reactor_flush.odin (+build darwin). Linux ignores these for dual-CT.
+// Live path: tls_reactor_flush.odin (Darwin H1+H2; Linux H1 oneshot dense flush).
 package http
 
 // Reactor TLS seal trunk (D8): 128 KiB plain per SSL_write (fewer setups vs drogon 64).

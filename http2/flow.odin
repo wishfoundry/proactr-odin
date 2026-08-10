@@ -16,6 +16,10 @@
 // Bulk perf: unread body is tracked with `pending_off` (cursor). Advancing the
 // cursor is O(1); remove_range(front) was O(n) memmove per DATA frame and
 // dominated H2 s1m CPU on bastion (~72% memmove).
+//
+// Item 5 micros: pre-reserve framed `dst` / pending; sole-stream partial direct
+// DATA from the caller slice (avoids double-buffer of the portion that fits
+// windows now); single-copy frame_write (see frame.odin).
 package http2
 
 import "core:slice"
@@ -27,6 +31,14 @@ DEFAULT_WINDOW :: i64(65535) // RFC 9113 §6.9.2 initial connection/stream windo
 // Compact dead prefix only when large, so long-lived streams (SSE) don't retain
 // unbounded sealed bytes. Bulk oneshots clear fully when drained (no compact).
 PENDING_COMPACT_OFF :: 256 * 1024
+
+// Peer max frame size for this connection (fallback DEFAULT_MAX_FRAME_SIZE).
+@(private)
+_peer_max_frame :: #force_inline proc(c: ^Http2_Connection) -> i64 {
+	frame_cap := i64(c.peer_settings.max_frame_size)
+	if frame_cap <= 0 do frame_cap = i64(DEFAULT_MAX_FRAME_SIZE)
+	return frame_cap
+}
 
 // Send response/request HEADERS on `sid`. Pass `end_stream` for a bodyless
 // message; otherwise follow with conn_send_body.
@@ -40,6 +52,8 @@ conn_send_headers :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, sid: u32, hea
 	block.allocator = context.temp_allocator
 	// Use connection encoder dynamic table so repeated response headers compress.
 	hpack.encode(&block, headers, &c.enc)
+	// Reserve framed HEADERS once (encoded block is known).
+	frame_dst_reserve_data(dst, len(block), int(_peer_max_frame(c)))
 	flags := FLAG_END_HEADERS
 	if end_stream do flags |= FLAG_END_STREAM
 	frame_write(dst, FRAME_HEADERS, flags, sid, block[:])
@@ -71,11 +85,12 @@ _n_pending_streams :: proc(c: ^Http2_Connection) -> int {
 // number of bytes still buffered — i.e. the backpressure: >0 means the windows
 // are full and the caller should stop producing until a WINDOW_UPDATE arrives.
 //
-// Oneshot direct path (P0-3): when this stream's pending is empty, no other
-// stream is already pending, and the entire `data` fits current send windows,
-// DATA frames are written from `data` straight into `dst` (one copy via
-// frame_write). Skips append into stream.pending. Multi-stream / partial-window
-// still uses the pending path for fairness and WINDOW_UPDATE resume.
+// Sole-stream direct path (P0-3 + item 5): when this stream's pending is empty,
+// no other stream is already pending, and windows allow any credit, DATA frames
+// are written from `data` straight into `dst` for the allowed portion (one copy
+// via frame_write). Only the unsendable remainder is appended into
+// stream.pending — avoids full-body double-buffer when only the first window
+// fits (bulk s1m default windows). Multi-stream still uses pending for fairness.
 //
 // Lifetime: `data` must remain valid until this returns (frames are encoded
 // synchronously into `dst`). Host oneshot flushes before handler return; Static
@@ -86,22 +101,23 @@ _n_pending_streams :: proc(c: ^Http2_Connection) -> int {
 // (PR9 PERF-M1). A sole pending stream still drains fully via `_flush_stream`.
 conn_send_body :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, sid: u32, data: []u8, end_stream := false) -> (buffered: int) {
 	s := _get_or_make_stream(c, sid)
+	frame_cap := _peer_max_frame(c)
 
-	// Sole-stream oneshot: frame full body from caller's slice when windows allow.
+	// Sole-stream: frame as much of `data` as windows allow without pending copy.
 	if len(data) > 0 &&
 	   stream_pending_len(s) == 0 &&
 	   !s.end_pending &&
 	   !s.end_sent &&
 	   _n_pending_streams(c) == 0 {
 		allowed := min(s.send_window, c.send_window)
-		if allowed >= i64(len(data)) {
-			frame_cap := i64(c.peer_settings.max_frame_size)
-			if frame_cap <= 0 do frame_cap = i64(DEFAULT_MAX_FRAME_SIZE)
+		if allowed > 0 {
+			direct_n := min(int(allowed), len(data))
+			frame_dst_reserve_data(dst, direct_n, int(frame_cap))
 			off := 0
-			for off < len(data) {
-				n := min(int(frame_cap), len(data) - off)
-				last := off + n == len(data)
-				end := end_stream && last
+			for off < direct_n {
+				n := min(int(frame_cap), direct_n - off)
+				// END_STREAM only when the entire caller body is fully framed.
+				end := end_stream && (off + n == len(data))
 				flags: u8 = end ? FLAG_END_STREAM : 0
 				frame_write(dst, FRAME_DATA, flags, s.id, data[off:off + n])
 				s.send_window -= i64(n)
@@ -112,13 +128,30 @@ conn_send_body :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, sid: u32, data: 
 					_stream_maybe_close(c, s)
 				}
 			}
-			// No pending bytes — direct path fully drained.
+			if direct_n < len(data) {
+				// Remainder does not fit windows — one append, reserved once.
+				rest := data[direct_n:]
+				need := len(s.pending) + len(rest)
+				if cap(s.pending) < need {
+					reserve(&s.pending, need)
+				}
+				append(&s.pending, ..rest)
+				if end_stream do s.end_pending = true
+				buffered = stream_pending_len(s)
+				if end_stream || s.closed do conn_reap_streams(c)
+				return buffered
+			}
+			// Full body framed from caller slice.
 			if end_stream || s.closed do conn_reap_streams(c)
 			return 0
 		}
 	}
 
 	if len(data) > 0 {
+		need := len(s.pending) + len(data)
+		if cap(s.pending) < need {
+			reserve(&s.pending, need)
+		}
 		append(&s.pending, ..data)
 	}
 	if end_stream do s.end_pending = true
@@ -162,8 +195,7 @@ _flush_stream_one_frame :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, s: ^Htt
 		return false
 	}
 	// Peer SETTINGS_MAX_FRAME_SIZE caps outbound DATA; fall back to default.
-	frame_cap := i64(c.peer_settings.max_frame_size)
-	if frame_cap <= 0 do frame_cap = i64(DEFAULT_MAX_FRAME_SIZE)
+	frame_cap := _peer_max_frame(c)
 	if quantum > 0 {
 		frame_cap = min(frame_cap, quantum)
 	}
@@ -216,6 +248,14 @@ _flush_stream :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, s: ^Http2_Stream)
 	if _n_pending_streams(c) > 1 {
 		_flush_pending_rr(c, dst)
 		return
+	}
+	// Pre-size dst for the amount we can emit under current windows (one grow).
+	rem := stream_pending_len(s)
+	if rem > 0 {
+		allowed := min(s.send_window, c.send_window, i64(rem))
+		if allowed > 0 {
+			frame_dst_reserve_data(dst, int(allowed), int(_peer_max_frame(c)))
+		}
 	}
 	for _flush_stream_one_frame(c, dst, s, 0) {}
 }
@@ -271,6 +311,11 @@ _flush_pending_rr :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8) {
 		if len(sids) > 1 && c.send_window > 0 {
 			quantum = c.send_window / i64(len(sids))
 			if quantum <= 0 do quantum = 1
+		}
+
+		// Reserve for residual conn window once per pass (avoids per-frame grow).
+		if c.send_window > 0 {
+			frame_dst_reserve_data(dst, int(min(c.send_window, i64(1 << 20))), int(_peer_max_frame(c)))
 		}
 
 		made := false

@@ -83,6 +83,25 @@ test_window_update :: proc(t: ^testing.T) {
 	testing.expect_value(t, inc, u32(65535))
 }
 
+// Item 5: pre-reserve framed DATA capacity (payload + N×9 headers) in one grow.
+@(test)
+test_frame_dst_reserve_data :: proc(t: ^testing.T) {
+	buf: [dynamic]u8
+	defer delete(buf)
+	// 100 bytes under max_frame=40 → 3 frames → 100 + 3*9 = 127.
+	frame_dst_reserve_data(&buf, 100, 40)
+	testing.expect(t, cap(buf) >= 127, "reserve covers payload + frame headers")
+	// Writing must not reallocate (cap stable).
+	c0 := cap(buf)
+	p40: [40]u8
+	p20: [20]u8
+	frame_write(&buf, FRAME_DATA, 0, 1, p40[:])
+	frame_write(&buf, FRAME_DATA, 0, 1, p40[:])
+	frame_write(&buf, FRAME_DATA, FLAG_END_STREAM, 1, p20[:])
+	testing.expect_value(t, cap(buf), c0)
+	testing.expect_value(t, len(buf), 100 + 3*FRAME_HEADER_LEN)
+}
+
 @(test)
 test_client_preface :: proc(t: ^testing.T) {
 	// RFC 9113 §3.4 exact bytes.

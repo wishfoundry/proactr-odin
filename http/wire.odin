@@ -123,12 +123,12 @@ _wire_mem_done :: proc(conn: ^Connection) {
 // Linux: proactr submit_send (io_uring). Darwin P5: native reactor EVFILT_WRITE
 // (no proactr submit_send — separate reactor kqueue).
 //
-// Darwin TLS residual arms set conn.reactor_h1 = true *before* calling this so
+// TLS residual arms set conn.reactor_h1 = true *before* calling this so
 // soft_cq_send_completes is not charged and write demuxes to reactor_on_send_complete.
-// Full CT windows on Darwin TLS never call this between seals — host_try_send_nb
-// until EAGAIN, then residual arm only.
+// Full CT windows on dense H1 flush never call this between seals — host_try_send_nb
+// until EAGAIN, then residual arm only (Darwin: kqueue WRITE; Linux: submit_send+reactor_h1).
 //
-// Clear-H1 and Linux dual-CT call without reactor_h1; Linux CQEs charge soft_cq.
+// Clear-H1 and Linux dual-CT (H2/stream) call without reactor_h1; those CQEs charge soft_cq.
 @(private)
 host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 	assert_has_td()
@@ -745,9 +745,9 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 	// This CQE completes the prior SEND; clear until we re-arm (partial or next buffer).
 	conn.wire.kind = .None
 
-	// Duty metric: proactor send CQE only. Darwin TLS residual arms set reactor_h1
+	// Duty metric: proactor send CQE only. Dense TLS residual arms set reactor_h1
 	// before host_submit_send and must not increment soft_cq_send_completes
-	// (Plan R2 gate = 0 for H1/H2 bulk residual; clear-H1 still charges).
+	// (Plan R2 / io_uring A5 gate = 0 for H1 bulk residual; clear-H1 still charges).
 	if !conn.reactor_h1 {
 		path_metrics_note_soft_cq_send_complete()
 	}
@@ -781,11 +781,9 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 		// Partial send — advance and resubmit. Buffer still owned until full send.
 		// n==0 already closed above; n>0 here.
 		conn.wire.pending_send = conn.wire.pending_send[n:]
-		// Darwin H1 reactor: keep residual meta aligned with pending_send (one region).
-		when ODIN_OS == .Darwin {
-			if conn.reactor_h1 {
-				reactor_sync_residual_from_pending(conn)
-			}
+		// Dense residual arm: keep residual meta aligned with pending_send (one region).
+		if conn.reactor_h1 {
+			reactor_sync_residual_from_pending(conn)
 		}
 		if len(conn.wire.pending_send) == 0 {
 			// Should not happen (n < len implies remainder > 0); fail closed.
