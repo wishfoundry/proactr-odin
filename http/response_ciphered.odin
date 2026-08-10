@@ -78,6 +78,7 @@ response_send_ciphered_heading_body :: proc(r: ^Response, conn: ^Connection, c: 
 		conn.tls_plain_body = nil
 		conn.tls_plain_body_off = 0
 	}
+	conn.tls_first_seal_pending = true // first_seal_pt instrument on first SSL_write
 	// Heading-only assemble — do not count full-body materialize.
 	tls_host_flush_response(conn)
 }

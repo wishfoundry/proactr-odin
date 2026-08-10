@@ -1783,6 +1783,7 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		conn.tls_plain_body = nil
 		conn.tls_plain_body_off = 0
 		conn.tls_plain_rest = buf
+		conn.tls_first_seal_pending = true
 		tls_host_flush_response(conn)
 		return
 	}

@@ -97,8 +97,13 @@ server_reactor_worker_loop :: proc(s: ^Server) {
 		// One blocking wait: product sockets + timer deadline in kevent timeout.
 		_ = reactor_wait(s, loop_wait)
 
-		// Post-I/O: fire any timers that matured during wait + drain soft_cq.
-		server_reactor_dispatch_soft(s, completions)
+		// Post-I/O soft harvest: only when timers are registered (product sockets
+		// use reactor kq; soft_cq_send=0 on bulk TLS). Skip empty proactr kevent(0)
+		// when the soft ring has no timer interest.
+		_, has_timer_post := proactr.ring_next_timer_ms(&td.ring)
+		if has_timer_post {
+			server_reactor_dispatch_soft(s, completions)
+		}
 		reactor_drain_deferred_clean()
 
 		closing = server_reap_if_closing(s)

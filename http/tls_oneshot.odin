@@ -96,6 +96,7 @@ tls_plain_clear :: proc(conn: ^Connection) {
 	conn.tls_plain_rest = nil
 	conn.tls_plain_body = nil
 	conn.tls_plain_body_off = 0
+	conn.tls_first_seal_pending = false
 }
 
 // Oneshot seal window + try_seal_hold live in tls_dual_ct.odin (tls_seal_window /

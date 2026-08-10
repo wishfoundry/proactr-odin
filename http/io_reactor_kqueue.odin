@@ -225,7 +225,7 @@ reactor_flush_changes :: proc() -> bool {
 	return true
 }
 
-// oneshot: accept/READ/fairness/clear. !oneshot: residual WRITE only (drogon level POLLOUT).
+// oneshot: fairness WRITE. !oneshot: product READ, residual WRITE, accept (all level).
 @(private)
 reactor_arm_filter :: proc(fd: i32, filter: kqueue.Filter, udata: rawptr, oneshot := true) {
 	if !reactor_host.active {
@@ -239,8 +239,7 @@ reactor_arm_filter :: proc(fd: i32, filter: kqueue.Filter, udata: rawptr, onesho
 	} else {
 		ev.flags = {.Add, .Enable}
 	}
-	// Client sockets: udata unused for dispatch (lookup by fd → td.conns).
-	// Accept: REACTOR_UDATA_ACCEPT sentinel.
+	// Product: udata unused (dispatch by fd → td.conns). Accept: REACTOR_UDATA_ACCEPT.
 	ev.udata = udata
 	append(&reactor_host.changelist, ev)
 }
@@ -302,7 +301,9 @@ reactor_delete_filters :: proc(fd: i32, del_read, del_write: bool) {
 // Accept / recv / write / close ownership
 // ---------------------------------------------------------------------------
 
-// reactor_host_submit_accept: EVFILT_READ on listen (oneshot; re-arm after drain).
+// reactor_host_submit_accept: level EVFILT_READ on shared listen (REACTOR_UDATA_ACCEPT).
+// Multi-worker: each worker arms the same listen fd on its own reactor kq; nonblocking
+// accept, EAGAIN = peer won. Level so idle workers see backlog without re-arm races.
 @(private)
 reactor_host_submit_accept :: proc(s: ^Server) -> bool {
 	if !reactor_host.active {
@@ -314,14 +315,14 @@ reactor_host_submit_accept :: proc(s: ^Server) -> bool {
 	if atomic_load(&s.listen_closed) || td.listen_fd == {} {
 		return false
 	}
-	reactor_arm_filter(i32(td.listen_fd), .Read, REACTOR_UDATA_ACCEPT)
+	reactor_arm_filter(i32(td.listen_fd), .Read, REACTOR_UDATA_ACCEPT, false)
 	td.accept_pending = true
 	td.needs_accept_rearm = false
 	return true
 }
 
-// reactor_host_arm_recv: EVFILT_READ; buf is CT or clear scanner window.
-// udata is nil — dispatch looks up Connection by ev.ident (fd).
+// reactor_host_arm_recv: product READ is always level — leave armed until close.
+// Already armed → refresh buffer only (no kevent). udata nil; dispatch by fd.
 @(private)
 reactor_host_arm_recv :: proc(conn: ^Connection, buf: []u8) -> bool {
 	if conn == nil || conn.state >= .Closing {
@@ -330,7 +331,17 @@ reactor_host_arm_recv :: proc(conn: ^Connection, buf: []u8) -> bool {
 	if !reactor_host.active {
 		return false
 	}
-	// TLS single-flight
+	// Level already armed: refresh buffer only.
+	if conn.reactor_read_armed {
+		if len(buf) > 0 {
+			conn.reactor_recv_buf = buf
+		}
+		if conn.tls_ssl != nil {
+			conn.tls_ct_recv_inflight = true
+		}
+		return true
+	}
+	// First arm (TLS single-flight or clear-H1).
 	if conn.tls_ssl != nil {
 		if conn.tls_ct_recv_inflight {
 			return true
@@ -339,21 +350,19 @@ reactor_host_arm_recv :: proc(conn: ^Connection, buf: []u8) -> bool {
 			return false
 		}
 		conn.reactor_recv_buf = buf
-		reactor_arm_filter(i32(conn.socket), .Read, nil)
+		reactor_arm_filter(i32(conn.socket), .Read, nil, oneshot = false)
 		conn.tls_ct_recv_inflight = true
 		conn.reactor_read_armed = true
-		return true
-	}
-	// Clear-H1
-	if conn.reactor_read_armed {
+		conn.reactor_read_level = true
 		return true
 	}
 	if len(buf) == 0 {
 		return false
 	}
 	conn.reactor_recv_buf = buf
-	reactor_arm_filter(i32(conn.socket), .Read, nil)
+	reactor_arm_filter(i32(conn.socket), .Read, nil, oneshot = false)
 	conn.reactor_read_armed = true
+	conn.reactor_read_level = true
 	return true
 }
 
@@ -447,23 +456,24 @@ reactor_arm_fairness_continue :: proc(conn: ^Connection) -> bool {
 }
 
 // reactor_host_close: purge kq interest, sync close + destroy (no submit_close).
+// Product level READ/WRITE: EV_DELETE here only (never defer close solely for read_armed).
 @(private)
 reactor_host_close :: proc(conn: ^Connection) {
 	if conn == nil {
 		return
 	}
 	fd := i32(conn.socket)
-	// Snapshot arm bits before clear — oneshot may already be gone (ENOENT OK).
+	// Snapshot before clear — oneshot may already be gone (ENOENT OK); level needs EV_DELETE.
 	del_r := conn.reactor_read_armed
 	del_w := conn.reactor_write_armed
 	conn.reactor_read_armed = false
 	conn.reactor_write_armed = false
 	conn.reactor_write_level = false
+	conn.reactor_read_level = false
 	conn.reactor_need_clean = false
 	conn.reactor_recv_buf = nil
 	conn.tls_ct_recv_inflight = false
 	conn.close_pending = false
-	// Drop pending changelist arms for this fd, then EV_DELETE only still-armed filters.
 	reactor_changelist_drop_fd(fd)
 	reactor_delete_filters(fd, del_r, del_w)
 	net.close(conn.socket)
@@ -516,41 +526,61 @@ reactor_do_recv :: proc(conn: ^Connection) -> (n: i32, again: bool, hard: bool) 
 	return -i32(e), false, true
 }
 
+// Fair accept budget per kevent turn on a shared listen fd.
+// Multi-worker: take 1 so peer kqueues can win the race (avoid one worker drain-steal).
+// Solo worker: deeper drain to cut kevent churn on connection storms.
+REACTOR_ACCEPT_DRAIN_MULTI :: 1
+REACTOR_ACCEPT_DRAIN_SOLO :: 64
+
 @(private)
 reactor_on_accept_ready :: proc(s: ^Server) {
-	// Drain accepts until EAGAIN; host_on_accept with MORE so it does not re-arm each.
-	// Re-arm oneshot once at end (multishot-shaped drain).
-	td.accept_pending = false
+	// Shared listen multi-kq: nonblocking accept race; EAGAIN = peer won (OK).
+	// Level-triggered arm stays installed — do not clear accept_pending on success.
 	accepted := 0
-	for {
+	limit := REACTOR_ACCEPT_DRAIN_SOLO
+	if s.opts.thread_count > 1 || (s.threads != nil && len(s.threads) > 1) {
+		limit = REACTOR_ACCEPT_DRAIN_MULTI
+	}
+	for accepted < limit {
 		if atomic_load(&s.closing) || td.state >= .Closing {
+			break
+		}
+		if atomic_load(&s.listen_closed) || td.listen_fd == {} {
 			break
 		}
 		client, again, hard := reactor_try_accept_once()
 		if again {
+			// Peer worker accepted, or backlog empty.
 			break
 		}
 		if hard {
 			if !atomic_load(&s.closing) {
 				log.errorf("reactor accept failed: errno")
 			}
-			break
+			// Disarm level filter so EMFILE/etc. cannot spin kevent forever.
+			if td.listen_fd != {} {
+				reactor_delete_filters(i32(td.listen_fd), true, false)
+			}
+			td.accept_pending = false
+			td.needs_accept_rearm = !atomic_load(&s.closing) &&
+				td.state < .Closing &&
+				!atomic_load(&s.listen_closed)
+			return
 		}
-		// more=true while draining so host_on_accept does not re-arm via façade.
+		// more=true: host_on_accept must not re-arm via façade (level already armed).
 		host_on_accept(s, client, proactr.COMPLETION_MORE)
 		accepted += 1
-		// Cap per turn to avoid accept storm starving existing conns.
-		if accepted >= 64 {
-			break
-		}
 	}
-	// Re-arm listen unless shutting down.
-	if !atomic_load(&s.closing) && td.state < .Closing && !atomic_load(&s.listen_closed) {
+	if atomic_load(&s.closing) || td.state >= .Closing || atomic_load(&s.listen_closed) {
+		td.accept_pending = false
+		td.needs_accept_rearm = false
+		return
+	}
+	// Level filter remains; keep accept_pending true so the host loop does not thrash re-arm.
+	if !td.accept_pending {
 		if !reactor_host_submit_accept(s) {
 			td.needs_accept_rearm = true
 		}
-	} else {
-		td.accept_pending = false
 	}
 }
 
@@ -567,6 +597,7 @@ reactor_conn_by_fd :: #force_inline proc(fd: i32) -> ^Connection {
 	return c
 }
 
+// reactor_on_readable: product READ is always level — drain until EAGAIN; leave armed until close.
 @(private)
 reactor_on_readable :: proc(s: ^Server, fd: i32) {
 	_ = s
@@ -574,30 +605,54 @@ reactor_on_readable :: proc(s: ^Server, fd: i32) {
 	if conn == nil {
 		return
 	}
-	// Clear arm bits after live check (oneshot already delivered).
-	conn.reactor_read_armed = false
-	if conn.tls_ssl != nil {
-		conn.tls_ct_recv_inflight = false
-	}
 	if conn.close_on_io {
 		connection_close(conn)
 		return
 	}
-	n, again, hard := reactor_do_recv(conn)
-	if again {
-		// Spurious / EINTR: re-arm same buffer.
-		_ = reactor_host_arm_recv(conn, conn.reactor_recv_buf)
-		return
-	}
-	if hard {
-		// Negative errno as result for host_on_recv error path.
-		if n >= 0 {
-			n = -1
+	// Recv until EAGAIN so level re-fires do not spin with data still pending.
+	for {
+		n, again, hard := reactor_do_recv(conn)
+		if again {
+			if conn.tls_ssl != nil && conn.state < .Closing {
+				// Leave READ enabled; restore single-flight bit without kevent.
+				conn.tls_ct_recv_inflight = true
+				conn.reactor_read_armed = true
+			}
+			return
+		}
+		if hard {
+			if n >= 0 {
+				n = -1
+			}
+			if conn.tls_ssl != nil {
+				conn.tls_ct_recv_inflight = false
+			}
+			host_on_recv(conn, n)
+			return
+		}
+		// Deliver one chunk (n >= 0 includes peer EOF n==0).
+		if conn.tls_ssl != nil {
+			// host_on_recv may re-arm; clear inflight around the handoff.
+			conn.tls_ct_recv_inflight = false
 		}
 		host_on_recv(conn, n)
-		return
+		if conn.state >= .Closing {
+			return
+		}
+		if conn.tls_ssl != nil {
+			// Still interested in CT — keep single-flight bit without kevent re-add.
+			conn.tls_ct_recv_inflight = true
+			conn.reactor_read_armed = true
+		}
+		if n == 0 {
+			return
+		}
+		// Clear-H1: one chunk per event (scanner window moves); level stays armed.
+		// TLS: stable tls_ct_rx — loop until EAGAIN.
+		if conn.tls_ssl == nil {
+			return
+		}
 	}
-	host_on_recv(conn, n)
 }
 
 @(private)
@@ -730,11 +785,17 @@ reactor_wait :: proc(s: ^Server, timeout_ms: i32) -> int {
 
 		if .Error in ev.flags {
 			if is_accept {
-				if !atomic_load(&s.closing) {
+				if !atomic_load(&s.closing) && !atomic_load(&s.listen_closed) {
 					log.errorf("reactor accept kevent error data=%v", ev.data)
 				}
+				// Level filter may still be armed — drop to avoid spin after listen close.
+				if td.listen_fd != {} {
+					reactor_delete_filters(i32(td.listen_fd), true, false)
+				}
 				td.accept_pending = false
-				td.needs_accept_rearm = true
+				td.needs_accept_rearm = !atomic_load(&s.closing) &&
+					td.state < .Closing &&
+					!atomic_load(&s.listen_closed)
 				continue
 			}
 			if conn := reactor_conn_by_fd(fd); conn != nil {

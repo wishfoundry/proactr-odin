@@ -13,6 +13,20 @@ import "core:sync"
 
 import tls_server "../tls_server"
 
+// reactor_bio_pending: wBIO CT bytes waiting.
+// Prefer cached tls_wbio + Provider bio_pending_out_bio; else ssl-based pending.
+@(private)
+reactor_bio_pending :: #force_inline proc(conn: ^Connection) -> int {
+	if conn == nil || conn.server == nil {
+		return 0
+	}
+	p := conn.server.tls_provider
+	if conn.tls_wbio != nil && p != nil && p.bio_pending_out_bio != nil {
+		return tls_server.bio_pending_out_bio(p, conn.tls_wbio)
+	}
+	return tls_server.bio_pending_out(p, conn.tls_ssl)
+}
+
 // reactor_tls_flush: Plan R2 hot path for ciphered send on Darwin.
 // Plain source auto: H2_Out when h2_active, else Oneshot (H1). Stream not multi-window here.
 @(private)
@@ -42,8 +56,6 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 	}
 
 	path_metrics_note_kevent_turn()
-	p := conn.server.tls_provider
-	ssl := conn.tls_ssl
 	plain_sealed := 0
 	windows := 0
 	h2 := conn.h2_active
@@ -76,7 +88,7 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 		}
 
 		// Drain any wBIO left from a prior seal (multi-record) without SSL_write.
-		if tls_server.bio_pending_out(p, ssl) > 0 {
+		if reactor_bio_pending(conn) > 0 {
 			again, hard := reactor_drain_wbio(conn)
 			if hard {
 				return
@@ -144,7 +156,7 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 		}
 
 		// Drain CT produced by this seal (and any remaining wBIO).
-		if tls_server.bio_pending_out(p, ssl) > 0 {
+		if reactor_bio_pending(conn) > 0 {
 			again, hard := reactor_drain_wbio(conn)
 			if hard {
 				return
@@ -161,7 +173,7 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 		// Zero consume: WANT_WRITE → drain residual; WANT_READ → arm recv (R-DUPLEX).
 		more_plain := h2_out_pending_len(conn) > 0 if h2 else tls_plain_total_remaining(conn) > 0
 		if consumed == 0 && more_plain {
-			if tls_server.bio_pending_out(p, ssl) > 0 {
+			if reactor_bio_pending(conn) > 0 {
 				again, hard := reactor_drain_wbio(conn)
 				if hard {
 					return
@@ -185,7 +197,7 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 }
 
 // reactor_ssl_write_window: SSL_write up to REACTOR_SEAL_WINDOW plain (H1 oneshot); advance cursor.
-// Does not drain wBIO (caller drains). Returns (ok, plain_consumed).
+// Part-boundary window via tls_plain_window (heading then body). Does not drain wBIO.
 @(private)
 reactor_ssl_write_window :: proc(conn: ^Connection) -> (ok: bool, consumed: int) {
 	if conn == nil || conn.tls_ssl == nil {
@@ -196,6 +208,7 @@ reactor_ssl_write_window :: proc(conn: ^Connection) -> (ok: bool, consumed: int)
 	}
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
+
 	win_slice := tls_plain_window(conn, REACTOR_SEAL_WINDOW)
 	win := len(win_slice)
 	if win == 0 {
@@ -246,6 +259,10 @@ reactor_ssl_write_window :: proc(conn: ^Connection) -> (ok: bool, consumed: int)
 	tls_plain_advance(conn, consumed)
 	path_metrics_note_ssl_write(u64(consumed))
 	sync.atomic_add(&path_seal_calls, 1)
+	if conn.tls_first_seal_pending {
+		conn.tls_first_seal_pending = false
+		path_metrics_note_first_seal_pt(u64(consumed))
+	}
 	path_metrics_note_seal_cycles(t_ssl1 - t_ssl0, 0)
 	pt_release(&conn.pt, u32(consumed))
 	return true, consumed
@@ -263,7 +280,6 @@ reactor_ssl_write_window_h2 :: proc(conn: ^Connection) -> (ok: bool, consumed: i
 		return true, 0
 	}
 	p := conn.server.tls_provider
-	ssl := conn.tls_ssl
 	win := avail
 	if win > REACTOR_SEAL_WINDOW {
 		win = REACTOR_SEAL_WINDOW
@@ -280,6 +296,7 @@ reactor_ssl_write_window_h2 :: proc(conn: ^Connection) -> (ok: bool, consumed: i
 	tls_metrics_note_pt(conn.server, u64(conn.pt.admitted))
 	plain := conn.h2_out[conn.h2_out_off:conn.h2_out_off + win]
 
+	ssl := conn.tls_ssl
 	t_ssl0 := path_metrics_cyc_now()
 	ret := tls_server.write(p, ssl, raw_data(plain), c.int(win))
 	t_ssl1 := path_metrics_cyc_now()
@@ -314,12 +331,47 @@ reactor_ssl_write_window_h2 :: proc(conn: ^Connection) -> (ok: bool, consumed: i
 	return true, consumed
 }
 
+// reactor_send_ct_view: push CT view bytes to the socket.
+// On EAGAIN: stage remainder into dual_ct.tx residual and return again=true.
+// Does not touch BIO — caller resets after full view send or residual stage.
+@(private)
+reactor_send_ct_view :: proc(conn: ^Connection, view: []u8) -> (again: bool, hard: bool) {
+	if conn == nil || len(view) == 0 {
+		return false, false
+	}
+	dst := conn.dual_ct.tx
+	off := 0
+	for off < len(view) {
+		sent, would_block, err := host_try_send_nb(conn, view[off:])
+		if err {
+			_wire_fail(conn, "reactor CT write failed fd=%v", conn.socket)
+			return false, true
+		}
+		if would_block {
+			rem := view[off:]
+			if len(dst) == 0 || len(rem) > len(dst) {
+				_wire_fail(conn, "reactor CT residual too large fd=%v rem=%d slab=%d", conn.socket, len(rem), len(dst))
+				return false, true
+			}
+			copy(dst, rem)
+			reactor_residual_set(conn, 0, len(rem))
+			return true, false
+		}
+		if sent <= 0 {
+			_wire_fail(conn, "reactor CT write zero fd=%v", conn.socket)
+			return false, true
+		}
+		off += sent
+	}
+	return false, false
+}
+
 // reactor_drain_wbio: push wBIO CT to the socket until empty or EAGAIN.
 //
-// Prefer drogon-shaped zero-copy drain when provider supports mem-BIO peek:
-//   BIO_get_mem_data view → host_try_send_nb → on partial: copy remainder only into
-//   dual_ct.tx residual → BIO_reset. Full send: BIO_reset without CT slab copy.
-// Fallback: BIO_read into dual_ct.tx then send (pre-P5 path).
+// Single product path (cached tls_wbio):
+//   bio_pending_out_bio / bio_peek_out_bio → reactor_send_ct_view → bio_reset_out_bio
+// Else ssl-based peek; else BIO_read into dual_ct.tx.
+// Peek: BIO_get_mem_data view → send → on partial copy rem only into residual → BIO_reset.
 //
 // R-ORDER: residual in dual_ct.tx forbids SSL_write until drained (caller residual-first).
 // Used by H1/H2 reactor flush and Darwin HS WANT_WRITE drain.
@@ -330,54 +382,55 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	}
 	p := conn.server.tls_provider
 	ssl := conn.tls_ssl
+	wbio := conn.tls_wbio
 	dst := conn.dual_ct.tx
+	// Prefer direct-bio ops when wbio cached and Provider wires bio_*_out_bio.
+	use_bio := wbio != nil && p != nil && p.bio_pending_out_bio != nil &&
+		p.bio_peek_out_bio != nil && p.bio_reset_out_bio != nil
 
-	// --- Peek path (primary when BIO_ctrl available) ---
-	if tls_server.bio_peek_supported(p) {
-		for tls_server.bio_pending_out(p, ssl) > 0 {
+	// --- Peek path (one loop; bio or ssl-based) ---
+	if use_bio || tls_server.bio_peek_supported(p) {
+		for {
+			pending := 0
+			if use_bio {
+				pending = tls_server.bio_pending_out_bio(p, wbio)
+			} else {
+				pending = tls_server.bio_pending_out(p, ssl)
+			}
+			if pending <= 0 {
+				return false, false
+			}
 			t_bio0 := path_metrics_cyc_now()
-			view := tls_server.bio_peek_out(p, ssl)
+			view: []u8
+			if use_bio {
+				view = tls_server.bio_peek_out_bio(p, wbio)
+			} else {
+				view = tls_server.bio_peek_out(p, ssl)
+			}
 			t_bio1 := path_metrics_cyc_now()
 			path_metrics_note_seal_cycles(0, t_bio1 - t_bio0)
 			if len(view) == 0 {
-				// Pending but no peek view — fall back to BIO_read for this turn.
-				break
+				break // fall through to BIO_read
 			}
 			tls_metrics_note_ct(conn.server, u64(len(view)))
 			tls_metrics_inc_seal(conn.server)
 			path_metrics_note_ct_send(u64(len(view)))
 
-			off := 0
-			for off < len(view) {
-				sent, would_block, err := host_try_send_nb(conn, view[off:])
-				if err {
-					_wire_fail(conn, "reactor CT write failed fd=%v", conn.socket)
-					return false, true
-				}
-				if would_block {
-					// Stash only the unsent suffix into residual slab, then drop wBIO.
-					rem := view[off:]
-					if len(dst) == 0 || len(rem) > len(dst) {
-						_wire_fail(conn, "reactor CT residual too large fd=%v rem=%d slab=%d", conn.socket, len(rem), len(dst))
-						return false, true
-					}
-					copy(dst, rem)
-					reactor_residual_set(conn, 0, len(rem))
-					_ = tls_server.bio_reset_out(p, ssl)
-					return true, false
-				}
-				if sent <= 0 {
-					_wire_fail(conn, "reactor CT write zero fd=%v", conn.socket)
-					return false, true
-				}
-				off += sent
+			again, hard = reactor_send_ct_view(conn, view)
+			if hard {
+				return false, true
 			}
-			// Full peek view on wire — reset wBIO (no CT slab copy).
-			_ = tls_server.bio_reset_out(p, ssl)
-			// Loop if SSL left more pending (unusual after full peek of current mem).
+			// Reset BIO after full send or residual staged (view no longer needed).
+			if use_bio {
+				_ = tls_server.bio_reset_out_bio(p, wbio)
+			} else {
+				_ = tls_server.bio_reset_out(p, ssl)
+			}
+			if again {
+				return true, false
+			}
 		}
-		// If we broke out with pending still > 0, fall through to BIO_read path.
-		if tls_server.bio_pending_out(p, ssl) <= 0 {
+		if reactor_bio_pending(conn) <= 0 {
 			return false, false
 		}
 	}
@@ -386,7 +439,7 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	if len(dst) == 0 {
 		return false, true
 	}
-	for tls_server.bio_pending_out(p, ssl) > 0 {
+	for reactor_bio_pending(conn) > 0 {
 		t_bio0 := path_metrics_cyc_now()
 		n := tls_server.bio_read_net(p, ssl, dst)
 		t_bio1 := path_metrics_cyc_now()
@@ -483,7 +536,7 @@ reactor_on_send_complete :: proc(conn: ^Connection) -> bool {
 		}
 		// Open but last flight was HS CT.
 		if conn.tls_pipe.state == .Open && conn.state == .New {
-			if tls_server.bio_pending_out(conn.server.tls_provider, conn.tls_ssl) > 0 {
+			if reactor_bio_pending(conn) > 0 {
 				again, hard := reactor_drain_wbio(conn)
 				if hard {
 					return true

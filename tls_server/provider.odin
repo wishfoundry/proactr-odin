@@ -55,7 +55,13 @@ Provider :: struct {
 	// nil procs = unsupported (callers fall back to bio_read_net).
 	bio_peek_out:     proc(self: ^Provider, ssl: Conn, out_ptr: ^rawptr) -> c.int,
 	bio_reset_out:    proc(self: ^Provider, ssl: Conn) -> c.int,
-	set_accept_state: proc(self: ^Provider, ssl: Conn),
+	// Hot-path: SSL_get_wbio once; then bio_*_out_bio(wbio) avoids get_wbio each drain.
+	// nil = unsupported (callers keep using ssl-based bio_pending_out / peek / reset).
+	get_wbio:            proc(self: ^Provider, ssl: Conn) -> rawptr,
+	bio_pending_out_bio: proc(self: ^Provider, wbio: rawptr) -> c.int,
+	bio_peek_out_bio:    proc(self: ^Provider, wbio: rawptr, out_ptr: ^rawptr) -> c.int,
+	bio_reset_out_bio:   proc(self: ^Provider, wbio: rawptr) -> c.int,
+	set_accept_state:    proc(self: ^Provider, ssl: Conn),
 
 	accept:             proc(self: ^Provider, ssl: Conn) -> c.int,
 	read:               proc(self: ^Provider, ssl: Conn, buf: rawptr, n: c.int) -> c.int,
@@ -213,9 +219,52 @@ bio_reset_out :: proc(p: ^Provider, ssl: Conn) -> bool {
 	return p.bio_reset_out(p, ssl) == 1
 }
 
+// SSL write-BIO pointer (opaque). Cache once after setup_mem_bios for hot drain.
+// nil if provider lacks get_wbio or mem-BIO not set up.
+get_wbio :: proc(p: ^Provider, ssl: Conn) -> rawptr {
+	if p == nil || ssl == nil || p.get_wbio == nil {
+		return nil
+	}
+	return p.get_wbio(p, ssl)
+}
+
+// Direct wBIO ops — no SSL_get_wbio. Hot path when host caches wbio on Connection.
+bio_pending_out_bio :: proc(p: ^Provider, wbio: rawptr) -> int {
+	if p == nil || wbio == nil || p.bio_pending_out_bio == nil {
+		return 0
+	}
+	return int(p.bio_pending_out_bio(p, wbio))
+}
+
+bio_peek_out_bio :: proc(p: ^Provider, wbio: rawptr) -> []u8 {
+	if p == nil || wbio == nil || p.bio_peek_out_bio == nil {
+		return nil
+	}
+	data: rawptr
+	n := p.bio_peek_out_bio(p, wbio, &data)
+	if n <= 0 || data == nil {
+		return nil
+	}
+	return ([^]u8)(data)[:int(n)]
+}
+
+bio_reset_out_bio :: proc(p: ^Provider, wbio: rawptr) -> bool {
+	if p == nil || wbio == nil || p.bio_reset_out_bio == nil {
+		return false
+	}
+	return p.bio_reset_out_bio(p, wbio) == 1
+}
+
 // True when peek+reset are wired (Darwin reactor CT drain prefers this).
+// Direct-bio path (bio_*_out_bio) is preferred when host has a cached wbio.
 bio_peek_supported :: proc(p: ^Provider) -> bool {
-	return p != nil && p.bio_peek_out != nil && p.bio_reset_out != nil
+	if p == nil {
+		return false
+	}
+	if p.bio_peek_out_bio != nil && p.bio_reset_out_bio != nil {
+		return true
+	}
+	return p.bio_peek_out != nil && p.bio_reset_out != nil
 }
 
 set_accept_state :: proc(p: ^Provider, ssl: Conn) {

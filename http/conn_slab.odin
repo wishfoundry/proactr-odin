@@ -248,6 +248,8 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	tls_pipe_init(&c.tls_pipe)
 	// TLS engine fields cleared; buffers allocated only on TLS accept.
 	c.tls_ssl = nil
+	c.tls_wbio = nil
+	c.tls_first_seal_pending = false
 	c.tls_ct_rx = nil
 	c.dual_ct = {}
 	c.reactor_res_off = 0
@@ -257,6 +259,7 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.reactor_read_armed = false
 	c.reactor_write_armed = false
 	c.reactor_write_level = false
+	c.reactor_read_level = false
 	c.reactor_need_clean = false
 	c.reactor_scan_injected = false
 	c.reactor_recv_buf = nil

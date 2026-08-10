@@ -1,6 +1,7 @@
 // Server host surface forked from laytan/odin-http.
 // proactr completion host: io_uring (Linux), kqueue (Darwin/BSD), IOCP (Windows ring; HTTP host POSIX/Linux).
-// Hardening: SO_REUSEPORT per-worker listen, multishot accept, fixed files/bufs, conn slab.
+// Hardening: I/O backend host (server_io_uring / server_kqueue / server_iocp),
+// multishot accept where proactor, fixed files/bufs, conn slab.
 package http
 
 import "core:bufio"
@@ -153,10 +154,9 @@ Server_State :: enum {
 
 Server :: struct {
 	opts:           Server_Opts,
-	// Legacy field kept for API familiarity; always zero under REUSEPORT (workers own listen fds).
-	// Do not close: worker listen lifetime is solely via Server_Thread.listen_fd + server_close_listen.
+	// kqueue Darwin: shared listen. io_uring/other: usually zero (per-worker listen_fd).
 	tcp_sock:       net.TCP_Socket,
-	// Endpoint to bind; each worker creates its own SO_REUSEPORT listen socket.
+	// Endpoint to bind (host_listen_bind / host_worker_attach_listen per backend).
 	endpoint:       net.Endpoint,
 	conn_allocator: mem.Allocator,
 	handler:        Handler,
@@ -188,7 +188,7 @@ Server_Thread :: struct {
 	ring:        proactr.Ring,
 	conns:       map[net.TCP_Socket]^Connection,
 	state:       Server_State,
-	// Per-worker SO_REUSEPORT listen socket.
+	// Listen socket (backend-owned: shared mirror or REUSEPORT fd).
 	listen_fd:          net.TCP_Socket,
 	// True when listen_fd is installed in fixed file slot 0 (use FIXED_FILE for accept).
 	listen_fixed:       bool,
@@ -318,8 +318,8 @@ server_opts_resolve :: proc(opts: ^Server_Opts) {
 	}
 }
 
-// listen stores the endpoint and opts. On Linux, binding is deferred to each worker
-// (SO_REUSEPORT). On non-Linux, returns Unsupported without binding.
+// listen stores the endpoint and opts; backend may bind process-wide (kqueue Darwin)
+// or defer to host_worker_attach_listen (io_uring REUSEPORT, etc.).
 listen :: proc(
 	s: ^Server,
 	endpoint: net.Endpoint = Default_Endpoint,
@@ -329,8 +329,10 @@ listen :: proc(
 	server_opts_resolve(&s.opts)
 	s.endpoint = endpoint
 	s.conn_allocator = context.allocator
-	// No shared listen socket; workers bind with REUSEPORT (or REUSEADDR).
 	s.tcp_sock = {}
+	if e := host_listen_bind(s, endpoint); e != .None {
+		return e
+	}
 	// PR5: init shared SSL_CTX when PEMs present. On failure: honest clear-H1 only.
 	if server_tls_wanted(s) {
 		if !server_tls_init(s) {
@@ -424,7 +426,7 @@ listen_and_serve :: proc(
 	return serve(s, h)
 }
 
-// server_close_listen closes all worker listen sockets at most once.
+// server_close_listen closes listen socket(s) at most once.
 // Single owner for listen lifetime: workers never net.close their listen_fd.
 // Call from normal thread context only (not from a signal handler).
 // See crash_listener.odin for signal-safe request + worker reap.
@@ -435,17 +437,7 @@ server_close_listen :: proc(s: ^Server) {
 	if !exchanged {
 		return
 	}
-	if s.threads == nil {
-		return
-	}
-	for &t in s.threads {
-		if t.listen_fd != {} {
-			net.close(t.listen_fd)
-			t.listen_fd = {}
-		}
-	}
-	// tcp_sock is never a live fd under REUSEPORT; clear only for cleanliness.
-	s.tcp_sock = {}
+	server_close_listen_sockets(s)
 }
 
 // Taken from Go's implementation,
@@ -530,6 +522,12 @@ Connection :: struct {
 	ciphered:  bool,
 	// Host-private TLS engine (0 / nil = clear). Opaque tls_server.Conn only.
 	tls_ssl:        tls_server.Conn,
+	// Cached SSL write-BIO (opaque rawptr from tls_server.get_wbio after setup_mem_bios).
+	// Drain uses bio_*_out_bio(p, tls_wbio) — no SSL_get_wbio per iteration.
+	// Not exposed to handlers (APP_CONTRACT). Owned by SSL; nil on clear / free.
+	tls_wbio:       rawptr,
+	// True after plain cursor armed until first successful SSL_write (first_seal_pt).
+	tls_first_seal_pending: bool,
 	// Network CT recv scratch (allocated on TLS accept; freed on destroy).
 	tls_ct_rx:      []u8,
 	// Live dual-CT seal∥send (PR5.1 Linux): primary + hold slabs; seal next window into
@@ -541,7 +539,8 @@ Connection :: struct {
 	// reactor_h1: residual WRITE armed (native EVFILT_WRITE on reactor kq); must be set
 	// before arm so soft_cq_send_completes is not charged and write demuxes to reactor.
 	// reactor_fairness_yield: reserved (fairness uses product re-entry, not soft-Nop).
-	// reactor_read/write_armed: native oneshot interest on the reactor kqueue (P5).
+	// reactor_read/write_armed: native interest on the reactor kqueue (P5).
+	// Product READ always level; residual WRITE level; fairness WRITE oneshot.
 	// reactor_recv_buf: buffer for next native RECV (CT or clear scanner window).
 	reactor_res_off:         int,
 	reactor_res_n:           int,
@@ -549,9 +548,10 @@ Connection :: struct {
 	reactor_fairness_yield:  bool,
 	reactor_read_armed:      bool,
 	reactor_write_armed:     bool,
-	// reactor_write_level: residual WRITE uses level EVFILT_WRITE (no One_Shot).
-	// Cleared when residual empty. Fairness/clear-H1 stay oneshot.
+	// residual WRITE: level EVFILT_WRITE until residual empty. Fairness WRITE: oneshot.
 	reactor_write_level:     bool,
+	// product READ: always level until reactor_host_close (accept uses REACTOR_UDATA_ACCEPT).
+	reactor_read_level:      bool,
 	// reactor_need_clean: oneshot finished sync inside scan/handler — defer
 	// clean_request_loop until end of kevent turn (avoid reentrant scanner UAF).
 	reactor_need_clean:      bool,
@@ -655,14 +655,10 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 			log.debugf("REGISTER_BUFFERS skipped: %v", berr)
 		}
 
-		// Per-worker SO_REUSEPORT listen socket.
-		lfd, lerr := host_listen_reuseport(s.endpoint, s.opts.listen_backlog)
-		if lerr != .None {
-			log.errorf("listen REUSEPORT failed: %v", lerr)
+		// Backend listen attach (server_kqueue / server_io_uring / server_iocp).
+		if !host_worker_attach_listen(s) {
 			return
 		}
-		td.listen_fd = lfd
-		// Do not alias listen_fd onto s.tcp_sock (double-close hazard on teardown).
 
 		// Install listen fd as fixed file slot 0 when available.
 		td.listen_fixed = false
@@ -674,9 +670,8 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 			}
 		}
 
-		// Darwin P5: native reactor kqueue owns product sockets; proactr only timers.
-		when ODIN_OS == .Darwin {
-			server_reactor_worker_loop(s)
+		// Native reactor backends take the thread (kqueue Darwin); else portable host loop.
+		if host_worker_enter(s) {
 			return
 		}
 
@@ -793,7 +788,7 @@ _server_thread_begin_shutdown :: proc(s: ^Server) {
 	_ = s
 }
 
-// host_listen_reuseport is implemented in server_linux.odin / server_stub.odin.
+// Backend host hooks: server_io_uring | server_kqueue | server_iocp | server_unsupported.
 
 // host_submit_accept enqueues one accept SQE (user = Server), multishot by default.
 // Darwin P5: native reactor EVFILT_READ on listen (no proactr submit_accept).
@@ -1199,23 +1194,15 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	// submit_close while wire I/O or CT RECV is outstanding — defer until completion.
 	// wire.kind != .None covers Send, WRITEV, and sendfile (pending_send alone is not enough:
 	// WRITEV/sendfile leave pending empty while SQE is still outstanding).
-	// tls_ct_recv_inflight / reactor_read_armed cover hangup/HS CT RECV (CQ-M3 / P5).
+	// Platform interest (kqueue level vs proactor oneshot): conn_reactor_io_in_flight.
 	if _conn_wire_in_flight(c) {
 		log.debugf("connection %i close deferred (wire I/O in flight)", c.socket)
 		c.close_on_io = true
 		return
 	}
-	if c.tls_ct_recv_inflight || c.reactor_read_armed {
-		log.debugf("connection %i close deferred (recv interest in flight)", c.socket)
+	if conn_reactor_io_in_flight(c) {
 		c.close_on_io = true
 		return
-	}
-	when ODIN_OS == .Darwin {
-		if c.reactor_write_armed {
-			log.debugf("connection %i close deferred (reactor WRITE armed)", c.socket)
-			c.close_on_io = true
-			return
-		}
 	}
 
 	// Session teardown before close (Client_Gone path may have already destroyed).
@@ -1249,28 +1236,8 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	if c.close_pending {
 		return
 	}
-	// Darwin P5: sync close (no submit_close / soft CQE). Linux: close SQE.
-	when ODIN_OS == .Darwin {
-		reactor_host_close(c)
-		return
-	} else {
-		// Close the process fd (raw). After CQE we FILES_UPDATE the fixed slot to -1
-		// (drops the registered ref). Using FIXED_FILE for close would leave the process
-		// fd open and leak descriptors.
-		_, err := proactr.submit_close(&td.ring, i32(c.socket), c, -1)
-		if err != .None {
-			log.errorf("submit_close failed: %v", err)
-			// Fall back to synchronous close + free.
-			net.close(c.socket)
-			if c.fixed_idx >= 0 {
-				_ = proactr.ring_file_clear(&td.ring, c.fixed_idx)
-				c.fixed_idx = -1
-			}
-			connection_destroy(c)
-			return
-		}
-		c.close_pending = true
-	}
+	// Backend finish: reactor_host_close (kqueue Darwin) or submit_close (proactor).
+	conn_close_finish(c)
 }
 
 // Protocol request handling. Parsing is callback-driven via Scanner;

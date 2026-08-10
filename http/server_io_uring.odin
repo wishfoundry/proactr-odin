@@ -1,7 +1,8 @@
 #+build linux
 package http
 
-// Linux-only: SO_REUSEPORT listen via raw core:sys/linux (net.set_option lacks Reuse_Port).
+// Host backend: proactr io_uring (Linux).
+// Per-worker SO_REUSEPORT listen; product I/O on the proactr ring.
 
 import "core:log"
 import "core:net"
@@ -9,12 +10,18 @@ import "core:sys/linux"
 
 import proactr "../proactr"
 
-// host_listen_reuseport creates a TCP listen socket with SO_REUSEADDR + SO_REUSEPORT.
-// Mirrors core:net _listen_tcp but sets REUSEPORT via raw linux.setsockopt before bind.
+// host_listen_bind: no process-wide listen; workers bind REUSEPORT at attach.
 @(private)
-host_listen_reuseport :: proc(
+host_listen_bind :: proc(s: ^Server, endpoint: net.Endpoint) -> proactr.Error {
+	_ = s
+	_ = endpoint
+	return .None
+}
+
+@(private)
+_io_uring_listen_reuseport :: proc(
 	endpoint: net.Endpoint,
-	backlog: int = HOST_LISTEN_BACKLOG,
+	backlog: int,
 ) -> (sock: net.TCP_Socket, err: proactr.Error) {
 	family: linux.Address_Family
 	addr: linux.Sock_Addr_Any
@@ -53,13 +60,11 @@ host_listen_reuseport :: proc(
 		log.errorf("setsockopt REUSEADDR: %v", errno)
 		return {}, .Init_Failed
 	}
-	// SO_REUSEPORT: required for multi-worker listen.
 	if errno = linux.setsockopt(fd, linux.SOL_SOCKET, linux.Socket_Option.REUSEPORT, &one); errno != .NONE {
 		linux.close(fd)
 		log.errorf("setsockopt REUSEPORT: %v", errno)
 		return {}, .Init_Failed
 	}
-
 	if errno = linux.bind(fd, &addr); errno != .NONE {
 		linux.close(fd)
 		log.errorf("bind: %v", errno)
@@ -73,11 +78,65 @@ host_listen_reuseport :: proc(
 	return net.TCP_Socket(fd), .None
 }
 
-// host_accept_is_unsupported_multishot is true when accept failed because multishot
-// is not supported (-EINVAL / -EOPNOTSUPP). Host falls back to single-shot.
+@(private)
+host_worker_attach_listen :: proc(s: ^Server) -> bool {
+	lfd, lerr := _io_uring_listen_reuseport(s.endpoint, s.opts.listen_backlog)
+	if lerr != .None {
+		log.errorf("listen REUSEPORT failed: %v", lerr)
+		return false
+	}
+	td.listen_fd = lfd
+	return true
+}
+
+@(private)
+server_close_listen_sockets :: proc(s: ^Server) {
+	if s.threads == nil {
+		return
+	}
+	for &t in s.threads {
+		if t.listen_fd != {} {
+			net.close(t.listen_fd)
+			t.listen_fd = {}
+		}
+	}
+	s.tcp_sock = {}
+}
+
+@(private)
+conn_reactor_io_in_flight :: proc(c: ^Connection) -> bool {
+	if c.tls_ct_recv_inflight || c.reactor_read_armed {
+		log.debugf("connection %i close deferred (recv interest in flight)", c.socket)
+		return true
+	}
+	return false
+}
+
+@(private)
+conn_close_finish :: proc(c: ^Connection) {
+	_, err := proactr.submit_close(&td.ring, i32(c.socket), c, -1)
+	if err != .None {
+		log.errorf("submit_close failed: %v", err)
+		net.close(c.socket)
+		if c.fixed_idx >= 0 {
+			_ = proactr.ring_file_clear(&td.ring, c.fixed_idx)
+			c.fixed_idx = -1
+		}
+		connection_destroy(c)
+		return
+	}
+	c.close_pending = true
+}
+
+// Returns true if this backend took over the worker thread (native loop).
+@(private)
+host_worker_enter :: proc(s: ^Server) -> bool {
+	_ = s
+	return false // portable proactr host loop in server.odin
+}
+
 @(private)
 host_accept_is_unsupported_multishot :: proc(result: i32) -> bool {
-	// Numeric errno avoids coupling the host loop to linux.Errno on every path.
 	EINVAL :: 22
 	EOPNOTSUPP :: 95
 	return result == -EINVAL || result == -EOPNOTSUPP

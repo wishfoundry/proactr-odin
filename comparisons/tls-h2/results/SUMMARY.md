@@ -1,12 +1,12 @@
 # TLS/H2 peer matrix results
 
 - **Host:** Benjamins-MacBook-Pro.local · Darwin 25.5.0
-- **When:** 2026-08-09T23:31Z
+- **When:** 2026-08-10T14:32Z
 - **WORKERS=8** · **BENCH_C=50** · **BENCH_Z=10s** · **WARMUP_Z=3s**
 - **Loadgen:** h2load -c 50 -D 10 -t 4 · SSL_CERT_FILE=matrix cert
-- **Protocols:** h2 h1s (h2 = ALPN h2 required; h1s = TLS HTTP/1.1)
-- **Peers requested:** proactr ntex drogon
-- **Peers built:**  proactr ntex drogon
+- **Protocols:** h1s (h2 = ALPN h2 required; h1s = TLS HTTP/1.1)
+- **Peers requested:** proactr drogon
+- **Peers built:**  proactr drogon
 
 ## Backend labels
 
@@ -17,35 +17,50 @@
 | drogon | trantor **kqueue** | OpenSSL | primarily H1; h2 cells N/A if no_h2 |
 | go | net/http **kqueue** | crypto/tls | automatic HTTP/2 |
 
-## RPS matrix
+## RPS matrix (this session)
 
 ```
 peer     proto  test       rps        status  app_proto  failed  errored  timeout
-proactr  h2     plaintext  96253.30   ok      h2         0       0        0
-proactr  h2     s4k        84994.70   ok      h2         0       0        0
-proactr  h2     s64k       30488.90   ok      h2         0       0        0
-proactr  h2     s1m        2215.80    ok      h2         0       0        0
-proactr  h1s    plaintext  111729.80  ok      http/1.1   0       0        0
-proactr  h1s    s4k        86941.80   ok      http/1.1   0       0        0
-proactr  h1s    s64k       30553.50   ok      http/1.1   0       0        0
-proactr  h1s    s1m        2598.90    ok      http/1.1   0       0        0
-ntex     h2     plaintext  128477.90  ok      h2         0       0        0
-ntex     h2     s4k        129834.20  ok      h2         0       0        0
-ntex     h2     s64k       44087.00   ok      h2         0       0        0
-ntex     h2     s1m        1017.80    ok      h2         0       0        0
-ntex     h1s    plaintext  137403.10  ok      http/1.1   0       0        0
-ntex     h1s    s4k        139035.50  ok      http/1.1   0       0        0
-ntex     h1s    s64k       57248.60   ok      http/1.1   0       0        0
-ntex     h1s    s1m        1995.50    ok      http/1.1   0       0        0
-drogon   h2     plaintext  N/A        no_h2   http/1.1   0       0        0
-drogon   h2     s4k        N/A        no_h2   http/1.1   0       0        0
-drogon   h2     s64k       N/A        no_h2   http/1.1   0       0        0
-drogon   h2     s1m        N/A        no_h2   http/1.1   0       0        0
-drogon   h1s    plaintext  150542.00  ok      http/1.1   0       0        0
-drogon   h1s    s4k        149807.20  ok      http/1.1   0       0        0
-drogon   h1s    s64k       65093.00   ok      http/1.1   0       0        0
-drogon   h1s    s1m        8611.90    ok      http/1.1   0       0        0
+proactr  h1s    plaintext  150002.60  ok      http/1.1   0       0        0
+proactr  h1s    s4k        148878.00  ok      http/1.1   0       0        0
+proactr  h1s    s64k       75288.60   ok      http/1.1   0       0        0
+proactr  h1s    s1m        10293.30   ok      http/1.1   0       0        0
+drogon   h1s    plaintext  152441.10  ok      http/1.1   0       0        0
+drogon   h1s    s4k        150255.50  ok      http/1.1   0       0        0
+drogon   h1s    s64k       65582.70   ok      http/1.1   0       0        0
+drogon   h1s    s1m        8630.10    ok      http/1.1   0       0        0
 ```
+
+### vs drogon (this session)
+
+| test | proactr | drogon | proactr/drogon |
+|------|--------:|-------:|---------------:|
+| plaintext | 150003 | 152441 | **0.98×** |
+| s4k | 148878 | 150256 | **0.99×** |
+| s64k | 75289 | 65583 | **1.15×** |
+| s1m | 10293 | 8630 | **1.19×** |
+
+## Historical proactr (before shared multi-kq / accept fix)
+
+Same host class · WORKERS=8 · h2load `-c 50 -D 10 -t 4` · h1s.  
+**Not same-session** with drogon above — use for proactr self-compare only.
+
+| Anchor | When / SHA | plain | s4k | s64k | s1m | vs drogon s1m (that session) | Note |
+|--------|------------|------:|----:|-----:|----:|-----------------------------:|------|
+| **P5 baseline** | 2026-08-09 · `c93ddb8` · `BASELINE_P5.md` | **111730** | 86942 | 30554 | **2599** | **0.30×** (8612) | Native reactor wait; **SO_REUSEPORT** multi-worker — 1 hot worker on localhost |
+| **Pre-shared-listen** | 2026-08-10 · `5f5e9f9` · `CRITIC_DROGON_ITER_01` | **95723** | 84602 | 29144 | **2736** | **0.33×** (8195) | Checklist stack (peek, 128 KiB seal, …); still REUSEPORT pin |
+| **This session** | 2026-08-10T14:32Z · post `server_kqueue` refactor | **150003** | 148878 | 75289 | **10293** | **1.19×** (8630) | **Shared listen multi-kq** + cleanup; 8 workers busy |
+
+### proactr absolute delta (this session / P5)
+
+| test | P5 | now | now/P5 |
+|------|---:|----:|-------:|
+| plaintext | 111730 | 150003 | **1.34×** |
+| s4k | 86942 | 148878 | **1.71×** |
+| s64k | 30554 | 75289 | **2.46×** |
+| s1m | 2599 | 10293 | **3.96×** |
+
+Sources: `results/BASELINE_P5.md` · `results/baseline_p5_20260809/summary.tsv` · `results/CRITIC_DROGON_ITER_01.md` · live `summary.tsv`.
 
 ## Fairness notes
 
@@ -59,94 +74,86 @@ drogon   h1s    s1m        8611.90    ok      http/1.1   0       0        0
 - Instrumentation: /_matrix/stats after each cell → instrumentation.txt
 - Not multi-stream SSE RPS; oneshot size ladder only.
 
-## Errors / warnings
-```
-WARN drogon h2 plaintext negotiated 'http/1.1' not h2 → N/A
-WARN drogon h2 s4k negotiated 'http/1.1' not h2 → N/A
-WARN drogon h2 s64k negotiated 'http/1.1' not h2 → N/A
-WARN drogon h2 s1m negotiated 'http/1.1' not h2 → N/A
-```
-
 ## Instrumentation (excerpt)
 ```
---- stats proactr h2.plaintext ---
+--- stats proactr h1s.plaintext ---
 peer=proactr
 io_engine=reactor-kqueue
-io_engine_note=reactor_kqueue_wait;accept_recv_write_close_native;timers_soft_cq;tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;no_proactr_socket_submit;no_dual_ct_ahead;no_soft_nop_fairness
-reqs=1925147
-seal_calls=962649
-seals_per_req=0.500
-ssl_write_ok=962649
-pt_bytes=65483666
-ct_bytes=54014926
-ct_pt_ratio=0.8249
-h2_flush=962648
-h2_pt_bytes=32741782
-ct_sends=962751
-materialize=1
-seal_windows=962649
-kevent_turns=1925147
-seal_windows_per_kevent_turn=0.500
-soft_cq_send_completes=0
-eagain_arms=0
---- stats proactr h2.s4k ---
-peer=proactr
-io_engine=reactor-kqueue
-io_engine_note=reactor_kqueue_wait;accept_recv_write_close_native;timers_soft_cq;tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;no_proactr_socket_submit;no_dual_ct_ahead;no_soft_nop_fairness
-reqs=1699993
-seal_calls=850072
-seals_per_req=0.500
-ssl_write_ok=850072
-pt_bytes=6998691616
-ct_bytes=3518142207
-ct_pt_ratio=0.5027
-h2_flush=850071
-h2_pt_bytes=3499345757
-ct_sends=850174
-materialize=1
-seal_windows=850072
-kevent_turns=1699993
-seal_windows_per_kevent_turn=0.500
-soft_cq_send_completes=0
-eagain_arms=0
---- stats proactr h2.s64k ---
-peer=proactr
-io_engine=reactor-kqueue
-io_engine_note=reactor_kqueue_wait;accept_recv_write_close_native;timers_soft_cq;tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;no_proactr_socket_submit;no_dual_ct_ahead;no_soft_nop_fairness
-reqs=609849
-seal_calls=609899
+io_engine_note=reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_drain;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead
+reqs=1500075
+seal_calls=1500075
 seals_per_req=1.000
-ssl_write_ok=609899
-pt_bytes=39993022434
-ct_bytes=20030147144
-ct_pt_ratio=0.5008
-h2_flush=609898
-h2_pt_bytes=19996511166
-ct_sends=610001
-materialize=1
-seal_windows=609899
-kevent_turns=609849
+ssl_write_ok=1500075
+pt_bytes=169508464
+ct_bytes=202605178
+ct_pt_ratio=1.1953
+h2_flush=0
+h2_pt_bytes=0
+ct_sends=1500177
+materialize=1500075
+seal_windows=1500075
+kevent_turns=1500075
 seal_windows_per_kevent_turn=1.000
 soft_cq_send_completes=0
 eagain_arms=0
---- stats proactr h2.s1m ---
+first_seal_pt_sum=169508464
+first_seal_n=1500075
+first_seal_pt_avg=113.0
+--- stats proactr h1s.s4k ---
 peer=proactr
 io_engine=reactor-kqueue
-io_engine_note=reactor_kqueue_wait;accept_recv_write_close_native;timers_soft_cq;tls_h1_h2_send_reactor;stream_residual_first;hs_drain_reactor;no_proactr_socket_submit;no_dual_ct_ahead;no_soft_nop_fairness
-reqs=44371
-seal_calls=376823
-seals_per_req=8.493
-ssl_write_ok=376823
-pt_bytes=46499370922
-ct_bytes=23281471540
-ct_pt_ratio=0.5007
-h2_flush=376822
-h2_pt_bytes=23249685410
-ct_sends=376925
-materialize=1
-seal_windows=376823
-kevent_turns=44373
-seal_windows_per_kevent_turn=8.492
+io_engine_note=reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_drain;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead
+reqs=1488827
+seal_calls=1488827
+seals_per_req=1.000
+ssl_write_ok=1488827
+pt_bytes=6250091650
+ct_bytes=6282940908
+ct_pt_ratio=1.0053
+h2_flush=0
+h2_pt_bytes=0
+ct_sends=1488929
+materialize=1488827
+seal_windows=1488827
+kevent_turns=1488827
+seal_windows_per_kevent_turn=1.000
 soft_cq_send_completes=0
 eagain_arms=0
+first_seal_pt_sum=6250091650
+first_seal_n=1488827
+first_seal_pt_avg=4198.0
+--- stats proactr h1s.s64k ---
+peer=proactr
+io_engine=reactor-kqueue
+io_engine_note=reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_drain;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead
+reqs=752933
+seal_calls=1505865
+seals_per_req=2.000
+ssl_write_ok=1505865
+pt_bytes=49421703650
+ct_bytes=49504621256
+ct_pt_ratio=1.0017
+h2_flush=0
+h2_pt_bytes=0
+ct_sends=1505967
+materialize=1
+seal_windows=1505865
+kevent_turns=752933
+seal_windows_per_kevent_turn=2.000
+soft_cq_send_completes=0
+eagain_arms=0
+first_seal_pt_sum=77552098
+first_seal_n=752933
+first_seal_pt_avg=103.0
+--- stats proactr h1s.s1m ---
+peer=proactr
+io_engine=reactor-kqueue
+io_engine_note=reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_drain;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead
+reqs=102967
+seal_calls=926710
+seals_per_req=9.000
+ssl_write_ok=926710
+pt_bytes=107980192094
+ct_bytes=108127530892
+ct_pt_ratio=1.0014
 ```

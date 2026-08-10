@@ -203,6 +203,17 @@ provider_openssl_dynlib :: proc(
 		if wbio == nil do return 0
 		return c.int(s.BIO_ctrl_pending(wbio))
 	}
+	// Cache wBIO once on host Connection after setup_mem_bios (hot drain path).
+	p.get_wbio = proc(self: ^Provider, ssl: Conn) -> rawptr {
+		s := (^Dynlib_State)(self.user_data)
+		return s.SSL_get_wbio(rawptr(ssl))
+	}
+	// Direct wBIO ops — no SSL_get_wbio (A8 density / ITER_01).
+	p.bio_pending_out_bio = proc(self: ^Provider, wbio: rawptr) -> c.int {
+		s := (^Dynlib_State)(self.user_data)
+		if wbio == nil do return 0
+		return c.int(s.BIO_ctrl_pending(wbio))
+	}
 	// Zero-copy wBIO view (drogon sendTLSData shape) when BIO_ctrl resolved.
 	if st.BIO_ctrl != nil {
 		p.bio_peek_out = proc(self: ^Provider, ssl: Conn, out_ptr: ^rawptr) -> c.int {
@@ -233,6 +244,26 @@ provider_openssl_dynlib :: proc(
 				return 0
 			}
 			// OpenSSL BIO_reset: mem BIO returns 1 on success.
+			rc := s.BIO_ctrl(wbio, 1, 0, nil)
+			return 1 if rc >= 0 else 0
+		}
+		p.bio_peek_out_bio = proc(self: ^Provider, wbio: rawptr, out_ptr: ^rawptr) -> c.int {
+			s := (^Dynlib_State)(self.user_data)
+			if s.BIO_ctrl == nil || wbio == nil || out_ptr == nil {
+				return 0
+			}
+			out_ptr^ = nil
+			n := s.BIO_ctrl(wbio, 3, 0, out_ptr)
+			if n <= 0 || out_ptr^ == nil {
+				return 0
+			}
+			return c.int(n)
+		}
+		p.bio_reset_out_bio = proc(self: ^Provider, wbio: rawptr) -> c.int {
+			s := (^Dynlib_State)(self.user_data)
+			if s.BIO_ctrl == nil || wbio == nil {
+				return 0
+			}
 			rc := s.BIO_ctrl(wbio, 1, 0, nil)
 			return 1 if rc >= 0 else 0
 		}

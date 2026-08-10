@@ -123,6 +123,8 @@ tls_host_on_accept :: proc(conn: ^Connection) -> bool {
 		tls_server.conn_free(p, ssl)
 		return false
 	}
+	// Cache wBIO once — reactor drain/pending avoid SSL_get_wbio per iteration.
+	wbio := tls_server.get_wbio(p, ssl)
 	// Accepting server; partial write for windowed response seal.
 	_ = tls_server.set_mode(
 		p,
@@ -163,6 +165,8 @@ tls_host_on_accept :: proc(conn: ^Connection) -> bool {
 	}
 
 	conn.tls_ssl = ssl
+	conn.tls_wbio = wbio
+	conn.tls_first_seal_pending = false
 	conn.tls_ct_rx = rx
 	conn.dual_ct = Dual_Ct {
 		tx   = tx,
@@ -195,6 +199,8 @@ tls_host_conn_destroy :: proc(conn: ^Connection) {
 		}
 		conn.tls_ssl = nil
 	}
+	conn.tls_wbio = nil // owned by SSL; invalid after conn_free
+	conn.tls_first_seal_pending = false
 	alloc := context.allocator
 	if conn.server != nil {
 		alloc = conn.server.conn_allocator

@@ -38,6 +38,9 @@ path_seal_windows:            u64
 path_kevent_turns:            u64
 path_soft_cq_send_completes:  u64
 path_eagain_arms:             u64
+// First SSL_write plain bytes per oneshot response (coalesce / density honesty).
+path_first_seal_pt_sum:       u64
+path_first_seal_n:            u64
 
 // Profiling cycles (only accumulated when HTTP_PHASE_STATS).
 path_seal_cyc:         u64 // full seal window: SSL_write + bio_read
@@ -151,6 +154,14 @@ path_metrics_note_eagain_arm :: #force_inline proc "contextless" () {
 	sync.atomic_add(&path_eagain_arms, 1)
 }
 
+// First successful SSL_write plain size for an oneshot response (after arm).
+path_metrics_note_first_seal_pt :: #force_inline proc "contextless" (pt: u64) {
+	if pt != 0 {
+		sync.atomic_add(&path_first_seal_pt_sum, pt)
+	}
+	sync.atomic_add(&path_first_seal_n, 1)
+}
+
 // Operator-facing engine label (not APP_CONTRACT; never use in handlers/examples).
 path_metrics_io_engine :: proc() -> string {
 	when ODIN_OS == .Linux {
@@ -170,8 +181,8 @@ path_metrics_io_engine :: proc() -> string {
 // Operator scrape note (not APP_CONTRACT). Keep short; expand in INVENTORY.md.
 path_metrics_io_engine_note :: proc() -> string {
 	when ODIN_OS == .Darwin {
-		// P5 full wait: product sockets on native reactor kqueue; timers soft_cq only.
-		return "reactor_kqueue_wait;level_residual_write;timers_merged_wait;wbio_peek_drain;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead"
+		// Honesty: shared multi-kq listen (scale), level R/W, wBIO peek+cache, 128KiB seal.
+		return "reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_drain;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead"
 	} else {
 		return ""
 	}
@@ -191,6 +202,8 @@ path_metrics_reset :: proc() {
 	sync.atomic_store(&path_kevent_turns, 0)
 	sync.atomic_store(&path_soft_cq_send_completes, 0)
 	sync.atomic_store(&path_eagain_arms, 0)
+	sync.atomic_store(&path_first_seal_pt_sum, 0)
+	sync.atomic_store(&path_first_seal_n, 0)
 	sync.atomic_store(&path_seal_cyc, 0)
 	sync.atomic_store(&path_ssl_write_cyc, 0)
 	sync.atomic_store(&path_bio_read_cyc, 0)
@@ -261,6 +274,15 @@ path_metrics_format :: proc(allocator := context.allocator) -> string {
 	fmt.sbprintf(&b, "seal_windows_per_kevent_turn=%.3f\n", sw_per_turn)
 	fmt.sbprintf(&b, "soft_cq_send_completes=%d\n", soft_cq)
 	fmt.sbprintf(&b, "eagain_arms=%d\n", eagain)
+	first_sum := sync.atomic_load(&path_first_seal_pt_sum)
+	first_n := sync.atomic_load(&path_first_seal_n)
+	first_avg: f64 = 0
+	if first_n > 0 {
+		first_avg = f64(first_sum) / f64(first_n)
+	}
+	fmt.sbprintf(&b, "first_seal_pt_sum=%d\n", first_sum)
+	fmt.sbprintf(&b, "first_seal_n=%d\n", first_n)
+	fmt.sbprintf(&b, "first_seal_pt_avg=%.1f\n", first_avg)
 	when HTTP_PHASE_STATS {
 		seal_c := sync.atomic_load(&path_seal_cyc)
 		ssl_c := sync.atomic_load(&path_ssl_write_cyc)
