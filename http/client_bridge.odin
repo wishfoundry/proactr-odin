@@ -6,7 +6,6 @@ import proactr "../proactr"
 
 // Client_Bridge lets package client plug into the host without http→client import
 // (client already imports http for Status / Response). Registered via @(init) in client.
-//
 // Law: inbound CQE demux stays zero-map when user is ^Connection; client claims only
 // when user is tagged (CLIENT_USER_TAG low bit) then magic/live checks (see client package).
 Client_Bridge :: struct {

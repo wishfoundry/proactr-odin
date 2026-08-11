@@ -1,14 +1,12 @@
 package middleware
 
 // Handler chain builder and from_fn ergonomics.
-//
 // Model (proactor-aligned):
 //   - Middleware is a Handler that may call next, respond, or submit I/O.
 //   - Continuations are (callback, user) delivered by the proactr runtime — not a
 //     public http.resume API.
 //   - Request-scoped state uses the request allocator (conn temp arena).
 //   - After-behavior uses http.response_on_respond / on_complete (host-fired).
-//
 // Chain nodes are individually heap-allocated so ^Handler next pointers never
 // move (unlike inject_at into a [dynamic]Handler array).
 
@@ -71,13 +69,20 @@ Tracked_Data :: struct {
 // Chain — onion stack with heap-stable Handler nodes
 // ---------------------------------------------------------------------------
 
+@(private)
+Tracked_Handler_Free :: struct {
+	h:    ^http.Handler,
+	free: proc(h: ^http.Handler, allocator: runtime.Allocator),
+}
+
 // Owns heap Handler nodes. root is outermost (server entry).
 // nodes[0] is always the terminal; later entries are outer layers.
 Chain :: struct {
-	allocator:  runtime.Allocator,
-	root:       ^http.Handler, // outermost; nil if empty
-	nodes:      [dynamic]^http.Handler,
-	layer_data: [dynamic]Tracked_Data,
+	allocator:     runtime.Allocator,
+	root:          ^http.Handler, // outermost; nil if empty
+	nodes:         [dynamic]^http.Handler,
+	layer_data:    [dynamic]Tracked_Data,
+	handler_frees: [dynamic]Tracked_Handler_Free, // free_built (rate_limit/cors/security deep free)
 }
 
 // Initialize with the terminal (innermost) handler. Call chain_use to wrap outward.
@@ -85,6 +90,7 @@ chain_init :: proc(c: ^Chain, terminal: http.Handler, allocator := context.alloc
 	c.allocator = allocator
 	c.nodes = make([dynamic]^http.Handler, 0, 8, allocator)
 	c.layer_data = make([dynamic]Tracked_Data, 0, 8, allocator)
+	c.handler_frees = make([dynamic]Tracked_Handler_Free, 0, 8, allocator)
 	node := new(http.Handler, allocator)
 	node^ = terminal
 	append(&c.nodes, node)
@@ -92,13 +98,22 @@ chain_init :: proc(c: ^Chain, terminal: http.Handler, allocator := context.alloc
 }
 
 chain_destroy :: proc(c: ^Chain) {
-	// Free layer user_data for non-terminal nodes (logger/cors/from_fn states).
-	// Terminal user_data is owned by the app (router, etc.) — do not free.
+	// free_built first (rate_limit store, CORS/security deep free). Must nil user_data.
+	for tf in c.handler_frees {
+		if tf.h == nil || tf.free == nil {
+			continue
+		}
+		tf.free(tf.h, c.allocator)
+	}
+	delete(c.handler_frees)
+
+	// Free remaining wrap user_data (logger/from_fn). Terminal app data untouched.
 	for i in 1 ..< len(c.nodes) {
 		h := c.nodes[i]
 		if h == nil || h.user_data == nil {
 			continue
 		}
+		// Legacy special-cases if free_built was not registered.
 		if h.handle == _cors_handle {
 			cors_destroy(h, c.allocator)
 			continue
@@ -155,6 +170,9 @@ chain_use :: proc(c: ^Chain, layer: Layer) {
 	node^ = built
 	// Ensure Handler.next matches state.next for consistency.
 	node.next = c.root
+	if layer.free_built != nil {
+		append(&c.handler_frees, Tracked_Handler_Free{h = node, free = layer.free_built})
+	}
 	append(&c.nodes, node)
 	c.root = node
 }

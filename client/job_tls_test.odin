@@ -1,4 +1,3 @@
-// PR3: https H1/H2 over proactr mem-BIO Client_Job.
 package client
 
 import "core:c"
@@ -399,7 +398,6 @@ test_proactr_https_cancel_during_handshake :: proc(t: ^testing.T) {
 		return
 	}
 	testing.expect(t, job != nil && job.live, "job live")
-	// Option B: first cancel fires on_done sync with .Closed (no second reason).
 	job_cancel(job, false)
 	testing.expect_value(t, ctx.calls, 1)
 	testing.expect_value(t, ctx.err, Http_Error.Closed)

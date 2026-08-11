@@ -81,7 +81,7 @@ job_unlink_slot :: proc(job: ^Client_Job) {
 	job.slot = nil
 }
 
-// client_jobs_cancel_slot — walk slot list, unlink, cancel each (Option B sync on_done).
+// client_jobs_cancel_slot — walk slot list, unlink, cancel each.
 // O(jobs on that slot). Host calls with exchange_gone=true on clean/destroy.
 client_jobs_cancel_slot :: proc(slot: ^http.Stream_Slot, exchange_gone := true) {
 	if slot == nil do return

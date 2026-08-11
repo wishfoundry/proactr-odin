@@ -1,5 +1,4 @@
 // Shared OpenSSL ≥3.5 dynlib loader for quic, client TCP TLS, and tls_server.
-// Plan: docs/design/openssl-single-dep-cutover.md — single process-wide load.
 // No static BoringSSL.
 package openssl_dynlib
 

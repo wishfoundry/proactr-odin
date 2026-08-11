@@ -1,12 +1,10 @@
 package quic
 
 // Single bidirectional QUIC stream state machine.
-//
 // zenoh-odin uses exactly one bidi stream per QUIC connection (the
 // `zenoh-mr` ALPN / single-stream mode). The client opens stream 0 via
 // `connection.open_bi()` at connect time, and all reliable zenoh messages
 // flow through it for the session's lifetime.
-//
 // Ownership: the Stream is heap-allocated and owned by the Conn. It is
 // created in `stream_open` and destroyed in `stream_free`. Access is
 // single-threaded — the caller of the Conn drives send/recv via the same
@@ -131,7 +129,6 @@ NUM_PRIORITY_UNI_STREAMS :: 7
 // its own send channel. Caller is responsible for calling this in
 // priority order so the natural stream-id ordering matches priority
 // ordering on the peer side (zenoh-rs relies on the same convention).
-//
 // Returns nil if the peer's initial_max_streams_uni budget has been
 // exhausted — caller must back off or fall back to the control stream.
 conn_open_uni :: proc(conn: ^Conn, allocator := context.allocator) -> ^Stream {
@@ -198,7 +195,6 @@ conn_open_bidi :: proc(conn: ^Conn, allocator := context.allocator) -> ^Stream {
 // should carry its frames. In single-stream mode every priority uses
 // the control bidi (id 0). In multi-stream mode Control stays on id 0
 // and priorities 1..7 use the locally-opened uni streams in open order.
-//
 // Returns nil if the corresponding stream hasn't been opened yet. Callers
 // in multi-stream mode are expected to open all 7 uni streams up front
 // (zenoh-rs does this in UniStreams::try_open) so the lookup is hit-only

@@ -107,7 +107,7 @@ nodes[0] = mw.request_id({}, &nodes[1])
 | `cors` / `cors_layer` | CORS + OPTIONS preflight; `Cors_Default` for public APIs |
 | `security_headers` / `security_headers_layer` | nosniff, frame options, referrer-policy, optional HSTS/CSP |
 | `static_*` | Elite static files (see `STATIC.md`) |
-| `http.rate_limit` | IP rate limit (package `http`) |
+| `rate_limit_layer` / `http.rate_limit` | GCRA multi-policy local rate limit (bounded store; see below) |
 | `from_fn` / `chain_use_fn` / `builder_use_fn` | Custom `(req, res, next)` layers |
 | `to_http_layer` | Adapt `middleware.Layer` → `http.Layer` for `builder_use` |
 
@@ -127,6 +127,78 @@ http.response_on_complete(res, user, proc(req, res, user) {
 - **Max 4** of each per request (`RESPOND_HOOKS_MAX`) — fixed array, zero heap on register.
 - **LIFO** fire order (onion: outer registers first, runs last on the way out).
 - `user` should live in the **request allocator** (or static/server memory).
+
+## Rate limit (stock)
+
+**Engine:** package `http` (`Store`, `store_allow`, keys, `rate_limit`).  
+**Layer:** `middleware.rate_limit_layer`.
+
+- **Algorithm:** GCRA per key; multi-policy with `store_key(policy_index, user_key)` isolation.
+- **Default** `rate_limit_layer({})`: 100/s **peer IP**, capacity 65 536, `Evict_Cold`.
+- **Memory-safe under key spray** (hard cap). Not a global spray ceiling alone — compose
+  `key_global` + `key_peer_ip` (or `key_client_ip` behind a trusted LB).
+- **Per-process only** (each replica has its own budget). No Redis/cluster backend.
+- **X-Forwarded-For:** ignored unless `key_client_ip` + non-empty `client_ip.trusted` CIDRs.
+- **429** + `Retry-After` + `X-RateLimit-Limit|Remaining|Reset`. Pure `store_allow` has no HTTP.
+- **Destroy:** layer `free_built` frees owned store; host `opts.store` is never destroyed by the layer.
+
+```odin
+// Zero-value
+http.builder_use(&b, mw.to_http_layer(mw.rate_limit_layer({})))
+
+// Production-ish: global + per-IP
+http.builder_use(&b, mw.to_http_layer(mw.rate_limit_layer({
+	policies = {
+		{ name = "global", limit = 50_000, period = time.Second, key_fn = http.key_global },
+		{ name = "ip", limit = 100, period = time.Second, key_fn = http.key_peer_ip },
+	},
+	skip_paths = { "/healthz" },
+	capacity = 100_000,
+})))
+```
+
+Immediate twin (tests / custom handlers):
+
+```odin
+var store: http.Store
+http.store_init(&store, 10_000)
+defer http.store_destroy(&store)
+g := http.gcra_from_limit_period(50, time.Second, 50) or_else panic()
+d := http.store_allow(&store, http.store_key(0, key), 1, g, now_ns)
+if !d.allowed {
+	http.rate_limit_write_deny(res, d, time.now(), "")
+	http.respond(res)
+}
+```
+
+## Live latency / RPS quantiles (optional)
+
+Package **`quantile/`** (import as `quantile`) is host-agnostic helpers for app middleware
+and handlers. Not wired into the core path metrics; use when you want your own
+p50/p75/p90/p99 estimates.
+
+- **Streaming (O(1) per sample, fixed 4-field set):** `quantile.Set` + `set_observe` /
+  `set_observe_i64` — Frugal-2 estimates for p50, p75, p90, p99. Single-writer.
+- **RPS stream (separate Set):** `rate_from_counts` or `Rate_Window` + `rate_window_tick`
+  over a 1 s (or other) window; feed rate samples into their own `Set`, never mix with latency.
+- **Offline (true order stats):** `percentile`, `quartiles`, `set_percentiles` for tests/benches.
+
+```odin
+import quantile "path/to/quantile"
+
+// e.g. process-global or per-worker (single-writer)
+lat: quantile.Set
+rps: quantile.Rate_Window
+
+// on_respond / handler complete:
+quantile.set_observe_i64(&lat, i64(duration_ns))
+
+// on a timer tick with total completed-request counter:
+quantile.rate_window_tick(&rps, total_reqs, 1.0)
+
+snap := quantile.set_snapshot(lat)
+// snap.p50, snap.p75, snap.p90, snap.p99  — estimates, not loadgen truth
+```
 
 ## Custom middleware
 

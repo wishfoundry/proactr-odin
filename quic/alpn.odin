@@ -4,7 +4,6 @@ import "core:c"
 
 // ALPN protocol identifiers for the zenoh QUIC transport, mirroring
 // zenoh-rs's `zenoh-link-commons/src/quic/utils.rs`.
-//
 // Ordered by capability — the server is expected to pick the first one
 // it supports from the client's list, so the client should advertise
 // these in decreasing priority. zenoh-rs's compute_alpn_protocols does
@@ -33,7 +32,6 @@ _alpn_append :: proc(buf: ^[64]u8, n: int, proto: string) -> int {
 // peer supports them; the single-stream and legacy entries keep us
 // interoperable with zenohd 1.8/1.9 and quinn-based zenoh-rs clients
 // that haven't been bumped to multi-stream yet.
-//
 // `out` must be sized for the full list (~64 bytes is comfortable). The
 // returned slice is a view into `out`.
 build_zenoh_alpn_wire :: proc(out: ^[64]u8) -> []u8 {

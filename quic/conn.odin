@@ -3,7 +3,6 @@
 // socket fields for convenience connect/pump paths. BYO UDP: conn_on_udp_recv
 // + packet builders without conn_connect. Full socket detachment is follow-up.
 // See docs/LIBRARY.md.
-//
 // TLS: OpenSSL 3.5+ dynlib via SSL_set_quic_tls_cbs (not BoringSSL, not OSSL_QUIC_*).
 package quic
 
@@ -14,7 +13,6 @@ import "core:strings"
 import "core:time"
 
 // Connection state machine.
-//
 // Client/server QUIC connection lifecycle: OpenSSL setup, quic-tls callback
 // wiring, and the handshake driver (CRYPTO FIFO + SSL_do_handshake).
 
@@ -68,7 +66,6 @@ Pn_Space :: struct {
 }
 
 // --- Handshake-phase PTO retransmission -------------------------------------
-//
 // `flight` mirrors the level's full sent crypto stream [0, len). On PTO the
 // whole (small: ClientHello / Finished) flight is re-queued at offset 0 — far
 // simpler than per-packet range tracking, and a duplicate CRYPTO range is
@@ -860,7 +857,6 @@ _conn_clear_packet_keys :: proc(conn: ^Conn) {
 
 // Start the handshake. Invokes SSL_do_handshake via tls_drive with an empty
 // FIFO; crypto_send emits ClientHello into Initial tx_crypto.
-//
 // Call conn_build_initial_packet to turn pending CRYPTO into a wire packet.
 conn_start_handshake :: proc(conn: ^Conn) -> Quic_Error {
 	if conn.state != .Idle do return .Handshake_Failed
@@ -876,7 +872,6 @@ conn_start_handshake :: proc(conn: ^Conn) -> Quic_Error {
 // Build an Initial packet from whatever CRYPTO data is pending in conn.initial.tx_crypto.
 // The packet is padded with PADDING frames so that the UDP datagram reaches
 // the RFC 9000 §14.1 minimum of 1200 bytes. Returns bytes written to `out`.
-//
 // After this call, conn.initial.tx_crypto is cleared (bytes are "in flight").
 // A full implementation would keep them buffered for PTO retransmit; phase 7a
 // skips that for the single-packet happy path.

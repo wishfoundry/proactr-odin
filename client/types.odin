@@ -45,7 +45,7 @@ Http_Error :: enum {
 	Not_Configured,
 }
 
-// Fixed diagnostic for .Invalid_Use (design §5.6).
+// Fixed diagnostic for .Invalid_Use.
 INVALID_USE_DIAGNOSTIC :: "blocking client API on server worker; use get_async"
 
 // Header field pair — QPACK/H3 native; H2 path converts to http2.Header (hpack).

@@ -1,7 +1,6 @@
 package http
 
 // Ciphered H1 oneshot plain-split policy (heading vs full materialize).
-//
 // When a single borrowed Static/Bytes body is large enough, seal the heading
 // from resp_buf and the body from the cmd view — avoids O(body) memcpy into
 // resp_buf. Tiny bodies stay on Materialize_Full so one SSL_write/CQE turn

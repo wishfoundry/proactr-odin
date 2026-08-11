@@ -4,12 +4,10 @@ import "core:testing"
 import "core:time"
 
 // End-to-end loopback test for QUIC streams.
-//
 // Creates a client + server Conn pair, drives the TLS 1.3 handshake through
 // them, opens a bidi stream on the client side, and exchanges bytes over
 // the stream via `stream_write` / `conn_build_stream_packet` /
 // `conn_on_udp_recv` / `stream_read`.
-//
 // Companion to `test_loopback_handshake` and `test_loopback_datagram_roundtrip`
 // which cover the handshake and DATAGRAM paths respectively.
 
@@ -288,7 +286,6 @@ test_loopback_stream_bidirectional :: proc(t: ^testing.T) {
 test_loopback_stream_retransmit_on_pto :: proc(t: ^testing.T) {
 	// The whole point of the New Reno + retained-buffer work: a lost STREAM
 	// packet is retransmitted on PTO and the payload still arrives.
-	//
 	// Setup is the loopback harness, but we DON'T deliver the first packet
 	// (simulating loss). Then we advance the injected clock past the PTO
 	// deadline, fire loss_check_pto, rebuild, and deliver the retransmit.

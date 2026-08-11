@@ -1,33 +1,17 @@
-# TLS H1 — implementer notes (PR5 + PR6)
+# TLS H1 — implementer notes
 
-**Not a full app tutorial.** Authors use the same handler API; TLS is a listen option
-(PEMs on `Server_Opts` or `listen_and_serve_tls`). Linked from
-[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md). Matrix TLS H1 **oneshot +
-SSE/WS** are ✅ when OpenSSL dynlib is available; large-body bulk remains ⏳.
-TLS H2 concurrent + multi-SSE are ✅ offline (PR9 M1–M6); WS-on-H2 still ⏳.
+Authors use the same handler API; TLS is a listen option (PEMs on `Server_Opts`
+or `listen_and_serve_tls`). Session Effects: [`SESSION_SSE.md`](SESSION_SSE.md).
+H2 on TLS: [`H2_ENGINE.md`](H2_ENGINE.md).
 
-Session Effects surface: [`SESSION_SSE.md`](SESSION_SSE.md).
+## Overview
 
----
+- Mem-BIO TLS: product path owns ciphertext on the wire; SSL encrypts/decrypts only.
+- Oneshot HTTPS and progressive stream / SSE / WS on TLS H1 are supported.
+- Dual-CT seal∥send is the live host path (`http/tls_dual_ct.odin`).
+- Large multi-MiB bulk on live TLS is best-effort (see bastion matrix under `comparisons/tls-h2/results/`).
 
-## Status snapshot
-
-| Piece | State |
-|-------|--------|
-| **Pure** seal∥send + firehose CI | **Done** (`http/pipe.odin`, `http/pipe_test.odin`, `scripts/check_firehose_pipe.sh`) |
-| `tls_server` dynlib + mem-BIO | Done |
-| `conn.ciphered` + `plan_policy_for` | **Done** — lightweight `connection_enable_ciphered` (no seal_q/CT[2]) |
-| Full SM bags (`connection_enable_ciphered_pipe_sm`) | Pure/tests only; not live host wire |
-| Host wire handshake + CT send (oneshot) | **Done** — dual-CT seal∥send (`Connection.dual_ct`, `tls_seal_window` / `tls_dual_ct_try_ahead` in `http/tls_dual_ct.odin`) |
-| HTTPS oneshot e2e | **Done** (manual curl; `examples/https_demo` `/`; bastion tls-h2 matrix) |
-| Progressive stream / SSE / WS on TLS (PR6) | **Done** — dual-CT stream path + hangup CT recv |
-| Live dual-CT seal∥send on wire | **Done** (PR5.1) — primary+hold CT slabs; pure `pipe` Seal_SM remains test-only |
-| Bulk multi-MiB firehose on live TLS wire | **Partial** — bastion large-body matrix green; pure firehose CI still O(window) detector only |
-| H2 / M1–M6 | **PR9 Done offline** — concurrent + multi-SSE; see `H2_PRODUCT_BASELINE.md` |
-
----
-
-## Mem-BIO path (product I/O law)
+## Mem-BIO path
 
 Product path owns ciphertext on the wire; SSL only encrypts/decrypts:
 
@@ -42,8 +26,8 @@ proactr product path. See `tls_server/provider.odin` and `tls_server/config.odin
 Compile-time defaults:
 
 ```text
--define:HTTP_TLS_BACKEND=dynlib        # only PR5 default
--define:HTTP_TLS_DYNLIB_PATH=...       # optional explicit libssl path
+-define:HTTP_TLS_BACKEND=dynlib # only default
+-define:HTTP_TLS_DYNLIB_PATH=... # optional explicit libssl path
 ```
 
 ---
@@ -55,7 +39,7 @@ In-memory PEM slices (not paths). Empty = TLS off.
 ```odin
 opts := http.Default_Server_Opts
 opts.tls_cert_pem = cert_pem
-opts.tls_key_pem  = key_pem
+opts.tls_key_pem = key_pem
 http.listen_and_serve(&s, handler, endpoint, opts)
 
 // or convenience:
@@ -75,18 +59,18 @@ When OpenSSL dynlib is missing, tests skip (do not fail CI).
 
 ---
 
-## Progressive stream / session path (PR6)
+## Progressive stream / session path
 
 Long-lived SSE/WS use the **same** entry as clear H1 progressive Stream:
 
 ```text
 sse_start / ws_start / stream_* effects
-  → plain frames into resp_buf
-  → _stream_try_submit
-       if conn.ciphered || tls_ssl:
-         tls_host_stream_try_submit   // encrypt path; no stream_pool slabs
-       else:
-         clear Wire_Kind.Stream pool path
+ → plain frames into resp_buf
+ → _stream_try_submit
+ if conn.ciphered || tls_ssl:
+ tls_host_stream_try_submit // encrypt path; no stream_pool slabs
+ else:
+ clear Wire_Kind.Stream pool path
 ```
 
 | Concern | Behavior |
@@ -117,7 +101,7 @@ curl -k --http1.1 https://127.0.0.1:18443/
 # expect: OK
 
 curl -kN --http1.1 -H 'Accept: text/event-stream' https://127.0.0.1:18443/sse
-# expect: a few event-stream frames then close (PR6 progressive CT path)
+# expect: a few event-stream frames then close
 ```
 
 Requires system OpenSSL (dynlib). On Darwin, Homebrew OpenSSL@3 is probed first
@@ -127,7 +111,7 @@ Requires system OpenSSL (dynlib). On Darwin, Homebrew OpenSSL@3 is probed first
 
 ## Firehose CI gate (O(window) pipe)
 
-**Pure** PR5 gate — seal∥send + firehose detector; bulk produce must stay O(window), not O(body):
+**Pure** gate — seal∥send + firehose detector; bulk produce must stay O(window), not O(body):
 
 ```bash
 ./scripts/check_firehose_pipe.sh
@@ -140,7 +124,7 @@ bastion tls-h2 matrix; pure firehose detector remains the O(window) CI gate.
 
 ## Host wire (landed)
 
-### Oneshot (PR5)
+### Oneshot
 
 | Stage | Behavior |
 |-------|----------|
@@ -150,7 +134,7 @@ bastion tls-h2 matrix; pure firehose detector remains the O(window) CI gate.
 | Send Open | Dual-CT: window plain ≤ `TLS_SEAL_WINDOW` → `SSL_write` → CT slab; while send inflight, seal next into hold; promote on CQE (`tls_dual_ct.odin`) |
 | Destroy | `SSL_shutdown` best-effort; `conn_free`; free CT scratch; `connection_disable_ciphered` |
 
-### Progressive / session (PR6)
+### Progressive / session
 
 | Stage | Behavior |
 |-------|----------|
@@ -167,7 +151,7 @@ Clear-H1 path is unchanged when TLS is off. No `SSL*` in app API / `APP_CONTRACT
 
 ```bash
 odin test http -define:ODIN_TEST_THREADS=1 -o:none
-# PR6 gates in package http:
-#   session_test — ciphered attach (SSE/WS plain apply), hangup CT gate
-#   tls_host_test — long-lived stream, no-clean mid-session, ciphered-no-ssl pending
+# gates in package http:
+# session_test — ciphered attach (SSE/WS plain apply), hangup CT gate
+# tls_host_test — long-lived stream, no-clean mid-session, ciphered-no-ssl pending
 ```

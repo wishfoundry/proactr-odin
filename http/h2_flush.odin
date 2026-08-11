@@ -249,7 +249,6 @@ h2_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	}
 	h2_host_maybe_finish_exchange(conn)
 	h2_host_dispatch_available(conn)
-	// PR10: graceful GOAWAY drain progresses on send-complete (idle → close).
 	h2_host_maybe_goaway_from_closing(conn)
 
 	// Duplex law: after any H2 send complete, re-arm CT recv while Open.
@@ -383,7 +382,6 @@ h2_host_maybe_finish_exchange :: proc(conn: ^Connection) {
 		conn.loop.req.client = client
 
 		if conn.state == .Will_Close {
-			// PR10: if graceful GOAWAY drain, only close when drain-idle (no pending out).
 			if conn.h2_goaway_drain || conn.h2.goaway_sent {
 				h2_host_maybe_close_after_goaway_drain(conn)
 				return

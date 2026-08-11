@@ -1,5 +1,4 @@
 // proactr TFB peer — size ladder + fortunes (sync or async SQLite).
-//
 // Env:
 //   PORT, WORKERS, DATABASE_PATH
 //   FORTUNES_MODE=sync|async   (default sync)

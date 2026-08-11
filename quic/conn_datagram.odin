@@ -3,7 +3,6 @@ package quic
 import "core:time"
 
 // Phase 7c — post-handshake DATAGRAM send/receive via 1-RTT packets.
-//
 // After the TLS handshake completes, both sides have Application-level
 // (1-RTT) rx/tx keys. Zenoh wire frames are wrapped in QUIC DATAGRAM frames
 // (RFC 9221) and shipped inside short-header packets. zenoh handles all
@@ -65,7 +64,6 @@ _pick_next_send_stream :: proc(conn: ^Conn) -> ^Stream {
 // Build a 1-RTT packet draining the highest-priority stream with pending
 // data into a STREAM frame. Optionally piggybacks an ACK frame if one is owed.
 // Records a Sent_Packet entry for loss tracking.
-//
 // Returns bytes written to `out` and the number of stream bytes consumed.
 // A return value of (0, 0, .None) means "nothing to send right now" (not an
 // error — the caller should just skip this tick).
@@ -227,7 +225,6 @@ conn_build_stream_packet :: proc(
 	// until ACKed (so they can be retransmitted by rewinding tx_sent_off);
 	// we only advance the "next to send" pointer and record the range as
 	// in-flight for loss tracking.
-	//
 	// FIN-only (stream_bytes == 0, emit_fin) is still ack-eliciting STREAM
 	// and must enter loss recovery — otherwise a lost empty FIN is never
 	// retransmitted (tx_fin_sent already true blocks re-emit).

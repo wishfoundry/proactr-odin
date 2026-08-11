@@ -1,5 +1,4 @@
 // QPACK dynamic table (RFC 9204 §3.2) and encoder/decoder stream codecs (§4.3–4.4).
-//
 // The same `Dynamic_Table` shape is used on both sides:
 //   - Decoder: peer encoder stream → table; field sections resolve dynamic refs.
 //   - Encoder: we insert when peer capacity > 0, emit encoder-stream instructions,

@@ -1,15 +1,11 @@
 // TechEmpower Fortunes — two execution models for bastion comparison.
-//
 // Hot path: one SQL pass (`ORDER BY message`) → write HTML while stepping.
 // No Fortune[] materialization, no message clones, no app-side sort.
 // sqlite3_column_text is only used between step() calls.
-//
 //   FORTUNES_MODE=sync  (default): stream on the I/O worker.
 //     Default: one SQLite connection per I/O worker (thread_local).
 //     FORTUNES_SYNC_SHARED=1: one shared conn + mutex around the stream.
-//
 //   FORTUNES_MODE=async: offload stream to a thread pool.
-//
 // Profile: odin build -define:FORTUNES_PROFILE=true
 package main
 

@@ -9,7 +9,7 @@ before (and after) the executor is wired.
 | `comparisons/load` | Product SLOs under target load |
 | **`comparisons/plan`** | Does optimize vs materialize change *plan ops per route*? |
 
-Design north star: [`docs/RESPONSE_COMMAND_PLANNER.md`](../../docs/RESPONSE_COMMAND_PLANNER.md).
+See `docs/ARCHITECTURE.md`.
 
 ## What this proves today (Phase 4)
 

@@ -1,14 +1,10 @@
-// HTTP/3 on Client_Job via proactr completions + software timers (design §5.14 / PR4).
-//
-// Residual (documented): dial may call quic.conn_connect, which still sleep-polls
+// HTTP/3 on Client_Job via proactr completions + software timers.
 // during the QUIC handshake. After connect, drive uses only:
 //   - nonblocking http3.pump_quic_send
 //   - proactr.submit_recv on the connected UDP fd
 //   - proactr.submit_timeout for request deadline / PTO
 // No time.sleep on this path.
-//
-// Free law: free H3_Session + quic.conn only when ops_outstanding == 0
-// (job_free_transport). Cancel Option B: cancel timer, close UDP, free when quiet.
+// (job_free_transport). Cancel cancel timer, close UDP, free when quiet.
 package client
 
 import "core:mem"
@@ -128,7 +124,6 @@ _job_h3_dial_residual :: proc(
 	}
 	if insecure do quic.conn_disable_verify(conn)
 
-	// Residual: conn_connect still sleep-polls the handshake (documented).
 	dial_to := time.Duration(_resolve_dial_timeout_ms(dial_timeout_ms)) * time.Millisecond
 	#partial switch quic.conn_connect(conn, endpoint, dial_to) {
 	case .None:

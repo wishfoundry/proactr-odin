@@ -1,16 +1,13 @@
 // QPACK (RFC 9204) field-section encoder/decoder.
-//
 // Encoder: static table always; optional dynamic table when `enc_dt` is provided
 // and capacity > 0. New entries may be inserted onto `enc_stream` (Insert with
 // Name Reference / Literal Name). Field lines use dynamic indexed / name-ref
 // when the entry is referenceable (see `allow_unacked` / `known_received`).
 // With no encoder table, output is static-only (RIC = 0) — same as capacity 0.
-//
 // Decoder: optional dynamic table. Pass a `^Dynamic_Table` (populated from the
 // peer's QPACK encoder stream) to accept indexed / name-ref / post-base
 // dynamic references. With `dt == nil`, dynamic references are rejected
 // (legacy capacity-0 behaviour).
-//
 // Building blocks:
 //   - Prefix integer (RFC 7541 §5.1, reused by RFC 9204 §4.1.1) — NOT QUIC varint.
 //   - String literal (RFC 9204 §4.1.2), optionally Huffman-coded.
@@ -290,14 +287,11 @@ encode_field_line_static :: proc(dst: ^[dynamic]u8, h: Header, use_huffman: bool
 }
 
 // Decode a complete QPACK field section.
-//
 // `dt` is optional. When non-nil, dynamic-table references (T=0, post-base,
 // RIC/Base) are resolved against it. When nil, any dynamic reference fails with
 // Dynamic_Table_Unsupported (static-only mode).
-//
 // Allocates each header string from `allocator`; free with headers_destroy +
 // delete on the returned array.
-//
 // On success with a non-zero Required Insert Count, `required_insert_count` is
 // set so the caller can emit a Section Acknowledgment on the decoder stream.
 qpack_decode_field_section :: proc(

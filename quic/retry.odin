@@ -1,5 +1,4 @@
 // Retry packets (RFC 9000 §17.2.5, RFC 9001 §5.8) — client side.
-//
 // A server under load answers the first Initial with a Retry: a new SCID plus
 // an address-validation token, no crypto. The client must re-derive its
 // Initial keys from the new SCID, include the token in every subsequent

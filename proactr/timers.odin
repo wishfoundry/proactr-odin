@@ -1,12 +1,10 @@
 package proactr
 
 // Portable software timers (all backends).
-//
 // Lifecycle (same as Recv/Send):
 //   submit_timeout → min-heap by monotonic deadline
 //   fire / cancel_timeout → soft_cq Completion
 //   ring_wait drains soft_cq → complete_apply → operation_free
-//
 // cancel_timeout never frees; it posts TIMEOUT_CANCELED.
 // Early platform wakes are handled by ring_wait remaining-time retry, not by
 // firing timers before their deadline.

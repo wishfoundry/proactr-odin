@@ -1,5 +1,3 @@
-// PR8/PR9 H2 host — TLS ALPN h2 → sans-I/O http2 engine on the ring.
-//
 // Scope:
 //   - After TLS Open, if ALPN is h2: drive Http2_Connection instead of H1 scanner
 //   - Multi-slot slab (H2_SLOT_CAP) allocated only on h2 open (lazy; clear/TLS H1 free)
@@ -9,10 +7,7 @@
 //   - Duplex: keep CT recv armed while CT send may be in flight under H2
 //   - Unary GET/POST oneshot handlers via the same server.handler
 //   - On conn_feed error / fail_code: real GOAWAY then flush-once then close
-//
-// PR9 product: concurrent unary (default) + multi-SSE (M1–M6 offline gates).
-// PR10: graceful GOAWAY drain on server.closing + optional SSE-vs-bulk RR weights.
-// WS-on-H2 unsupported. Baseline: docs/design/dual-tls-h2/H2_PRODUCT_BASELINE.md
+// WS-on-H2 unsupported. Baseline: docs/ARCHITECTURE.md
 package http
 
 import "core:log"
@@ -77,7 +72,6 @@ h2_host_on_open :: proc(conn: ^Connection) {
 	conn.h2_dispatch_sid = 0
 	conn.h2_goaway_drain = false
 
-	// PR10 fairness weights (0 opts → engine defaults 2 / 1).
 	if conn.server != nil {
 		conn.h2.weight_interactive = conn.server.opts.h2_weight_interactive
 		conn.h2.weight_bulk = conn.server.opts.h2_weight_bulk
@@ -210,7 +204,6 @@ h2_host_on_ct_ready :: proc(conn: ^Connection) {
 	h2_host_flush_out(conn)
 	h2_host_maybe_finish_exchange(conn)
 	h2_host_dispatch_available(conn)
-	// PR10: if server.closing, ensure GOAWAY and close when idle.
 	h2_host_maybe_goaway_from_closing(conn)
 
 	// Duplex: re-arm CT recv even if a CT send is in flight or more plain out pending.
@@ -500,13 +493,11 @@ h2_host_send_response :: proc(conn: ^Connection, r: ^Response) {
 
 // h2_host_materialize_body returns body bytes for H2 send (no H1 status-line).
 // Empty when no body cmds.
-//
 // P0-3 oneshot borrow: a single Static or Bytes cmd is returned as a view of
 // c.bytes — no copy into resp_buf. The slice is only used through the sync
 // conn_send_response → frame_write into h2_out (or pending append under flow
 // control). Static is process-lifetime; handler-owned Bytes must remain valid
 // until respond returns (matrix / oneshot handlers keep body until then).
-//
 // Multi-cmd Static/Bytes still concatenate into resp_buf. File cmds unsupported
 // on H2 eng path. Shared resp_buf scrap for multi-cmd: handlers on a worker are
 // sequential, so materialize → engine encode completes before the next handler.

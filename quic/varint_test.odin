@@ -3,9 +3,7 @@ package quic
 import "core:testing"
 
 // RFC 9000 §A.1 — Sample Variable-Length Integer Decoding
-//
 // The RFC gives four test cases, one for each encoding length:
-//
 //   Bytes                            | Value
 //   ---------------------------------+--------------------
 //   0xc2 0x19 0x7c 0x5e 0xff 0x14 0xe8 0x8c | 151_288_809_941_952_652

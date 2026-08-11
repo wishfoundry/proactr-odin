@@ -1,12 +1,8 @@
-# Production edges checklist (PR10)
+# Production edges checklist
 
-Honest multi-worker / admission / shutdown checklist for operators and
-implementers. This is **not** a product capability flip (see
-[`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md)) and **not** an app-API change
-(soft admission is host behavior — see [`APP_CONTRACT.md`](APP_CONTRACT.md)).
-
-Companion ship status: [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).  
-H2 product bar (M1–M6 offline): [`design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](design/dual-tls-h2/H2_PRODUCT_BASELINE.md).
+Multi-worker / admission / shutdown notes for operators. Soft admission is host
+behavior (see [`APP_CONTRACT.md`](APP_CONTRACT.md)), not an app-API change.
+H2 notes: [`H2_ENGINE.md`](H2_ENGINE.md).
 
 ---
 
@@ -21,8 +17,8 @@ H2 product bar (M1–M6 offline): [`design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](
 | Session caps | **Present** — `Server_Opts.max_sessions_per_worker` (0 → `SESSION_MAX_PER_WORKER_DEFAULT` = 4096); global live gauge vs `max_sess * thread_count`. Overflow → soft 503 (above). Related: `max_stream_buffer`, `max_stream_bytes_total`, stream pool admission. |
 | H2 slot cap | **Present** — `H2_SLOT_CAP` = 8; lazy `^[H2_SLOT_CAP]Stream_Slot` only on ALPN-h2 open (clear/TLS H1 leave `h2_slots` nil). Default concurrent (`h2_serial_dispatch=false`); serial opt-in for eng/debug. Slot full → REFUSED_STREAM (above). |
 | Fairness weights | **Done** — engine weighted RR (`flush_rr` / `_flush_pending_rr`); `Server_Opts.h2_weight_interactive` / `h2_weight_bulk` (defaults 2 / 1); `sse_start` marks stream interactive for RR quanta. Pipe `rr_cursor` for seal_q unchanged. |
-| Firehose / M1–M6 offline gates | **CI / scripts + tests** — `scripts/check_firehose_pipe.sh` (PR5 pure seal∥send O(window)); `odin test http` includes `h2_m_gates_test` M1–M6; `odin test http2` / `hpack` / `huffman`; E0 bans via `scripts/check_e0_bans.sh` + `check_app_contract_sample.sh`. |
-| **Not claimed** | **kTLS** (research only; never silent `sendfile_ok` under Ciphered). **WS-on-H2** (matrix ⏳). Full h2spec. Soft 503 on **stream pool** bytes / temp-slot admission (session-cap path is Done). Live dual-CT + bastion tls-h2 peer matrix: **Done** (see `comparisons/tls-h2/results/`). |
+| Offline gates | `scripts/check_firehose_pipe.sh`; `odin test http` (`h2_m_gates_test`); `odin test http2` / `hpack` / `huffman`; `scripts/check_e0_bans.sh` + `check_app_contract_sample.sh`. |
+| **Not claimed** | kTLS; WS-on-H2; full h2spec; soft 503 on stream-pool byte admission (session-cap path is done). Peer numbers: `comparisons/tls-h2/results/`. |
 
 ---
 
@@ -30,17 +26,17 @@ H2 product bar (M1–M6 offline): [`design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](
 
 ```text
 listen(Server, PEMs…)
-  └─ server_tls_init once → shared SSL_CTX + ALPN h2|http/1.1
+ └─ server_tls_init once → shared SSL_CTX + ALPN h2|http/1.1
 serve(Server, handler)
-  └─ for each worker 0..thread_count-1
-       ├─ SO_REUSEPORT listen fd
-       ├─ proactr.Ring
-       └─ accept → SSL_new(shared ctx) → Handshake → Open
-            ├─ ALPN http/1.1 → TLS H1 host
-            └─ ALPN h2 → h2_host_* (lazy multi-slot)
+ └─ for each worker 0..thread_count-1
+ ├─ SO_REUSEPORT listen fd
+ ├─ proactr.Ring
+ └─ accept → SSL_new(shared ctx) → Handshake → Open
+ ├─ ALPN http/1.1 → TLS H1 host
+ └─ ALPN h2 → h2_host_* (lazy multi-slot)
 shutdown / SIGINT
-  └─ Server.closing → close listen
-       └─ H2 conns: GOAWAY(NO_ERROR) once → drain in-flight → close when idle
+ └─ Server.closing → close listen
+ └─ H2 conns: GOAWAY(NO_ERROR) once → drain in-flight → close when idle
 ```
 
 ---
@@ -62,8 +58,8 @@ shutdown / SIGINT
 ./scripts/check_e0_bans.sh
 ./scripts/check_app_contract_sample.sh
 ./scripts/check_firehose_pipe.sh
-odin test http -define:ODIN_TEST_THREADS=1 -o:none   # incl. M1–M6 + PR10 soft admit / REFUSED
-odin test http2 hpack huffman -o:none               # incl. weighted RR + GOAWAY refuse
+odin test http -define:ODIN_TEST_THREADS=1 -o:none # incl. M1–M6 + soft admit / REFUSED
+odin test http2 hpack huffman -o:none # incl. weighted RR + GOAWAY refuse
 ```
 
 ---

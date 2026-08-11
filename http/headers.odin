@@ -132,7 +132,6 @@ sanitize_key :: proc(h: Headers, k: string) -> string {
 
 	// NOTE: implementation that only allocates if needed, but we use arena's anyway so just allocating
 	// some space should be about as fast?
-	//
 	// b: strings.Builder = ---
 	// i: int
 	// for c in v {
@@ -144,11 +143,9 @@ sanitize_key :: proc(h: Headers, k: string) -> string {
 	// 	}
 	// 	i+=1
 	// }
-	//
 	// if !alloc {
 	// 	return v, false
 	// }
-	//
 	// for c in v[i:] {
 	//  switch c {
 	//  case 'A'..='Z': strings.write_rune(&b, c + 32)
@@ -156,6 +153,5 @@ sanitize_key :: proc(h: Headers, k: string) -> string {
 	//  case:           strings.write_rune(&b, c)
 	//  }
 	// }
-	//
 	// return strings.to_string(b), true
 }

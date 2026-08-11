@@ -1,16 +1,13 @@
 # Build artifacts
 *.bin
 *.o
+*.obj
 *.a
 *.so
 *.dylib
 *.exe
 *.out
 *.dSYM/
-
-# Temporary QUIC BoringSSL static libs (package quic / client)
-!boringssl/lib/*.a
-!boringssl/lib/*.lib
 
 # Odin
 *.profraw
@@ -67,3 +64,8 @@ examples/**/*.wasm
 
 # plan A/B bench binary
 comparisons/plan/server/plan-bench.bin
+
+# Process / iteration artifacts (keep out of tree)
+comparisons/**/results/**/CRITIC*
+comparisons/**/CRITIC*.md
+docs/design/

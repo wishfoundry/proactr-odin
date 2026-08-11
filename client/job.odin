@@ -33,8 +33,8 @@ Client_Job_Phase :: enum u8 {
 	Idle,
 	Sending,
 	Recving,
-	Tls_Handshake, // https mem-BIO handshake (PR3)
-	H3_Drive,      // QUIC/H3 on platform wait (PR4)
+	Tls_Handshake,
+	H3_Drive,
 	Done,
 	Cancelled,
 }
@@ -55,11 +55,7 @@ Client_Job_H3_Stage :: enum u8 {
 }
 
 // Client_Job is one outbound exchange on a Client_Runtime.
-// Cancel law (Option B): first cancel fires on_done sync; harvest only frees.
-// Free law: never free while in_callback; if harvest hits ops==0 during on_done,
-// set free_pending and free after the callback returns (avoids free-list ABA).
-// Cancel after free is a no-op if live==false.
-// TLS law (§5.7): mem-BIO only; at most one CT send + one CT recv; free SSL when ops==0.
+// Free only when ops==0 and not inside on_done (free_pending defers free across the callback).
 Client_Job :: struct {
 	magic:           u32, // CLIENT_JOB_MAGIC while live; 0 after free
 	live:            bool, // false after job_free; cancel/on_cqe no-op
@@ -107,7 +103,7 @@ Client_Job :: struct {
 	h2:                H2_Session,
 	h2_started:        bool,
 	h2_sid:            u32,
-	// ---- HTTP/3 / QUIC (use_h3; design §5.14 / PR4) ----
+	// ---- HTTP/3 / QUIC
 	// Dial residual may sleep in quic.conn_connect; post-connect drive has no sleep.
 	use_h3:              bool,
 	quic:                ^quic.Conn,
@@ -267,7 +263,7 @@ _job_fire_done :: proc(job: ^Client_Job, res: Response, err: Http_Error) {
 	}
 }
 
-// job_cancel — Option B: sync terminal on_done on first cancel.
+// job_cancel — sync terminal on_done on first cancel.
 // Unlinks from slot list before on_done (destroy never walks unlinked jobs).
 job_cancel :: proc(job: ^Client_Job, exchange_gone := false) {
 	if job == nil || !job.live do return
@@ -367,7 +363,7 @@ job_on_cqe :: proc(job: ^Client_Job, c: proactr.Completion, op: ^proactr.Operati
 	}
 
 	// H3/QUIC: UDP Recv + software Timeout (PTO / request deadline). No Send op —
-	// pump_quic_send is nonblocking on the CQE path (design §5.14).
+	// pump_quic_send is nonblocking on the CQE path.
 	if job.use_h3 {
 		#partial switch kind {
 		case .Recv:

@@ -1,11 +1,6 @@
-// Hop — dial result with consumer context (API reuse F1/F2).
-//
-// io.Stream remains the H1/H2 byte backend; Hop adds meta + optional FD for
-// proactr/async and logging without casting stream procedure pointers.
-//
-// Two dial purposes (do not conflate):
-//   hop_dial_stream  — legacy Connection: may be TLS-complete stream + ALPN
-//   hop_dial_clear_fd — proactr: nonblocking clear TCP only; TLS is a job phase
+// Hop — dial result with meta and optional FD.
+// hop_dial_stream: Connection path (TLS-complete stream + ALPN OK).
+// hop_dial_clear_fd: proactr path (nonblocking clear TCP only).
 package client
 
 import "core:io"

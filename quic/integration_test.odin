@@ -3,11 +3,9 @@ package quic
 import "core:testing"
 
 // --- Integration tests (Layer 1 of the QUIC test plan) ---
-//
 // These tests go beyond the basic loopback handshake to validate the full
 // stack under realistic usage patterns. All tests are self-contained (no
 // network) and use the embedded minica PEMs from loopback_test.odin.
-//
 // Covered:
 //   • Idempotent close (conn_free after error paths doesn't double-free)
 //   • Back-to-back handshakes (no resource leak across many connections)
@@ -16,7 +14,6 @@ import "core:testing"
 //   • Queue overflow drops oldest
 //   • Unknown ALPN fails cleanly
 //   • Initial PN 0..N rollover
-//
 // Every test must be deterministic. Where randomness is used (CIDs, TLS),
 // failure should manifest as an assertion error, not flakiness.
 

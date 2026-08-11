@@ -1,11 +1,8 @@
 // Package h3 implements the HTTP/3 application layer (RFC 9114) on top of the
 // QUIC transport (`quic`), the stream facade (`webstream`), and QPACK (`qpack`).
-//
 // This file is the frame codec. HTTP/3 frames live inside QUIC STREAM payloads
 // (they are NOT QUIC frames) and use the simple TLV form:
-//
 //     Frame { Type (varint), Length (varint), Payload (Length bytes) }
-//
 // The variable-length integers are QUIC varints (RFC 9000 §16), so we reuse
 // `quic.varint_*`. Unidirectional streams additionally begin with a varint
 // stream-type byte (RFC 9114 §6.2), handled here too.

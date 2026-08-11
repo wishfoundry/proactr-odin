@@ -7,7 +7,6 @@ import http "../http"
 // get_async — handler-path entry. Binds the inbound exchange (Stream_Slot) from res.
 // Requires worker Client_Runtime installed (server worker boot via client_bridge).
 // user must NOT be request-temp arena (Option A — copy small ctx into job/runtime allocator).
-//
 // Dialer policy (proactr): Options.dialer must supply a *clear nonblocking TCP* hop
 // (or nil → default clear TCP). Stream-TLS dialers are for dial/request only.
 // H3 uses quic residual dial (not Dialer). No redirect following (v1).

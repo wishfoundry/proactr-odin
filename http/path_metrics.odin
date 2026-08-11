@@ -1,13 +1,11 @@
 // Basic path instrumentation for TLS/H2 matrix and performance tuning.
 // Always compiled; atomic adds only (cheap). Log/scrape via path_metrics_*.
-//
 // Buckets (where time/bytes go on the ciphered path):
 //   seal_calls / pt_bytes / ct_bytes  — SSL_write + wBIO CT produced
 //   h2_flush / h2_pt_bytes            — H2 frame plain into SSL_write
 //   ct_sends                          — ciphertext submit_send ops
 //   materialize                       — plan materialize (clear path cousin)
 //   reqs                              — completed response seal cycles (approx)
-//
 // Cycle counters (HTTP_PHASE_STATS only — profiling builds):
 //   seal_cyc / ssl_write_cyc / bio_read_cyc / materialize_cyc / ahead_seals
 package http
@@ -33,7 +31,6 @@ path_materialize:    u64
 // kevent_turns: reactor_tls_flush entries (proxy for seal_windows_per_kevent_turn).
 // soft_cq_send_completes: proactor send CQE without reactor_h1 — expect ~0 on Darwin
 //   pure H1/H2 TLS bulk and Linux H1 oneshot dense flush; clear-H1 / dual-CT H2 still charge;
-//   residual arms (reactor_h1) do not.
 // eagain_arms: residual WRITE arms after EAGAIN (reactor_arm_write_residual).
 // wbio_bio_read_fallback: reactor_drain_wbio took BIO_read cold path (expect 0 on product bulk).
 // wbio_peek_empty: pending>0 but BIO_get_mem_data view empty (pathological; expect 0).

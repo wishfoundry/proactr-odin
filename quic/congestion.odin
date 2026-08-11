@@ -1,17 +1,14 @@
 package quic
 
 // New Reno congestion control (RFC 9002 §7 + §B) for 1-RTT stream data.
-//
 // This is the missing piece that made the stack unsafe on the public
 // internet: before this file existed, conn_build_stream_packet gated only on
 // flow control and would send as fast as the application produced data —
 // congestion collapse on a lossy path. New Reno is the minimum deployable
 // algorithm: a congestion window, slow-start / congestion-avoidance, fast
 // recovery on detected loss, and a PTO that halves the window.
-//
 // Scope (deliberately deferred): pacing, ECN-CE handling, persistent
 // congestion detection, and BBR. What's here is enough to not fall over.
-//
 // The struct is self-contained and its procs are pure-ish (no I/O, no
 // sockets) so the accounting can be unit-tested directly — see
 // congestion_test.odin.
@@ -19,7 +16,6 @@ package quic
 import "core:time"
 
 // --- Constants (RFC 9002 §7) -------------------------------------------------
-//
 // All in bytes. kInitialWindow and kMinimumWindow scale with the path MTU;
 // callers pass a max_datagram_size (typically 1200 for IPv6 / 1472 for IPv4)
 // to congestion_init.

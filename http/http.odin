@@ -28,7 +28,6 @@ Requestline :: struct {
 // A request-line begins with a method token, followed by a single space
 // (SP), the request-target, another single space (SP), the protocol
 // version, and ends with CRLF.
-//
 // This allocates a clone of the target, because this is intended to be used with a scanner,
 // which has a buffer that changes every read.
 requestline_parse :: proc(s: string, allocator := context.temp_allocator) -> (line: Requestline, err: Requestline_Error) {
@@ -203,7 +202,6 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.temp_
 }
 
 // Returns if this is a valid trailer header.
-//
 // RFC 7230 4.1.2:
 // A sender MUST NOT generate a trailer that contains a field necessary
 // for message framing (e.g., Transfer-Encoding and Content-Length),

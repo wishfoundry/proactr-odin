@@ -2,13 +2,14 @@
 // table, all literal forms, size updates, Huffman). Encoder supports an optional
 // HPackEncoder with a dynamic table (Indexed / incremental / never-indexed);
 // without it, behaviour is static-only for tests and simple call sites.
-// Owned Header type; no vapor/qpack.
+// Header type is shared with QPACK/H3 (package httpfield).
 package hpack
 
 import "core:mem"
 import "core:strings"
 
 import "../huffman"
+import "../httpfield"
 
 DYNAMIC_ENTRY_OVERHEAD :: 32 // RFC 7541 §4.1
 
@@ -17,17 +18,10 @@ DYNAMIC_ENTRY_OVERHEAD :: 32 // RFC 7541 §4.1
 // input in decode_string.
 MAX_STRING_LEN :: 16 * 1024 * 1024 // 16 MiB
 
-// Header is a name/value pair with explicit ownership. Named compound literals
-// (`Header{name = "a", value = "b"}`) zero the owned flags → borrowed; safe
-// for test/call-site literals. Indexed static resolves are also borrowed
-// (flags false). Decoded / cloned strings set the corresponding flag so
-// headers_destroy can free without pointer-identity heuristics.
-// Note: Odin positional struct literals require all fields; prefer named form.
-Header :: struct {
-	name, value: string,
-	name_owned:  bool, // free name in headers_destroy / table eviction
-	value_owned: bool,
-}
+// Shared with QPACK / H3 / client — see package httpfield.
+Header :: httpfield.Header
+// Re-export destroy so existing hpack.headers_destroy call sites keep working.
+headers_destroy :: httpfield.headers_destroy
 
 Hpack_Error :: enum {
 	None,
@@ -485,7 +479,6 @@ find_name :: proc(dt: ^HPackDynamicTable, name: string) -> (index: int, ok: bool
 // `dt` so the peer's incremental-indexing stays in sync. Appends decoded
 // headers to `out`; strings are allocated from `allocator` except borrowed
 // static indexed headers (name_owned/value_owned false).
-//
 // max_list_size: if > 0, cap the decoded list using HPACK entry sizing
 // (name+value+32) per emitted field. Exceeding returns List_Too_Large.
 
@@ -627,11 +620,4 @@ clone_header :: proc(h: Header, allocator: mem.Allocator) -> Header {
 	}
 }
 
-// Free a decoded header list (the strings; not the backing array).
-// Only frees fields marked owned — borrowed static Indexed headers are safe.
-headers_destroy :: proc(headers: []Header, allocator := context.allocator) {
-	for h in headers {
-		if h.name_owned do delete(h.name, allocator)
-		if h.value_owned do delete(h.value, allocator)
-	}
-}
+

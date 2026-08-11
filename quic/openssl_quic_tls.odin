@@ -1,5 +1,4 @@
 // OpenSSL 3.5+ quic-tls callbacks: CRYPTO FIFO, OSSL_DISPATCH, tls_drive.
-// See docs/design/quic-openssl-dynlib-port.md §4–5.
 package quic
 
 import "base:runtime"

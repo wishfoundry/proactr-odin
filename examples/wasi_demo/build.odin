@@ -1,9 +1,7 @@
 #!/usr/bin/env odin
 // Portable builder for the WASI demo.
-//
 //   odin run examples/wasi_demo/build.odin -file
 //   odin run examples/wasi_demo/build.odin -file -- --no-run
-//
 // Discovers `odin` and `wasmtime` on PATH (and env overrides), without
 // hardcoding Homebrew paths.
 package main

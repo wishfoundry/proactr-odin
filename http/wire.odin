@@ -84,7 +84,6 @@ _wire_fail :: proc(conn: ^Connection, msg: string, args: ..any) {
 
 // Clear mem queue only: exec_i/n, pending_send, iovecs, nil exec_bufs.
 // Does NOT touch file_send_* or wire.kind.
-//
 // Ownership / who sets wire.kind = .None:
 //   - submit paths set kind on successful arm (.Send / .Writev / .Sendfile)
 //   - CQE handlers clear kind to .None before re-arm or finish
@@ -122,12 +121,10 @@ _wire_mem_done :: proc(conn: ^Connection) {
 // host_submit_send enqueues send of conn.wire.pending_send.
 // Linux: proactr submit_send (io_uring). Darwin P5: native reactor EVFILT_WRITE
 // (no proactr submit_send — separate reactor kqueue).
-//
 // TLS residual arms set conn.reactor_h1 = true *before* calling this so
 // soft_cq_send_completes is not charged and write demuxes to reactor_on_send_complete.
 // Full CT windows on dense H1 flush never call this between seals — host_try_send_nb
 // until EAGAIN, then residual arm only (Darwin: kqueue WRITE; Linux: submit_send+reactor_h1).
-//
 // Clear-H1 and Linux dual-CT (H2/stream) call without reactor_h1; those CQEs charge soft_cq.
 @(private)
 host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
@@ -800,7 +797,6 @@ _host_on_wire_send :: proc(conn: ^Connection, n: int) {
 	// Current buffer fully sent.
 	conn.wire.pending_send = nil
 
-	// PR5 TLS: handshake CT or windowed response CT complete → continue seal/HS.
 	if conn.tls_ssl != nil {
 		if tls_host_on_send_complete(conn) {
 			return

@@ -206,5 +206,4 @@ Pure helpers (path jail, Range, ETag, If-Range) plus temp-dir prepare tests (206
 ## Related
 
 - Wire path: `http/wire.odin` (sendfile / multi_send / file_chunked)
-- Planner: `docs/RESPONSE_COMMAND_PLANNER.md`
 - Kqueue/Linux file benches: `comparisons/tfb/results/KQUEUE_PROFILE_MATRIX.md`

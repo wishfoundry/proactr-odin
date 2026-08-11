@@ -5,7 +5,6 @@ import "core:time"
 
 // Exhaustive suite: fills coverage gaps beyond frame/codec/unit tests.
 // Uses _make_pair / _drive_handshake from integration_test.odin.
-//
 // Areas:
 //   • Bulk stream transfer with ACK pumping (cwnd must grow)
 //   • Multi-stream concurrent transfer

@@ -7,21 +7,17 @@ import "core:time"
 // Server-side QUIC endpoint: one UDP socket multiplexing many
 // connections, routed by Destination Connection ID (DCID). Mirrors the
 // shape of quinn's `Endpoint` and zenoh-rs's `LinkManagerUnicastQuic`.
-//
 // Lifecycle:
-//
 //   ep := endpoint_new(udp_addr, cert_pem, key_pem, local_tp)
 //   loop:
 //     conn := endpoint_accept(ep, timeout)  // blocks until a peer's
 //                                           // handshake completes
 //     hand `conn` off to a worker
 //   endpoint_close(ep)
-//
 // During endpoint_accept the endpoint drains the UDP socket, routes each
 // incoming datagram to the right Conn (by DCID), runs the server-side
 // TLS handshake forward via `conn_on_udp_recv`, and emits whatever
 // Initial / Handshake / 1-RTT response packets the Conn produces.
-//
 // All Conns share the listener's UDP socket and send via sendto with
 // the per-Conn `remote` address — this is why each accepted Conn has
 // `socket_owned = false`: only the Endpoint closes the FD.

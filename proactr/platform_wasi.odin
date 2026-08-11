@@ -3,15 +3,12 @@ package proactr
 
 // WASI proactor *façade* — the only WASM backend (wasmtime, browsers via WASI,
 // or any host that loads wasi_wasm32 and posts completions).
-//
 // No kernel CQ. Completions go through portable soft_cq via ring_wasi_complete
 // (same drain path as software timers). There is no separate js_wasm32 port.
-//
 //   1. Park Accept/Recv/Send as Submitted
 //   2. Host/runtime performs I/O or wires wasi-sockets + pollables
 //   3. ring_wasi_complete → _soft_post → soft_cq
 //   4. ring_wait drains soft_cq; _ring_wait sleeps when empty (timer re-fire)
-//
 // TODO when wasi-sockets is stable:
 //   - map pollables to op_id
 //   - optional: poll_oneoff with clock + pollable subscriptions inside _ring_wait

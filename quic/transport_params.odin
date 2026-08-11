@@ -2,20 +2,15 @@ package quic
 
 // RFC 9000 §18 — Transport parameter encoding
 // RFC 9221 §3   — max_datagram_frame_size parameter
-//
 // Each parameter is encoded as three varints/bytes:
-//
 //   Transport Parameter {
 //     Parameter ID (i),
 //     Length (i),
 //     Value (Length),
 //   }
-//
 // Most parameter values are themselves varints, which means the wire encoding
 // for a simple integer parameter is:
-//
 //   [id_varint] [length_varint = len(value_varint)] [value_varint]
-//
 // This file implements encode/decode for the subset of parameters we send
 // and receive for the zenoh DATAGRAM bridge. Other parameters from the RFC
 // are silently skipped on decode (per §18.1 "An endpoint that receives an

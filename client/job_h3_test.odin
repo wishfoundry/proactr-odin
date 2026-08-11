@@ -1,4 +1,3 @@
-// PR4: HTTP/3 over proactr Client_Job (UDP recv + software timers; no sleep on drive).
 package client
 
 import "core:fmt"
@@ -225,7 +224,6 @@ test_proactr_h3_cancel_during_request :: proc(t: ^testing.T) {
 	testing.expect(t, job != nil && job.live && job.use_h3, "job live h3")
 	shell := job
 
-	// Option B: first cancel fires on_done sync with .Closed.
 	job_cancel(job, false)
 	testing.expect_value(t, ctx.calls, 1)
 	testing.expect_value(t, ctx.err, Http_Error.Closed)

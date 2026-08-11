@@ -3,9 +3,10 @@
 package http2
 
 import "../hpack"
+import "../httpfield"
 
-// Header field pair — same type the HPACK codec uses (no qpack dependency).
-Header :: hpack.Header
+// Shared H2/H3 ordered field (httpfield); same type as hpack.Header / qpack.Header.
+Header :: httpfield.Header
 
 // Frame parse failures for length-prefixed frames off a buffer.
 Frame_Error :: enum {

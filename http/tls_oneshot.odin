@@ -126,7 +126,6 @@ tls_host_flush_response :: proc(conn: ^Connection) {
 
 	// Live dual-CT: keep encrypting into free slab while a CT send is on the wire.
 	if _conn_wire_in_flight(conn) {
-		// Residual wBIO → free slab if any.
 		if tls_server.bio_pending_out(conn.server.tls_provider, conn.tls_ssl) > 0 {
 			_ = tls_host_try_drain_out(conn, hs = false)
 		}

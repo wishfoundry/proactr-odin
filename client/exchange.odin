@@ -1,8 +1,5 @@
-// Exchange — headers-first / body pull / cancel over a live H1 Connection (F3 v1).
-// H2/H3 and proactr jobs remain full-body convenience paths.
-//
-// Residual (documented): async/proactr still deliver full body in on_done;
-// chunked TE is rejected here (use request() / _h1_do for chunked H1).
+// Exchange — headers-first / body pull / cancel on an H1 Connection.
+// Chunked TE is rejected (use request() for full framing including chunked).
 package client
 
 import "core:io"

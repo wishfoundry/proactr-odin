@@ -4,11 +4,9 @@ import "core:c"
 
 // RFC 9000 §17 — QUIC packet format
 // RFC 9001 §5.3–5.4 — packet protection (AEAD + header protection)
-//
 // This file implements Initial packet encrypt/decrypt. Handshake and 1-RTT
 // packets share the same machinery: only the first-byte type bits and (for
 // short header) the header layout differ.
-//
 // Crypto uses long-lived EVP_CIPHER_CTX on Packet_Keys (aead_seal/open, hp_mask).
 
 QUIC_VERSION_V1 :: u32(0x00000001)
@@ -28,7 +26,6 @@ INITIAL_PACKET_MIN :: 1200
 //   bits 2-3:    long packet type
 //   bits 4-5:    reserved (must be 0 when unprotected; HP may flip them)
 //   bits 6-7:    pn_length - 1
-//
 // Initial + 4-byte PN:          0xc3 = 1100_0011
 // Initial + 1-byte PN:          0xc0
 // Handshake + 4-byte PN:        0xe3 = 1110_0011
@@ -37,7 +34,6 @@ build_long_first_byte :: proc(long_type: u8, pn_len: int) -> u8 {
 }
 
 // --- AEAD nonce construction (§5.3) ---
-//
 // The nonce for packet N is iv XOR padded_pn, where padded_pn is the 62-bit
 // packet number zero-extended to the AEAD's nonce length (12 bytes) with the
 // packet number occupying the least-significant bytes.
@@ -51,7 +47,6 @@ make_nonce :: proc(nonce: ^[QUIC_IV_LEN]u8, iv: []u8, pn: u64) {
 }
 
 // --- Header protection (§5.4) ---
-//
 // For AES-based AEADs, the HP mask is AES-ECB(hp_key, sample)[0..5].
 // `sample` is 16 bytes taken at offset pn_offset+4 in the already-AEAD-sealed
 // packet (i.e. sample begins 4 bytes after the start of the packet number
@@ -145,9 +140,7 @@ remove_header_protection :: proc(
 }
 
 // --- Initial packet encryption ---
-//
 // Produces the fully-protected wire bytes in `out`. Layout:
-//
 //   first_byte (1)
 //   version (4)
 //   dcid_len (1) + dcid
@@ -156,7 +149,6 @@ remove_header_protection :: proc(
 //   length (varint: pn_len + payload_len + tag_len)
 //   packet_number (pn_len bytes, big-endian)
 //   AEAD-sealed payload (payload_len + tag_len bytes)
-//
 // The caller supplies a padded payload (Initial packets carrying CRYPTO must
 // pad the UDP datagram to at least 1200 bytes per §14.1 — that padding goes
 // in the plaintext as PADDING frames, not here).
@@ -245,7 +237,6 @@ encrypt_initial :: proc(
 
 // Decrypt an Initial packet in place. Returns the plaintext slice (a view into
 // `buf`) and the recovered packet number.
-//
 // On entry, `buf` holds the full protected packet as received. The header is
 // parsed through the Length field; header protection is then removed to
 // recover pn_length and the packet number, and the payload is decrypted.
@@ -322,7 +313,6 @@ decrypt_initial :: proc(
 }
 
 // --- 1-RTT short header packets (RFC 9000 §17.3.1) ---
-//
 // Layout:
 //   byte 0:  0 1 S R R K P P
 //            ^ header form (0 = short)
@@ -334,7 +324,6 @@ decrypt_initial :: proc(
 //   DCID (no length field; receiver knows the length implicitly)
 //   Packet number (pn_len bytes)
 //   AEAD payload
-//
 // Header protection masks the low 5 bits of the first byte (reserved +
 // key_phase + pn_length) and all packet-number bytes.
 
@@ -417,7 +406,6 @@ decrypt_one_rtt :: proc(
 }
 
 // --- Helper: fixed 2-byte varint encoding ---
-//
 // RFC 9000 §16 allows non-minimal encodings. We use a fixed 2-byte encoding
 // for the packet Length field because the header protection sample offset
 // must be stable regardless of the length's numeric value. A 2-byte varint

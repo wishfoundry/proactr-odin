@@ -21,7 +21,7 @@ import tls_server "../tls_server"
 
 // virtual used for session_scratch arena on Server_Thread.
 
-// Multi-slot slab capacity for H2 host (PR8 structure, PR9 concurrent unary).
+// Multi-slot slab capacity for H2 host.
 // Slab is heap-allocated only on ALPN-h2 open (lazy) so clear/TLS H1 Connections
 // do not pay H2_SLOT_CAP × Stream_Slot. Concurrent oneshot uses free slots; serial
 // opt holds one in-flight (h2_serial_dispatch=true).
@@ -99,7 +99,6 @@ Server_Opts :: struct {
 	stream_mailbox_depth:    int,
 	// After sse_start: shrink permanent resp_buf capacity (0 → 16 KiB).
 	stream_resp_shrink_cap:  int,
-	// PR5 TLS knobs (listen_tls / handshake later). Empty PEM = TLS off.
 	// PEM slices match vapor-style in-memory cert material (not paths).
 	tls_cert_pem:            []u8,
 	tls_key_pem:             []u8,
@@ -107,7 +106,6 @@ Server_Opts :: struct {
 	// true = eng/debug single-flight (h2_serial_busy; at most one oneshot in flight).
 	// Does not implement SSE-on-H2; long-lived holds keep their slot only.
 	h2_serial_dispatch:      bool,
-	// PR10 optional SSE-vs-bulk fairness (engine RR flush). 0 → defaults (2 / 1).
 	// Interactive (sse_start H2) streams get h2_weight_interactive DATA frames per
 	// RR turn; oneshot bulk bodies use h2_weight_bulk.
 	h2_weight_interactive:   u8,
@@ -137,7 +135,7 @@ Default_Server_Opts := Server_Opts {
 	plan_sendfile_ok     = true,
 	plan_optimize        = false, // opt-in: Writev/Sendfile wire (kernel or fallback)
 	h2_serial_dispatch   = false, // product concurrent unary; true = serial single-flight
-	h2_weight_interactive = 2,    // SSE / session streams (PR10 RR quanta)
+	h2_weight_interactive = 2,    // SSE / session streams
 	h2_weight_bulk        = 1,    // oneshot large body
 }
 
@@ -168,7 +166,6 @@ Server :: struct {
 	listen_closed:  Atomic(bool),
 	// Threads will decrement the wait group when they have fully closed/shutdown.
 	threads_closed: sync.Wait_Group,
-	// PR5 host TLS/bulk scrape gauges (atomics). Updated by tls_metrics_* helpers.
 	// peak_pt / peak_ct: high-water of admitted PT / sealed CT bytes; seal_units: count.
 	tls_peak_pt:    Atomic(u64),
 	tls_peak_ct:    Atomic(u64),
@@ -336,7 +333,6 @@ listen :: proc(
 	if e := host_listen_bind(s, endpoint); e != .None {
 		return e
 	}
-	// PR5: init shared SSL_CTX when PEMs present. On failure: honest clear-H1 only.
 	if server_tls_wanted(s) {
 		if !server_tls_init(s) {
 			// Clear PEM knobs so accept path does not pretend TLS is live.
@@ -479,7 +475,6 @@ connection_set_state :: proc(c: ^Connection, s: Connection_State) -> bool {
 }
 
 // Connection holds per-client request/response state for the protocol layer.
-//
 // In-flight invariant: at most one of {recv, send/writev/sendfile, close} is outstanding
 // per connection at a time (no concurrent SQEs, no refcount). wire.kind != .None while a
 // send/WRITEV/sendfile SQE (or soft completion) is outstanding; wire.pending_send stays valid
@@ -487,16 +482,13 @@ connection_set_state :: proc(c: ^Connection, s: Connection_State) -> bool {
 // outstanding (TLS hangup/HS/Open). close_pending gates submit_close; close_on_io defers
 // close until the in-flight CQE so the connection is not freed under a still-submitted
 // op (and wire.exec_bufs/iovecs/file_send_*/tls_ct_rx stay live). See wire.odin.
-//
 // Memory: resp_buf is permanent (conn_allocator) and holds response wire bytes across
 // keep-alive requests. temp_allocator is request scrap only (headers/parse) — bump reset
 // after each send completes; never free response memory while wire I/O is in flight.
-//
 // Phase 3 multi-buffer (Writev-style): when plan chooses Writev, wire.exec_bufs[0..exec_n)
 // holds [heading_slice, body1, body2, …]. Linux prefers IORING_OP_WRITEV via ephemeral
 // iovecs packed from exec_bufs; fallback is sequential pending_send (exec_i advanced).
 // Body slices are borrowed Static/Bytes and must remain valid until the final CQE.
-//
 // Phase 4 file region: after heading (and optional mem) complete, stream a File cmd
 // via kernel sendfile(2) (Linux) or chunked pread into wire.file_send_buf + send.
 // wire.file_send_remaining > 0 means more file bytes remain; Host does NOT close
@@ -538,7 +530,7 @@ Connection :: struct {
 	tls_first_seal_pending: bool,
 	// Network CT recv scratch (allocated on TLS accept; freed on destroy).
 	tls_ct_rx:      []u8,
-	// Live dual-CT seal∥send (PR5.1 Linux): primary + hold slabs; seal next window into
+	// Live dual-CT seal∥send: primary + hold slabs; seal next window into
 	// free slab while one sock send is in flight. See tls_dual_ct.odin.
 	// Darwin H1+H2 reactor: dual_ct.tx is the single residual CT slab (hold unused on
 	// reactor product paths). Stream residual-first also uses tx; dual_ct_try_ahead no-op.
@@ -557,7 +549,6 @@ Connection :: struct {
 	reactor_fairness_yield:  bool,
 	reactor_read_armed:      bool,
 	reactor_write_armed:     bool,
-	// residual WRITE: level EVFILT_WRITE until residual empty. Fairness WRITE: oneshot.
 	reactor_write_level:     bool,
 	// product READ: always level until reactor_host_close (accept uses REACTOR_UDATA_ACCEPT).
 	reactor_read_level:      bool,
@@ -603,7 +594,6 @@ Connection :: struct {
 	h2_slot_used:    [H2_SLOT_CAP]bool,
 	h2_slot_sids:    [H2_SLOT_CAP]u32, // stream id per slot; 0 when free
 	h2_pt_buf:       []u8,             // SSL_read PT scratch under H2 (not scanner)
-	// PR10: graceful GOAWAY drain started (engine also tracks goaway_sent).
 	// Host uses this to avoid double begin + to decide close-when-idle.
 	h2_goaway_drain: bool,
 	// Owning worker index (for mailbox affinity); set on accept.
@@ -655,7 +645,6 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 		}
 		defer proactr.ring_destroy(&td.ring)
 
-		// Client×proactr: install worker Client_Runtime on this ring (no private ring).
 		if client_bridge.on_worker_enter != nil {
 			client_bridge.on_worker_enter(rawptr(&td.ring), s.conn_allocator)
 		}
@@ -1093,7 +1082,6 @@ host_on_accept :: proc(s: ^Server, result: i32, cqe_flags: u32) {
 	td.conns[c.socket] = c
 	log.debugf("accepted fd=%v fixed=%v conns=%d", c.socket, c.fixed_idx, len(td.conns))
 
-	// PR5 TLS accept: mem-BIO SSL, Handshake state, arm CT recv — no clear parse yet.
 	if server_tls_live(s) {
 		if !tls_host_on_accept(c) {
 			log.errorf("TLS accept setup failed; dropping fd=%v", c.socket)
@@ -1168,7 +1156,6 @@ host_on_recv :: proc(conn: ^Connection, result: i32) {
 		return
 	}
 
-	// PR5 TLS: network bytes are ciphertext (into tls_ct_rx), not scanner PT.
 	if conn.tls_ssl != nil {
 		tls_host_on_recv(conn, result)
 		return

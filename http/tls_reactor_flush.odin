@@ -1,9 +1,7 @@
 package http
 
 // Dense TLS bulk flush — reactor law (Plan R2 §4).
-// residual-first → SSL_write(REACTOR_SEAL_WINDOW) → drain wBIO write until EAGAIN → single residual.
 // NO soft_cq between full CT windows. NO dual_ct_try_ahead on this path.
-//
 // Platforms:
 //   Darwin H1 oneshot + H2: product path (EVFILT_WRITE residual arm via kqueue).
 //   Linux H1 oneshot only: same dense loop; residual arm = host_submit_send + reactor_h1
@@ -45,7 +43,6 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 	if !conn.h2_active && tls_host_stream_long_lived(conn) {
 		return
 	}
-	// Residual WRITE still armed: wait for CQE (do not double-send over EVFILT_WRITE).
 	if conn.reactor_h1 && _conn_wire_in_flight(conn) {
 		return
 	}
@@ -53,7 +50,6 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 	if _conn_wire_in_flight(conn) {
 		return
 	}
-	// Residual WRITE CQE fully delivered: host_on_wire cleared pending; clear residual meta.
 	if conn.reactor_h1 && len(conn.wire.pending_send) == 0 {
 		reactor_residual_clear(conn)
 		conn.reactor_h1 = false
@@ -87,7 +83,6 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 				}
 				return
 			}
-			// residual empty — continue (may still have wBIO or more plain)
 			continue
 		}
 
@@ -377,16 +372,13 @@ reactor_send_ct_view :: proc(conn: ^Connection, view: []u8) -> (again: bool, har
 }
 
 // reactor_drain_wbio: push wBIO CT to the socket until empty or EAGAIN.
-//
 // Product bulk path (item 3 — peek-only, no full CT memmove):
 //   cached tls_wbio + bio_pending/peek/reset_out_bio → reactor_send_ct_view → bio_reset
 //   Full window: zero-copy send from mem-BIO; partial: copy rem only into residual.
 // Never falls through to BIO_read when peek is available (healthy OpenSSL product).
-//
 // Cold path only: provider without peek support → BIO_read into dual_ct.tx (counted;
 // expect 0 on bulk matrix). Dual-CT seal engines still use bio_read_net for hold staging
 // (not this drain).
-//
 // R-ORDER: residual in dual_ct.tx forbids SSL_write until drained (caller residual-first).
 // Used by H1/H2 reactor flush and Darwin HS WANT_WRITE drain.
 @(private)
@@ -602,7 +594,6 @@ reactor_on_send_complete :: proc(conn: ^Connection) -> bool {
 	}
 
 	if tls_host_stream_long_lived(conn) {
-		// Residual CT for a progressive window fully on wire — advance deferred plain.
 		if conn.tls_stream_plain_n > 0 {
 			advance := conn.tls_stream_plain_n
 			conn.tls_stream_plain_n = 0

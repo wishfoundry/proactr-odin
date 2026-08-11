@@ -21,7 +21,7 @@ NOT Response_Cmd / plan_body. plan_wire_* does not count stream bodies.
 
 PLAN_WIRE_MODE env (Linux): "kernel" (default) | "fallback" — force multi_send/copy_into.
 
-See docs/RESPONSE_COMMAND_PLANNER.md.
+See docs/ARCHITECTURE.md.
 
 Intent (handlers / middleware)  →  Response_Cmd[]
 Policy (this file)              →  Plan_Result / Exec_Op[]
@@ -35,7 +35,6 @@ import "core:sync"
 // Wire-path mechanism counters (Phase 3–4). Atomic; safe across workers.
 // Harness /metrics can load these to prove real wire paths vs materialize.
 // Stream responses use stream_responses_total (Phase 5), not these plan_wire_*.
-//
 // multi_send      = sequential multi-buffer submit_send (fallback when no kernel writev)
 // kernel_writev   = IORING_OP_WRITEV gather (Linux)
 // copy_into       = chunked pread+send (fallback when no kernel sendfile)
@@ -328,7 +327,6 @@ plan_host_from_caps :: proc(caps: Conn_Caps, base: Plan_Host = {}) -> Plan_Host 
 
 // Handler-side bias over Plan_Context / Plan_Policy (POD).
 // Zero value: no materialize/gather bias (server copy_budget / max_iovecs stand).
-//
 // sendfile (bastion: Sendfile ≫ chunked/materialize on file):
 //   - base.sendfile_ok must already be true (platform + Server_Opts.plan_sendfile_ok).
 //   - prefer_materialize always clears sendfile_ok.
@@ -395,7 +393,6 @@ plan_policy_apply_profile :: proc(
 }
 
 // Body middleware: rewrite intent cmds before plan/materialize.
-//
 // Contract (lifetime-safe):
 //   - Rewrite in place into the storage behind `cmds` (compact / expand using cap).
 //   - Return a slice with the *same* raw_data as `cmds` (usually cmds[:new_len]).

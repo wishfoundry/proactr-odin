@@ -1,9 +1,7 @@
-// Pipe POD + seal∥send physics (Plan A R4 / PR4–PR5 foundation).
-//
+// Pipe POD + seal∥send physics (Plan A R4–PR5 foundation).
 // Pure admission, CT double-buffer, dual high-water, and mock-seal driver —
 // no OpenSSL, no ring, no clear-H1 Wire_State hot path. Real SSL_write plugs
 // later via Cipher_Seal_Fn. Cipher engine (SSL*) never lives here.
-//
 // Conn_Cap / Conn_Caps already defined in plan.odin (orthogonal axes).
 package http
 
@@ -100,7 +98,6 @@ Seal_Queue :: struct {
 
 // Sole outbound schedule on the connection (clear or via Tls_Pipe completion).
 // Only this bag may submit_send (Law S1). seal_n tracks CT seal depth when Ciphered.
-//
 // Size budget: keep this struct small (~16–24 B). Full SEAL_Q_CAP storage lives in
 // Seal_Queue, pointed by q. q is nil until Phase 2 allocates for ciphered/multiplex;
 // clear-H1 Wire_State path is unchanged and must not assume q is non-nil.

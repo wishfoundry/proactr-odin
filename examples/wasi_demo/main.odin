@@ -1,7 +1,6 @@
 // WASI demo: prove proactr soft_cq / timer / host-complete path,
 // and that parked socket ops never complete without ring_wasi_complete.
 // WASI is the only WASM backend (browser/JS hosts load wasi_wasm32 too).
-//
 // Build + run:  odin run examples/wasi_demo/build.odin -file
 // Or:           cd examples/wasi_demo && odin run build.odin -file
 package main

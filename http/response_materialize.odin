@@ -10,7 +10,6 @@ import "core:sys/posix"
 
 // Materialize cmds into _buf as one Write_Slice payload (Phase 1–3 fallback).
 // Not used when body_reserve / response_writer already wrote the heading into _buf.
-//
 // Hot path (TFB plaintext/size ladder): single Static/Bytes with known length —
 // one exact buffer grow, heading into resp_buf, one body memcpy. Skips
 // plan_body_materialize_only + buffer_write bookkeeping tax.

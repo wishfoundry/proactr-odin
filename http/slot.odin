@@ -1,5 +1,4 @@
-// Stream_Slot — sole exchange ownership unit (Plan A R4 / PR2).
-//
+// Stream_Slot — sole exchange ownership unit (Plan A R4).
 // Connection is the pipe (socket, wire, scanner, resp_buf). Stream_Slot owns
 // Response + session + progressive stream state for one exchange. H1 embeds N=1
 // as conn.slot; H2 later admits a multi-slot array with the same type.

@@ -1,11 +1,8 @@
-// LIBRARY CORE — HTTP/2 connection + stream multiplexer (RFC 9113 §5–§8), sans-I/O.
-//
 // HTTP/2 multiplexes logical streams over ONE byte stream: unlike HTTP/3, the
 // transport hands us a single ordered pipe and WE demux frames into per-stream
 // state and maintain the (single, order-dependent) HPACK decoder table. This
 // type is transport-agnostic: feed it received bytes + an out buffer for
 // auto-replies (SETTINGS/PING ACKs); the caller owns the socket / event loop.
-//
 // Scope: HEADERS + CONTINUATION reassembly, stream state / SETTINGS validation,
 // GOAWAY/RST (strict unit pins — not a full h2spec suite). Padding and PRIORITY
 // are stripped; PUSH is SETTINGS-disabled. Outbound DATA respects peer windows
@@ -65,7 +62,6 @@ Http2_Stream :: struct {
 	// Outbound flow control (RFC 9113 §6.9). `send_window` is how many DATA
 	// bytes the PEER will currently accept on this stream; `pending` holds body
 	// the handler produced that the window won't yet allow out.
-	//
 	// `pending_off` is a read cursor into `pending` — DATA frames advance the
 	// cursor instead of remove_range(front), which was O(n) memmove per frame
 	// and dominated bulk H2 CPU (bastion profile: ~72% memmove on s1m).
@@ -87,7 +83,7 @@ Http2_Stream :: struct {
 	// by END_STREAM or the message is malformed (§8.1.1).
 	expected_len: i64,
 
-	// Fairness (PR10): SSE / session streams get more RR quanta than bulk oneshots.
+	// Fairness: SSE / session streams get more RR quanta than bulk oneshots.
 	// Set by host (e.g. sse_start); default false = bulk weight.
 	interactive:  bool,
 
@@ -149,14 +145,14 @@ Http2_Connection :: struct {
 	// send it in GOAWAY before closing.
 	fail_code: u32,
 
-	// Fair flush RR cursor (PR9 M3): next preferred stream id when draining
+	// Fair flush RR cursor: next preferred stream id when draining
 	// multiple pending bodies under a shared connection window. Advanced past
 	// the stream that last received a DATA quantum so one fat stream cannot
 	// starve others on conn-level WINDOW_UPDATE / SETTINGS window growth.
 	// (Host Connection has no separate cursor — engine owns multi-stream flush.)
 	flush_rr: u32,
 
-	// Optional SSE-vs-bulk fairness weights (PR10). 0 → engine default (2 / 1).
+	// Optional SSE-vs-bulk fairness weights. 0 → engine default (2 / 1).
 	// Interactive streams get weight_interactive DATA frames per RR turn;
 	// bulk gets weight_bulk. Host copies from Server_Opts on open.
 	weight_interactive: u8,
@@ -269,7 +265,6 @@ conn_send_response :: proc(
 
 // Feed received bytes; parse all complete frames, update state, and append any
 // automatic replies (SETTINGS/PING ACKs) to `out`.
-//
 // Inbound DATA WINDOW_UPDATE grants are coalesced for the duration of this
 // call and flushed once before return (item 5) — same total credit, fewer frames
 // when a peer ships multi-frame bodies in one read.
@@ -473,7 +468,6 @@ _handle_frame :: proc(c: ^Http2_Connection, h: Frame_Header, payload: []u8, out:
 		// peer back exactly what this frame consumed (the FULL payload length —
 		// padding counts, §6.9.1). Without this the peer stalls after one
 		// initial window (65535 bytes) and gives up.
-		//
 		// Coalesce across DATA frames in this conn_feed (item 5); flushed once
 		// in _flush_window_credits — same total credit, fewer frames on bulk.
 		if h.length > 0 {
@@ -499,11 +493,10 @@ _handle_frame :: proc(c: ^Http2_Connection, h: Frame_Header, payload: []u8, out:
 		if h.stream_id == 0 {
 			if c.send_window + incr > 0x7fff_ffff do return _fail(c, H2_FLOW_CONTROL_ERROR)
 			c.send_window += incr
-			// Fair RR over streams with pending (PR9 M3) — not map-order drain.
+			// Fair RR over streams with pending — not map-order drain.
 			_flush_pending_rr(c, out)
 		} else {
 			s, known := c.streams[h.stream_id]
-			// §5.1: WINDOW_UPDATE is legal on closed streams; after reap the
 			// id is unknown — ignore rather than PROTOCOL_ERROR (F16 GC).
 			if !known || s.closed do return .None
 			if s.send_window + incr > 0x7fff_ffff {
@@ -582,7 +575,7 @@ _finish_header_block :: proc(
 	c: ^Http2_Connection, sid: u32, frag: []u8, end_stream: bool, out: ^[dynamic]u8,
 ) -> H2_Error {
 	_, known := c.streams[sid]
-	// After local GOAWAY: refuse NEW streams above advertised last_sid (PR10 drain).
+	// After local GOAWAY: refuse NEW streams above advertised last_sid.
 	// Still HPACK-decode so the shared table stays in sync, then RST REFUSED_STREAM.
 	refuse_goaway := c.is_server && c.goaway_sent && !known && sid > c.goaway_sent_last
 	refuse_max :=
@@ -804,7 +797,6 @@ conn_has_pending_body :: proc(c: ^Http2_Connection) -> bool {
 // server marks delivered via conn_take_request; client via conn_response.
 // WINDOW_UPDATE / has_pending scan every entry — unbounded growth inverted
 // H2 bulk RPS under concurrency (F16).
-//
 // Header/body bytes are freed only when safe for the host:
 //   - failed and never delivered → free immediately when closed
 //   - delivered → free only after conn_app_release (handler finished)

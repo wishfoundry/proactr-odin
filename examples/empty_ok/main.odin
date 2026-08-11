@@ -1,5 +1,4 @@
 // Minimal empty-ok server on the proactr io_uring host (Linux).
-//
 // Env:
 //   PORT    listen port (default 8080)
 //   WORKERS worker threads / rings (default 1; pass via listen_builder opts)

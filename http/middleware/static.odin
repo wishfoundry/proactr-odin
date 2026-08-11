@@ -1,15 +1,12 @@
 package middleware
 
 // Static file serving (package middleware).
-//
 // Elite-quality static files: path jail, no directory listing, ETag / Last-Modified,
 // Range / 206 / If-Range (resumable downloads), Cache-Control, SPA fallback.
 // Large files use http.body_file + prefer_sendfile (sendfile / chunked pread), not full read.
-//
 // Platform quality:
 //   Elite path is POSIX (Linux/Darwin): open + fstat + http.body_file(owned) + prefer_sendfile.
 //   Windows: best-effort full-read, limited Range/validators (no sendfile host path).
-//
 // See STATIC.md in this package for full usage.
 
 import "core:fmt"
@@ -24,7 +21,6 @@ import "core:time"
 
 // Options for static_handler / static_middleware.
 // Zero-value flags that default ON use disable_* so Static_Opts{root="public"} is safe.
-//
 // Elite quality is POSIX (Linux/Darwin). Windows: best-effort full-read, limited Range/validators.
 Static_Opts :: struct {
 	// Required: directory to serve (relative or absolute). Resolved once at handler creation.

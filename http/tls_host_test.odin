@@ -1,9 +1,6 @@
-// PR5 TLS host unit tests.
-//
 // - Always: lightweight connection_enable_ciphered + pipe firehose path stays green (no OpenSSL).
 // - With OpenSSL: server_tls_init loads PEMs into shared SSL_CTX; conn_new + mem-BIO smoke.
-// - Full HTTPS e2e (curl) is manual — see docs/IMPLEMENTATION_STATUS.md.
-//
+// - Full HTTPS e2e (curl) is manual — see docs/ARCHITECTURE.md.
 // Run: odin test http -define:ODIN_TEST_THREADS=1
 package http
 
@@ -378,7 +375,6 @@ test_tls_stream_dual_ct_plain_n_bookkeeping :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.dual_ct.hold_plain_n, 0)
 	testing.expect_value(t, tls_host_stream_plain_off(&c), 165)
 
-	// Residual defer: multi-record same seal — plain parked in tls_stream_plain_n
 	// until residual CT (ready slab plain_n==0) completes.
 	c.slot.stream_sent = 0
 	c.dual_ct.tx_plain_n = 16
@@ -393,7 +389,6 @@ test_tls_stream_dual_ct_plain_n_bookkeeping :: proc(t: ^testing.T) {
 	c.tls_stream_plain_n += slab_plain
 	testing.expect_value(t, c.tls_stream_plain_n, 16)
 	testing.expect_value(t, c.slot.stream_sent, 0)
-	// Residual hold CQE: plain 0 on slab, take deferred.
 	c.dual_ct.send_is_hold = true
 	slab_plain = c.dual_ct.hold_plain_n // 0
 	if slab_plain == 0 && c.tls_stream_plain_n > 0 {
@@ -406,7 +401,6 @@ test_tls_stream_dual_ct_plain_n_bookkeeping :: proc(t: ^testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PR6 progressive stream over TLS H1 — pure / OpenSSL-optional unit tests
 // ---------------------------------------------------------------------------
 
 @(test)
@@ -624,4 +618,4 @@ test_tls_stream_plain_n_cqe_advance_semantics :: proc(t: ^testing.T) {
 
 // Manual e2e (OpenSSL PEMs + live server): 
 //   curl -kN --http1.1 -H 'Accept: text/event-stream' https://127.0.0.1:PORT/sse
-// Expect event frames over TLS without mid-session hang (PR6 progressive CT path).
+// Expect event frames over TLS without mid-session hang.

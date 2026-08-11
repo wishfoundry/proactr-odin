@@ -1,5 +1,4 @@
 // HTTP/2 outbound flow control (RFC 9113 §6.9) — the streaming response path.
-//
 // DATA a peer will accept is bounded by two send windows: a per-stream window
 // and a single connection-level window, each advertised initially and grown by
 // WINDOW_UPDATE frames. A handler streaming a large body therefore cannot just
@@ -8,15 +7,12 @@
 // a WINDOW_UPDATE later arrives (see conn_feed → FRAME_WINDOW_UPDATE), the
 // buffer drains further. This is the kernel of async backpressure: the write
 // side (the handler) and the read side (WINDOW_UPDATE) meet here.
-//
 // Hosts use `conn_send_body` as a streaming sink; its return value is the
 // backpressure signal (how many bytes are still buffered) used to pause the
 // producer until WINDOW_UPDATE arrives.
-//
 // Bulk perf: unread body is tracked with `pending_off` (cursor). Advancing the
 // cursor is O(1); remove_range(front) was O(n) memmove per DATA frame and
 // dominated H2 s1m CPU on bastion (~72% memmove).
-//
 // Item 5 micros: pre-reserve framed `dst` / pending; sole-stream partial direct
 // DATA from the caller slice (avoids double-buffer of the portion that fits
 // windows now); single-copy frame_write (see frame.odin).
@@ -42,7 +38,6 @@ _peer_max_frame :: #force_inline proc(c: ^Http2_Connection) -> i64 {
 
 // Send response/request HEADERS on `sid`. Pass `end_stream` for a bodyless
 // message; otherwise follow with conn_send_body.
-//
 // When end_stream is set on HEADERS, mark the stream half-closed local and
 // close if the peer already finished (open_streams accounting). Missing this
 // leaked open streams → REFUSED_STREAM after MAX_CONCURRENT_STREAMS empties.
@@ -84,21 +79,18 @@ _n_pending_streams :: proc(c: ^Http2_Connection) -> int {
 // END_STREAM frame is emitted only once the buffer fully drains). Returns the
 // number of bytes still buffered — i.e. the backpressure: >0 means the windows
 // are full and the caller should stop producing until a WINDOW_UPDATE arrives.
-//
 // Sole-stream direct path (P0-3 + item 5): when this stream's pending is empty,
 // no other stream is already pending, and windows allow any credit, DATA frames
 // are written from `data` straight into `dst` for the allowed portion (one copy
 // via frame_write). Only the unsendable remainder is appended into
 // stream.pending — avoids full-body double-buffer when only the first window
 // fits (bulk s1m default windows). Multi-stream still uses pending for fairness.
-//
 // Lifetime: `data` must remain valid until this returns (frames are encoded
 // synchronously into `dst`). Host oneshot flushes before handler return; Static
 // bodies are process-lifetime; handler-owned Bytes must outlive respond.
-//
 // When ≥2 streams already have pending, flush uses fair RR quanta so the first
 // writer cannot monopolize residual connection window on the multi-pending path
-// (PR9 PERF-M1). A sole pending stream still drains fully via `_flush_stream`.
+//. A sole pending stream still drains fully via `_flush_stream`.
 conn_send_body :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, sid: u32, data: []u8, end_stream := false) -> (buffered: int) {
 	s := _get_or_make_stream(c, sid)
 	frame_cap := _peer_max_frame(c)
@@ -238,10 +230,9 @@ _flush_stream_one_frame :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, s: ^Htt
 // Emit DATA frames for `s` up to what the stream + connection windows permit,
 // decrementing both. Carries END_STREAM on the final frame once the buffer is
 // empty and the end was requested.
-//
 // When multiple streams have pending, always use the fair RR quantum path so a
 // single stream cannot take the entire residual connection window on first
-// flush after bodies are buffered (PR9 PERF-M1). Sole-pending streams drain
+// flush after bodies are buffered. Sole-pending streams drain
 // fully (one-frame loop with no quantum cap).
 @(private)
 _flush_stream :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, s: ^Http2_Stream) {
@@ -261,14 +252,12 @@ _flush_stream :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8, s: ^Http2_Stream)
 }
 
 // Fair round-robin drain of all streams with pending DATA under a shared
-// connection window (PR9 M3 / PERF-M1). Used whenever ≥2 streams have pending
+// connection window. Used whenever ≥2 streams have pending
 // (conn_send_body / stream WINDOW_UPDATE via `_flush_stream`, plus conn-level
 // WINDOW_UPDATE / SETTINGS). Base: one DATA quantum per stream turn so a fat
 // body cannot monopolize residual conn credit. Quantum = max(1, conn_window /
 // n_pending). Cursor `c.flush_rr` is the next preferred stream id (0 = lowest
 // id first).
-//
-// PR10 optional weights: interactive (SSE) streams emit up to weight_interactive
 // frames per turn; bulk oneshots use weight_bulk (defaults 2 / 1 when 0).
 @(private)
 _flush_pending_rr :: proc(c: ^Http2_Connection, dst: ^[dynamic]u8) {

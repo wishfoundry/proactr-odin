@@ -1,11 +1,9 @@
 // Package webstream is a thin, protocol-agnostic facade over the QUIC transport.
-//
 // It exposes streams as stable id-tokens, write/read/close, an io.Stream adapter
 // (the seam the HTTP parser plugs into — same one odin-http uses for TCP/TLS
 // sockets), and a level-triggered event poll. It is intentionally thin: QUIC
 // already owns the stream buffers, flow control, and lifecycle, so this layer
 // adds no buffers of its own.
-//
 // A `Stream` IS the wire stream id. QUIC stream ids are monotonic and never
 // reused, so a stale token simply misses the connection's registry (→
 // .Unknown_Stream) — there's no ABA hazard, hence no need for generational
@@ -69,7 +67,6 @@ stream_write :: proc(conn: ^quic.Conn, s: Http3_Stream, data: []u8) -> Http3_Str
 	// Seed / raise the per-stream send window from the peer's transport
 	// parameters. stream_new defaults to DEFAULT_STREAM_WINDOW; once we know
 	// the peer's real limits, use the correct one for this stream type:
-	//
 	// RFC 9000: initial_max_stream_data_bidi_local  = credit on streams *we* initiate
 	//            initial_max_stream_data_bidi_remote = credit on streams *peer* initiates
 	//            (from the peer's perspective as the TP sender).
@@ -221,7 +218,6 @@ poll :: proc(p: ^Http3_Stream_Poller, conn: ^quic.Conn, out: ^[dynamic]Http3_Str
 
 //////////////////////////////////////////////////////////////////////
 //                            Tests
-//
 // ///////////////////////////////////////////////////////////////////
 
 

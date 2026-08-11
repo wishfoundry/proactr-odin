@@ -499,7 +499,6 @@ test_encode_nil_enc_unchanged :: proc(t: ^testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// WOW blockers: ownership, list budget, size updates, oversize entry
 // ---------------------------------------------------------------------------
 
 @(test)

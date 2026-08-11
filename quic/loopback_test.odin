@@ -4,11 +4,9 @@ import "core:testing"
 import "core:fmt"
 
 // --- Phase 7b: end-to-end loopback handshake test ---
-//
 // Creates a client Conn and a server Conn, shuttles emitted packets between
 // them via direct function calls (no network), and drives both state
 // machines forward until they both report .Connected. Proves:
-//
 //   1. Server Initial key derivation from client's DCID works.
 //   2. Initial packet round-trip across both directions succeeds.
 //   3. BoringSSL's TLS 1.3 handshake completes over our QUIC transport.
@@ -17,7 +15,6 @@ import "core:fmt"
 //   5. conn_on_udp_recv correctly parses coalesced packets.
 //   6. Peer transport parameters are extracted after handshake completion
 //      (including max_datagram_frame_size — the DATAGRAM negotiation).
-//
 // The PEM cert/key below are minica-generated for "localhost" (reused from
 // zenoh-rs's endpoint_quic test). They are expired — the client disables
 // verification via conn_disable_verify because this is a loopback test, not
@@ -198,7 +195,6 @@ test_loopback_handshake :: proc(t: ^testing.T) {
 }
 
 // --- Phase 7c: DATAGRAM round-trip after handshake ---
-//
 // Extends the handshake test above to shuttle application-level DATAGRAMs
 // through 1-RTT packets in both directions. This validates short-header
 // encrypt/decrypt, header protection with 5-bit mask, DATAGRAM frame

@@ -273,7 +273,6 @@ test_builder_get_fn_root :: proc(t: ^testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Critic blockers: expand-fail ownership, merge scope, match_table_handler 405
 // ---------------------------------------------------------------------------
 
 // Status-only handlers for unit tests (default 404/405 call respond → need conn).

@@ -3,8 +3,6 @@ package quic
 import "core:time"
 
 // Loss recovery + congestion control for 1-RTT packets (RFC 9002 + RFC 9000
-// §13), wired through the New Reno controller in congestion.odin.
-//
 // What's in:
 //   - A per-packet log (conn.loss_sent) of sent 1-RTT packets, each with the
 //     stream byte ranges it carried and its full wire size (for in-flight
@@ -19,7 +17,6 @@ import "core:time"
 //     data is re-queued and a single ack-eliciting packet is sent.
 //   - Real retransmission: lost/PTO'd stream bytes go back into the stream's
 //     sendable range by rewinding tx_sent_off (see _stream_requeue_range).
-//
 // What's out (still deferred):
 //   - No pacing. New Reno bursts; a pacer would smooth this but isn't needed
 //     for correctness, only for fairness on shallow buffers.
@@ -265,10 +262,8 @@ _stream_advance_acked :: proc(s: ^Stream, r: Sent_Range) {
 // tx_buffered (we don't drain on send) — see the Stream send-side fields.
 // tx_next_offset is the absolute offset; rewinding tx_sent_off makes the
 // builder re-emit from the lost range's absolute offset.
-//
 // Guarded: if tx_sent_off is already at/below the range's start, the bytes
 // are already queued for retransmit (or never left) — don't rewind further.
-//
 // When the lost range carried FIN (including FIN-only empty STREAM), clear
 // tx_fin_sent so the builder re-sets the FIN bit on retransmit.
 @(private)

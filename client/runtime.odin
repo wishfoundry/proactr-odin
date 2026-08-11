@@ -11,7 +11,7 @@ import proactr "../proactr"
 http_worker_active: bool
 
 // Client_Runtime owns (or borrows) a proactr ring for outbound jobs.
-// CLI: thread-local owned ring. Server worker (PR2): bound non-owning ring.
+// CLI: thread-local owned ring. Server worker: bound non-owning ring.
 Client_Runtime :: struct {
 	ring:       ^proactr.Ring,
 	owned_ring: proactr.Ring, // only valid when owns_ring

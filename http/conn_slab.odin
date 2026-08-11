@@ -269,7 +269,6 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	c.tls_plain_body_off = 0
 	c.tls_hs_send = false
 	c.tls_stream_plain_n = 0
-	// PR8 H2 eng fields (engine + slot slab only on ALPN h2 open; slots stay nil for H1).
 	c.h2_active = false
 	c.h2_serial_busy = false
 	c.h2_dispatch_sid = 0
@@ -337,7 +336,6 @@ connection_destroy :: proc(c: ^Connection) {
 	stream_slot_reset_exchange(&c.slot, c)
 	// Free SSL + CT scratch + seal_q / ciphered (avoid leak on free-list).
 	tls_host_conn_destroy(c)
-	// PR8 H2 eng teardown (safe if never h2).
 	h2_host_destroy(c)
 	// Reset Plan A pipe bags so free-list reuse starts clean (clear-H1 default).
 	pt_ring_init(&c.pt)

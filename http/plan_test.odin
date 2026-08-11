@@ -321,7 +321,7 @@ test_plan_bytes_and_static_same_memory_path :: proc(t: ^testing.T) {
 }
 
 // =============================================================================
-// E0.8 / PR3 — pure plan_body policy table (Plan A R4 merge-blocker gate)
+// E0.8 — pure plan_body policy table (Plan A R4 merge-blocker gate)
 // File+ciphered → no Sendfile; gather only on clear path; max_write_unit coalesce.
 // Host meters (ciphered, max_iovecs) live on Plan_Policy / Plan_Host only.
 // =============================================================================

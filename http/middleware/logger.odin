@@ -1,7 +1,6 @@
 package middleware
 
 // Access-log middleware: method, path, status, duration.
-//
 // Hot path: one request-arena Logger_Req + one on_respond registration.
 // No logging work when disabled; line built only in the host-fired hook.
 

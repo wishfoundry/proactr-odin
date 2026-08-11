@@ -1,6 +1,5 @@
-// Pure unit tests for pipe POD + seal∥send physics (Plan A R4 / PR4–PR5).
+// Pure unit tests for pipe POD + seal∥send physics (Plan A R4–PR5).
 // No OpenSSL, no sockets, no ring — laws + mock-seal bulk sim only.
-//
 // Run: odin test http -o:none
 package http
 

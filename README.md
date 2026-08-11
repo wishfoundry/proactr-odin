@@ -1,118 +1,70 @@
 # proactr-odin
 
-A **proactor-first** fork lineage of [laytan/odin-http](https://github.com/laytan/odin-http), optimized for **io_uring** completion-based I/O on Linux.
+HTTP server and client for [Odin](https://odin-lang.org), built on a **proactor** I/O core (`proactr`) with Linux **io_uring** as the primary backend.
 
-| | |
-|--|--|
-| **Name** | **proactr-odin** |
-| **Upstream baseline** | `vendor/laytan/odin-http` ([laytan/odin-http](https://github.com/laytan/odin-http)) |
-| **I/O model** | Proactor (submit op → completion CQ) — not readiness/reactor |
-| **Primary target** | Linux + io_uring |
-| **HTTP package** | `http` (forked API surface; host driven by `proactr`) |
-| **I/O package** | `proactr` |
+Fork lineage of [laytan/odin-http](https://github.com/laytan/odin-http) (unmodified baseline under `vendor/laytan/odin-http`). Completions own the host loop — not readiness callbacks over `core:nbio`.
 
-Related work: [vapor-http](https://git.mere.cloud/bngreer/odin-http) explores multi-protocol hosts on reactor/nbio demux. This tree restarts from laytan with an explicit proactor core.
+## Packages
 
-## Why proactor + io_uring
+| Package | Role |
+|---------|------|
+| `proactr` | Ring, submit/complete, platform backends |
+| `http` | Server, routing, middleware, TLS/H2 host |
+| `http2` | HTTP/2 framing and connection state |
+| `client` | Outbound H1/H2/H3 (blocking + async on worker) |
+| `quic` / `http3` / `qpack` | QUIC + HTTP/3 client stack |
+| `tls_server` / `openssl_dynlib` | TLS via system OpenSSL ≥3.5 |
+| `hpack` / `huffman` | HPACK |
 
-laytan/odin-http (and `core:nbio`) already use io_uring on Linux, but the programming model is still largely **callback-over-tick** and cross-platform readiness-shaped. A true proactor core:
+## Requirements
 
-1. **Submits** work (`accept`, `recv`, `send`, `close`, file ops) into an SQ
-2. **Reaps** completions from a CQ (batch-friendly, zero readiness re-arm)
-3. Owns buffers and op state until completion (no “is it ready?” race)
-4. Maps cleanly to IOCP on Windows later; Darwin may stay kqueue/reactor-backed
+- Recent Odin
+- Linux 5.1+ recommended (io_uring); Darwin uses kqueue reactor for product sockets
+- OpenSSL ≥ 3.5 for TLS / QUIC (`LIBRARY_PATH` / `DYLD_LIBRARY_PATH` as needed)
 
-```
-  app / http.Server
-         │
-         ▼
-     proactr.Ring          ← submit ops, poll completions
-         │
-    ┌────┴────┐
- io_uring   (stubs: IOCP / kqueue later)
-```
-
-## Layout
-
-```
-proactr/                 # Proactor I/O core (io_uring-first)
-http/                    # HTTP/1.1 server+types on proactr (fork of laytan APIs)
-  middleware/            # Static file server (see http/middleware/STATIC.md)
-quantile/                # Optional p50/p75/p90/p99 helpers for app middleware/handlers
-vendor/laytan/odin-http  # Unmodified upstream for baseline benches
-third_party/             # Peer frameworks (git submodules)
-  ntex/  drogon/  asio/  seastar/  compio/  envoy/
-comparisons/             # Peer microservers + harness
-benchmarks/              # Published numbers + methodology
-docs/                    # Architecture notes
-```
-
-## Status
-
-**Scaffold / greenfield** for the proactor ring and clear-H1 host maturity. HTTPS H1
-(oneshot + SSE/WS) and **experimental product HTTP/2** (TLS ALPN `h2`: concurrent
-unary streams + multi-SSE; offline M1–M6 gates) are available when OpenSSL dynlib
-and PEMs are configured — same handler API; WS-on-H2 still ⏳. Not a peer-matrix
-H2 RPS claim until bastion numbers exist. See
-[`docs/CAPABILITY_MATRIX.md`](docs/CAPABILITY_MATRIX.md) and
-[`docs/design/dual-tls-h2/H2_PRODUCT_BASELINE.md`](docs/design/dual-tls-h2/H2_PRODUCT_BASELINE.md).
-Operators: multi-worker / admission / shutdown edges in
-[`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md).
-
-**HTTP/3 track (client-driven):** packages `qpack/`, `quic/`, `http3/`, and `client/` are
-in-tree. **Single TLS dependency:** system **OpenSSL ≥3.5 dynlib** via `openssl_dynlib/`
-(server, QUIC, and client TCP). Not yet a product H3 *server* host claim.
-
-## Dependencies
-
-- Recent Odin master
-- Linux kernel with io_uring (5.1+; 6.x preferred for modern ops)
-- For peer benches: Rust (ntex, compio), CMake/C++ (drogon, asio, seastar, envoy)
-- OpenSSL **≥ 3.5** (Homebrew `openssl@3`); set `LIBRARY_PATH` / `DYLD_LIBRARY_PATH` as needed
-  (optional `#config:PROACTR_OPENSSL_DYNLIB_PATH`)
-
-## Quick start (once implemented)
+## Quick start
 
 ```bash
-# Fair empty-ok matrix (WORKERS=8 default; peers honor WORKERS)
+# Example: empty 200 OK
+odin run examples/empty_ok
+
+# Fair peer empty-ok canary (optional)
 ./comparisons/empty-ok/proactr/build.sh
 SERVERS="ntex laytan proactr" WORKERS=8 ./comparisons/empty-ok/run_bench.sh
 ```
 
-## Benchmarks (primary: TFB-style)
+Benchmarks and methodology: [`benchmarks/TFB.md`](benchmarks/TFB.md). Harnesses live under `comparisons/`.
 
-**Published numbers:** [`benchmarks/TFB.md`](benchmarks/TFB.md) — ntex · drogon ·
-laytan · proactr · go · size ladder + fortunes · **io_uring + kqueue**.
+## Docs
 
-**Harness:** [`comparisons/tfb/`](comparisons/tfb/) — plain text/html only
-(`/plaintext` size ladder + `/fortunes`). **No JSON**.
+| Doc | Audience |
+|-----|----------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Layout and I/O model |
+| [`docs/APP_CONTRACT.md`](docs/APP_CONTRACT.md) | Writing handlers |
+| [`docs/MIDDLEWARE_CONTRACT.md`](docs/MIDDLEWARE_CONTRACT.md) | Middleware rules |
+| [`docs/PROACTR.md`](docs/PROACTR.md) | Ring / completions |
+| [`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md) | Multi-worker / ops edges |
+| [`client/README.md`](client/README.md) | Outbound client API |
 
-```bash
-# Full product matrix (Linux bastion / Darwin)
-SERVERS="ntex proactr laytan go drogon" \
-  TESTS="plaintext s4k s64k s1m s4m fortunes" WORKERS=8 \
-  ./comparisons/tfb/run_bench.sh
+## Layout
+
+```
+proactr/          # I/O core
+http/             # Server + middleware
+client/           # HTTP client
+quic/ http3/ qpack/
+examples/
+comparisons/      # Peer microservers + harnesses
+benchmarks/       # Published numbers
+docs/
+vendor/laytan/    # Upstream baseline (do not edit)
+third_party/      # Optional peer sources (fetch script)
 ```
 
-`comparisons/empty-ok/` is a wiring/ceiling canary — always pass the same `WORKERS`
-to multi-worker peers (see `comparisons/empty-ok/README.md`).
-
-### Peer sources
-
-| Peer | Repo | Role |
-|------|------|------|
-| **laytan** | `vendor/laytan/odin-http` | Upstream nbio baseline |
-| **ntex** | `third_party/ntex` | Rust HTTP (tokio / neon-uring) |
-| **compio** | `third_party/compio` | Completion I/O runtime |
-| **drogon** | `third_party/drogon` | C++ HTTP |
-| **Boost.Asio** | `third_party/asio` | C++ async / proactor patterns |
-| **Seastar** | `third_party/seastar` | Shared-nothing C++ |
-| **Envoy** | `third_party/envoy` | L7 proxy overhead baseline |
-
 ```bash
-./scripts/fetch_third_party.sh
+./scripts/fetch_third_party.sh   # ntex, drogon, …
 ```
 
 ## License
 
-MIT (see `LICENSE`). Third-party and vendor trees keep their own licenses.
+MIT — see `LICENSE`. Vendor and third-party trees keep their own licenses.

@@ -4,22 +4,17 @@ package quic
 // RFC 9000 §19.9-§19.14 — flow control frames (MAX_DATA, MAX_STREAM_DATA,
 //                         RESET_STREAM, STOP_SENDING, STREAMS_BLOCKED,
 //                         DATA_BLOCKED, STREAM_DATA_BLOCKED)
-//
 // STREAM frame type byte layout (bits 0x08 | 0OLF):
-//
 //   bit 2 (0x04): OFF  — Offset field present when set
 //   bit 1 (0x02): LEN  — Length field present when set
 //   bit 0 (0x01): FIN  — Final byte of the stream when set
-//
 // The wire format is:
-//
 //   type (1 byte, 0x08..0x0f)
 //   stream_id (varint)
 //   [offset (varint)]  — present iff OFF
 //   [length (varint)]  — present iff LEN; when absent, the frame extends to
 //                        the end of the packet payload
 //   data (length bytes, or rest of packet if LEN absent)
-//
 // We ship with LEN always set when encoding so callers don't have to track
 // packet-boundary arithmetic. OFF is set whenever the offset is non-zero.
 
@@ -228,7 +223,6 @@ encode_max_data :: proc(buf: []u8, max_data: u64) -> int {
 }
 
 // Encode MAX_STREAMS for either bidi (0x12) or uni (0x13) — RFC 9000
-// §19.11. `is_uni` selects the type byte; `max_count` is the new
 // absolute cap on streams the peer is allowed to initiate.
 encode_max_streams :: proc(buf: []u8, is_uni: bool, max_count: u64) -> int {
 	n := 0

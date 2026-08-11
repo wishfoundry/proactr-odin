@@ -352,7 +352,6 @@ test_h2_refuse_still_decodes_hpack :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// PR9 PERF-M1: when ≥2 streams already have pending, any flush uses RR quanta
 // (not sole-stream drain of residual connection window).
 @(test)
 test_h2_flush_multi_pending_always_rr :: proc(t: ^testing.T) {
@@ -391,7 +390,6 @@ test_h2_flush_multi_pending_always_rr :: proc(t: ^testing.T) {
 	_ = conn_send_body(&srv, &out, 3, body, true)
 	testing.expect(t, stream_pending_len(srv.streams[1]) == 40 && stream_pending_len(srv.streams[3]) == 40)
 
-	// Residual conn credit with both already pending: flush via send_body path
 	// must RR (DATA for both), not dump all residual onto stream 1 alone.
 	clear(&out)
 	srv.send_window = 16
@@ -414,7 +412,6 @@ test_h2_flush_multi_pending_always_rr :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// PR9 M3: fair RR — two streams with pending under a tight shared conn window;
 // conn WINDOW_UPDATE must progress both (not starve the second in map order).
 @(test)
 test_h2_flush_rr_two_pending_streams :: proc(t: ^testing.T) {
@@ -491,7 +488,6 @@ test_h2_flush_rr_two_pending_streams :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// PR9 M5: without WINDOW_UPDATE, total DATA on the wire is O(window), not O(sum bodies).
 @(test)
 test_h2_peak_wire_o_window_two_large_bodies :: proc(t: ^testing.T) {
 	srv: Http2_Connection
@@ -651,7 +647,6 @@ test_h2_reaps_closed_streams :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// PR10: conn_send_goaway emits FRAME_GOAWAY with NO_ERROR and last_peer_sid.
 @(test)
 test_h2_conn_send_goaway_no_error :: proc(t: ^testing.T) {
 	srv: Http2_Connection
@@ -709,7 +704,6 @@ test_h2_conn_send_goaway_no_error :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// PR10: after local GOAWAY, new stream is REFUSED; prior stream still flushes.
 @(test)
 test_h2_goaway_refuses_new_stream_keeps_prior :: proc(t: ^testing.T) {
 	srv: Http2_Connection
@@ -809,7 +803,6 @@ test_h2_goaway_refuses_new_stream_keeps_prior :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// PR10: interactive stream gets more DATA frames than bulk under tight window.
 @(test)
 test_h2_flush_interactive_weight_vs_bulk :: proc(t: ^testing.T) {
 	srv: Http2_Connection
@@ -857,7 +850,6 @@ test_h2_flush_interactive_weight_vs_bulk :: proc(t: ^testing.T) {
 	testing.expect(t, !srv.streams[1].interactive)
 	testing.expect(t, stream_pending_len(srv.streams[1]) == 64 && stream_pending_len(srv.streams[3]) == 64)
 
-	// Residual credit: 24 bytes → with max_frame=8, up to 3 frames of 8.
 	// One RR pass: start at lowest id. Bulk (1) gets 1 frame (8), interactive (3)
 	// gets 3 frames but only 16 credit left → 16 bytes. Interactive > bulk.
 	clear(&out)

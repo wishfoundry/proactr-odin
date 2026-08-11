@@ -1,13 +1,10 @@
-// Manual HTTPS oneshot + SSE demo (PR5 oneshot, PR6 progressive stream).
-// PR8 eng unary H2: same handler under ALPN h2 (not product “supports HTTP/2”).
+// Manual HTTPS oneshot + SSE demo.
 // Self-signed localhost cert.
-//
 //   odin build examples/https_demo -out:examples/https_demo/https_demo.bin -o:none
 //   ./examples/https_demo/https_demo.bin
 //   curl -k --http1.1 https://127.0.0.1:18443/
 //   curl -kN --http1.1 -H 'Accept: text/event-stream' https://127.0.0.1:18443/sse
 //   curl -k --http2 https://127.0.0.1:18443/   # eng unary H2 probe only
-//
 // Not a product example (E0 sample remains examples/empty_ok clear-H1).
 package main
 
@@ -89,7 +86,6 @@ main :: proc() {
 	http.builder_get_fn(&b, "/", proc(req: ^http.Request, res: ^http.Response) {
 		http.respond_plain(res, "OK")
 	})
-	// PR6: same App Contract as clear H1 — sse_start / Effects over ciphered stream.
 	http.builder_get_fn(&b, "/sse", proc(req: ^http.Request, res: ^http.Response) {
 		_ = req
 		pad := cast(^Tick)http.sse_alloc(res, size_of(Tick))

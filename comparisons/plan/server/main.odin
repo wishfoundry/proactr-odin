@@ -1,13 +1,10 @@
 // Planner A/B demo server — body-archetype routes + plan counters.
-//
 // Phase 3–5: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
 // the real wire path can multi-buffer send (Writev-style) for multi-static routes
 // and stream File regions via chunked pread+send for /file/1m (prefer_sendfile).
 // /sse uses response_begin_stream (Phase 5) — not plan_body.
-//
 // Shadow plan_body counters remain for policy checks; http.plan_wire_* counters
 // show what the executor actually chose on the wire.
-//
 // Env:
 //   PORT              listen port (default 19090)
 //   WORKERS           worker threads / rings (default 1)

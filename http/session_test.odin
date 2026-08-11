@@ -289,7 +289,6 @@ test_session_destroy_bumps_slot_gen :: proc(t: ^testing.T) {
 	// st was heap-allocated and freed by destroy (timer_pending_cqes == 0).
 }
 
-// PR10 soft admission: over session cap → 503, invalid Session, no panic.
 @(test)
 test_sse_start_soft_reject_over_cap :: proc(t: ^testing.T) {
 	server: Server
@@ -336,7 +335,6 @@ test_sse_start_soft_reject_over_cap :: proc(t: ^testing.T) {
 	testing.expect_value(t, sync.atomic_load(&session_metrics_live), i64(1))
 }
 
-// PR10: ws_start soft-rejects over cap with 503 (not 101 attach).
 @(test)
 test_ws_start_soft_reject_over_cap :: proc(t: ^testing.T) {
 	server: Server
@@ -421,7 +419,6 @@ test_stream_buf_size_default :: proc(t: ^testing.T) {
 	testing.expect(t, STREAM_BYTES_TOTAL_DEFAULT == 64 * 1024 * 1024)
 }
 
-// PR6: ciphered flag + session attach; effects apply into resp_buf (plain framing).
 // No sockets / SSL — gen, apply, and hangup gate only (encrypt path needs tls_ssl + ring).
 @(test)
 test_session_ciphered_attach_ws_effects :: proc(t: ^testing.T) {

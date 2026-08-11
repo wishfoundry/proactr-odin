@@ -1,10 +1,8 @@
 // client — multi-protocol HTTP client toolkit.
-//
 // Layers (see docs/LIBRARY.md):
 //   CORE         H2_Session / H3_Session (sans-I/O), Dialer + request over io.Stream
 //   ADAPTERS     tcp_dialer, tls_dialer, h3 dial (QUIC sleep-poll over H3_Session)
 //   CONVENIENCE  get() one-shot
-//
 // Session negotiation (toolkit defaults; optional browser-ish Alt-Svc):
 //   .Auto → TLS ALPN [h2, http/1.1] only (no surprise H3)
 //   follow_alt_svc → try cached Alt-Svc h3 first, then ALPN fallback
@@ -42,7 +40,6 @@ DEFAULT_USER_AGENT         :: "vapor-http/client"
 // negotiated (e.g. via ALPN). Swap it for TLS, a Unix socket, an SSH channel,
 // or an in-memory pipe. h1/h2 ride the returned io.Stream; h3 is QUIC and is
 // dialed separately (see `dial`).
-//
 // `data`+`procedure` mirror core:io.Stream — userdata travels with the proc,
 // since Odin procs aren't closures.
 Dial_Proc :: #type proc(
@@ -101,7 +98,6 @@ Options :: struct {
 
 get :: proc(url: string, opts := Options{}, allocator := context.allocator) -> (Response, Http_Error) {
 	if http_worker_active {
-		// INVALID_USE_DIAGNOSTIC
 		return {}, .Invalid_Use
 	}
 	// Optional proactr path: clear H1 + https H1/H2 (mem-BIO) + H3 (explicit or prefer_h3).

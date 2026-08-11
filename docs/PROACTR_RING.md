@@ -30,8 +30,8 @@ After setup we require **`IORING_FEAT_SINGLE_MMAP`** (kernel 5.4+): one shared m
 ## Mapping
 
 ```
-mmap(ring_fd, IORING_OFF_SQ_RING)  → head/tail/mask/flags + SQ array + CQEs
-mmap(ring_fd, IORING_OFF_SQES)     → []IO_Uring_SQE
+mmap(ring_fd, IORING_OFF_SQ_RING) → head/tail/mask/flags + SQ array + CQEs
+mmap(ring_fd, IORING_OFF_SQES) → []IO_Uring_SQE
 ```
 
 Local `sqe_head` / `sqe_tail` batch array updates; `ring_submit` / `ring_wait` flush the kernel SQ tail with release semantics (liburing-compatible).

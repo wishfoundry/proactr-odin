@@ -1,6 +1,3 @@
-// PR9 product gates M1–M6 — offline (no ring / TLS listen required).
-//
-// Companion baseline: docs/design/dual-tls-h2/H2_PRODUCT_BASELINE.md
 // Existing coverage aliased here for the product bar:
 //   M1 — concurrent unary ≥2  (also: test_h2_host_concurrent_two_get_streams)
 //   M2 — concurrent deferred large bodies ≥2 + WINDOW_UPDATE drain
@@ -9,7 +6,6 @@
 //   M5 — peak on-wire DATA O(window), not O(sum full bodies)
 //   M6 — two concurrent SSE via dispatch+handler + RST Client_Gone (M6a+M6b)
 //        (also: test_h2_sse_two_sessions_data_frames, test_h2_sse_rst_client_gone_once)
-//
 // Run: odin test http -define:ODIN_TEST_THREADS=1 -o:none
 package http
 

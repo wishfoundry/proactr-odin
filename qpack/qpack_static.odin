@@ -1,5 +1,4 @@
 // Package qpack implements QPACK (RFC 9204) header compression for HTTP/3.
-//
 // This file holds the static table (RFC 9204 Appendix A): 99 fixed name/value
 // pairs indexed 0..98. Ported from the authoritative RFC, cross-checked against
 // nghttp3's `stable[]`. It is pure read-only data — entries are Odin `string`

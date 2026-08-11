@@ -6,10 +6,10 @@ OS backends so HTTP/demos share one model and we can benchmark against nbio late
 ## Model
 
 ```
-submit_*(ring, …)      → park Operation (buffer owned until free)
+submit_*(ring, …) → park Operation (buffer owned until free)
 ring_submit / ring_wait → harvest Completions (+ software timers)
-complete_apply         → mark Completed (or keep Submitted if COMPLETION_MORE)
-operation_free         → backend cleanup + recycle id
+complete_apply → mark Completed (or keep Submitted if COMPLETION_MORE)
+operation_free → backend cleanup + recycle id
 ```
 
 Hosts never see readiness. **Buffers stay valid from submit until `operation_free`.**
@@ -50,7 +50,7 @@ portable `ring_wait` can re-fire timers.
 Real TCP/HTTP on WASM is **not** wired (needs wasi-sockets or an equivalent host bridge).
 
 ```odin
-proactr.ring_backend_name()  // "io_uring" | "iocp" | "kqueue" | "wasi"
+proactr.ring_backend_name() // "io_uring" | "iocp" | "kqueue" | "wasi"
 ```
 
 ## Timeouts
@@ -59,11 +59,11 @@ Portable **software timers** on every backend (no per-timeout threads; no Linux-
 `IORING_OP_TIMEOUT` requirement).
 
 ```
-submit_timeout  → min-heap by monotonic deadline
-cancel_timeout  → soft_cq Completion{TIMEOUT_CANCELED}; never frees
-expiry          → soft_cq Completion{TIMEOUT_ETIME}
-ring_wait       → fire due → drain soft_cq → platform wait (remaining-time retry)
-complete_apply → operation_free   // same as Recv/Send
+submit_timeout → min-heap by monotonic deadline
+cancel_timeout → soft_cq Completion{TIMEOUT_CANCELED}; never frees
+expiry → soft_cq Completion{TIMEOUT_ETIME}
+ring_wait → fire due → drain soft_cq → platform wait (remaining-time retry)
+complete_apply → operation_free // same as Recv/Send
 ```
 
 | Result | Value | Meaning |
@@ -81,8 +81,8 @@ Implementation: `proactr/timers.odin`.
 
 `submit_accept(..., continuous=false)` by default.
 
-- `continuous=true` on Linux → multishot accept when supported  
-- `continuous=true` on kqueue → re-arm + `COMPLETION_MORE`  
+- `continuous=true` on Linux → multishot accept when supported 
+- `continuous=true` on kqueue → re-arm + `COMPLETION_MORE` 
 - Windows → one-shot (host re-submits)
 
 ## Registration (Linux only)

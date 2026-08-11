@@ -3,12 +3,12 @@
 #
 # Pure seal∥send + firehose CI: Done (http/pipe.odin + http/pipe_test.odin).
 # This is not an HTTPS e2e gate. Live HTTPS oneshot is serial SSL_write windowed
-# CT send (not dual-CT seal∥send on wire) — see docs/TLS_H1.md / IMPLEMENTATION_STATUS.md.
+#
 #
 # Usage (CI / local):
 #   ./scripts/check_firehose_pipe.sh
 #
-# Companion: docs/IMPLEMENTATION_STATUS.md (PR5 scorecard).
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

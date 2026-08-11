@@ -21,4 +21,4 @@
 - **File stays File.** The planner demotes mechanism when `sendfile_ok` is false. Middleware does not swap body modes for TLS or HTTP/2 correctness.
 - **Stream body bytes are never middleware’s job.** Long-lived traffic is Effects (`sse_start` / `ws_start`), not middleware-owned progressive pulls.
 - **No sample / godoc / helper** that registers host deferred-produce (`Host_Pull` / pull) from app or middleware code.
-- **Same handler.** Middleware that is correct on clear HTTP/1.1 is correct on HTTPS and HTTP/2 for capabilities marked ✅ in [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md). No protocol `#if` in middleware layers.
+- **Same handler.** Middleware that is correct on clear HTTP/1.1 is correct on HTTPS and HTTP/2 for capabilities marked ✅ in this document. No protocol `#if` in middleware layers.

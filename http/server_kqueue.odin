@@ -2,11 +2,9 @@
 package http
 
 // Host backend: kqueue.
-//
 // Darwin: native multi-kq reactor (io_reactor_kqueue + server_loop_reactor +
 // tls_reactor_flush). Shared listen (no REUSEPORT) — multi-bind REUSEPORT +
 // localhost pins all accepts to one worker.
-//
 // Other BSD: proactr kqueue façade + per-worker SO_REUSEPORT; workers use the
 // portable host loop until a native reactor is ported.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E0.5–E0.7 (+ README honesty): hard-fail example/docs dual-API bans.
-# Plan A R4 Phase 0 — see docs/PHASE0_E0.md and docs/IMPLEMENTATION_STATUS.md.
+# App-contract surface bans.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

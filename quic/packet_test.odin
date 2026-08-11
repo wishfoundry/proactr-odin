@@ -157,7 +157,6 @@ test_build_long_first_byte_layout :: proc(t: ^testing.T) {
 }
 
 // --- RFC 9001 §A.2 — Client Initial packet decryption ---
-//
 // The RFC gives the complete 1200-byte protected packet that a client sends
 // when the DCID is 0x8394c8f03e515708, the packet number is 2, and the CRYPTO
 // frame contains a specific (example) ClientHello. This test decrypts that
@@ -193,7 +192,6 @@ test_rfc9001_a2_client_initial_decrypt :: proc(t: ^testing.T) {
 	//   1. Header parsing walks to the correct pn_offset.
 	//   2. Header protection removal recovers the expected first byte (0xc3)
 	//      and the expected packet number (2).
-	//
 	// Rather than invoke the full decrypt, we reproduce the header-walk
 	// logic inline and check the HP removal step directly.
 

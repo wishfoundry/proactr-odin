@@ -5,7 +5,6 @@ import "core:os"
 
 // Receive path — parses inbound UDP datagrams, decrypts packets, feeds
 // CRYPTO bytes into the OpenSSL pull FIFO, and drives the handshake forward.
-//
 // A single UDP datagram may contain multiple coalesced QUIC packets at
 // different encryption levels (§12.2). For example, a server's first flight
 // typically packs Initial + Handshake into one datagram. We walk the
@@ -99,7 +98,6 @@ parse_long_header :: proc(buf: []u8, hdr: ^Long_Header) -> Recv_Error {
 // Mutates `buf` in place: header protection is removed and the AEAD payload
 // is decrypted over the ciphertext region. Returns the plaintext slice (a
 // view into `buf`) and the packet number.
-//
 // On return, `consumed` holds the number of bytes this packet occupied in
 // the UDP datagram so the caller can advance to the next coalesced packet.
 decrypt_long_packet :: proc(
@@ -536,7 +534,6 @@ _handle_short_header_packet :: proc(conn: ^Conn, buf: []u8) -> Recv_Error {
 }
 
 // --- Build Handshake-level packet ---
-//
 // Symmetric with conn_build_initial_packet but uses Handshake keys and
 // omits the Token field. Used to send the client's Finished message.
 

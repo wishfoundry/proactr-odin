@@ -1,16 +1,13 @@
 package quic
 
 // RFC 9000 §16 — Variable-Length Integer Encoding
-//
 // The two most-significant bits of the first byte encode the total length:
-//
 //   2MSB  | Length | Usable bits | Range
 //   ------+--------+-------------+----------------------------
 //   00    | 1      | 6           | 0 .. 63
 //   01    | 2      | 14          | 0 .. 16383
 //   10    | 4      | 30          | 0 .. 1_073_741_823
 //   11    | 8      | 62          | 0 .. 4_611_686_018_427_387_903
-//
 // The length-tag bits are masked off when decoding; only the usable bits
 // contribute to the integer value.
 

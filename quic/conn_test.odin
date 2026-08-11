@@ -4,10 +4,8 @@ import "core:testing"
 import "core:fmt"
 
 // --- Phase 7a: connection setup + ClientHello Initial generation ---
-//
 // These tests exercise the full pipeline from conn_new() through Initial
 // packet emission, without any network I/O. A successful test proves:
-//
 //   1. BoringSSL SSL_QUIC_METHOD callbacks wire up correctly.
 //   2. TLS 1.3 ClientHello is produced and lands in conn.initial.tx_crypto.
 //   3. Our CRYPTO frame + Initial packet + AEAD + HP pipeline encrypts it.

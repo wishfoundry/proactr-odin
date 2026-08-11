@@ -1,9 +1,6 @@
-// LIBRARY CORE — HTTP/2 client connection session (sans-I/O).
-//
 // Mirror of server.H2_Session on the client side: you own the byte stream
 // (TLS, pipe, SSH, …). Feed peer bytes, drain `session.out`, open streams with
 // send_request, poll take_response. No sockets or threads.
-//
 // Pull-based state machine (typical non-blocking host):
 //   1. h2_client_session_init        — preface + SETTINGS into out
 //   2. write(fd, session.out); clear
@@ -11,7 +8,6 @@
 //   4. write(fd, session.out); clear
 //   5. on readable: h2_client_session_feed(inbound)  // ACKs/WINDOW_UPDATE → out
 //   6. write any out; if take_response(sid) → done
-//
 // Blocking io.Stream drivers (client.request) still work; this type is for
 // embedders that want feed/poll without owning http2.Http2_Connection directly.
 // See docs/LIBRARY.md.

@@ -9,7 +9,7 @@
 #   ./scripts/check_app_contract_sample.sh && ./scripts/check_e0_bans.sh
 #
 # Multi-protocol (TLS H1 / H2) listen jobs: not started — same handler sources stay
-# unchanged; only listen opts grow later. See docs/IMPLEMENTATION_STATUS.md.
+# unchanged; only listen opts grow later. See docs/ARCHITECTURE.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

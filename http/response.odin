@@ -287,7 +287,7 @@ plan_policy_for :: proc(conn: ^Connection) -> Plan_Policy {
 		p.fixed_files = proactr.ring_has_fixed_files(&td.ring)
 	}
 
-	// Cipher path (PR5 host): when conn.ciphered, force no sendfile / no zc and
+	// Cipher path: when conn.ciphered, force no sendfile / no zc and
 	// window mem coalesces to PIPE_MAX_WRITE_UNIT_DEFAULT (= PULL_WINDOW). Clear-H1 unchanged.
 	if conn != nil && conn.ciphered {
 		p.ciphered = true
@@ -377,7 +377,6 @@ body_bytes :: proc(r: ^Response, data: []u8, owned := true, loc := #caller_locat
 }
 
 // Append a File body command (fd region). Does not read the file here.
-//
 // Ownership: by default the caller must keep `fd` open and the region readable until the
 // response send fully completes (final send CQE / clean_request_loop); the host does not
 // close the fd. Pass owned=true to transfer close responsibility to the host (closes after
@@ -596,16 +595,11 @@ _http_write_chunk_end :: proc(b: ^bytes.Buffer) {
 // ---------------------------------------------------------------------------
 // Phase 5 + D0: Response_Stream — chunked bodies with progressive multi-CQE flush
 // ---------------------------------------------------------------------------
-//
 // Streaming is a different lifetime from the body command planner (G5):
-//
 //   headers / status (mutable) → response_begin_stream → stream_write* → stream_end
-//
 // Body middleware does NOT run on stream data. Any rewrite of body intent must
 // happen before begin_stream (headers only after that are frozen with the heading).
-//
 // Mutual exclusion with body_set / body_* cmds / body_reserve / response_writer.
-//
 // D0 wire model:
 //   - Transfer-Encoding: chunked; heading written once at begin
 //   - stream_write appends framed chunks into resp_buf (may run while a Stream
@@ -780,7 +774,6 @@ _stream_try_submit :: proc(conn: ^Connection) {
 		conn.resp_buf = r._buf.buf
 	}
 
-	// PR6: progressive stream over TLS H1 — peer expects ciphertext.
 	// Same entry as clear Stream (ws_start / sse_start / begin_stream); no plain-send bypass.
 	if conn.ciphered || conn.tls_ssl != nil {
 		tls_host_stream_try_submit(conn)
@@ -1243,7 +1236,6 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 		response_send_got_body(res, will_close)
 	}
 
-	// PR8 H2 oneshot: request body is already fully framed (or empty). Skip H1
 	// scanner discard; body() still works via Request._pre_body for handlers.
 	if conn.h2_active {
 		response_send_got_body(r, false)
@@ -1379,7 +1371,6 @@ _cmds_mem_body_len :: proc(cmds: []Response_Cmd) -> (body_len: int, ok: bool) {
 // multi-buffer submit_send (plan_wire_multi_send) when kernel path is unavailable.
 // Returns true if the send was submitted (or cleaned for empty). Caller must not
 // also materialize. On false, heading was not written — caller may materialize.
-//
 // LIFETIME: body slices are NOT copied. Data behind Static/Bytes must remain valid
 // until the final send CQE (after respond returns). Safe: string literals, #load,
 // request temp_allocator (reset only in clean_request_loop after send completes).
@@ -1487,7 +1478,6 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 // plus kernel_writev/multi_send when a mem prefix is gathered.
 // Returns true if path handled the response (submitted / cleaned / closed).
 // false → heading not written; caller may materialize.
-//
 // Ownership: File fd in cmds must stay open until final CQE (handler/app owns fd).
 @(private)
 _response_send_file_region :: proc(r: ^Response, cmds: []Response_Cmd, plan: Plan_Result) -> bool {
@@ -1684,7 +1674,6 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	// Hooks must not call respond. One-shot clear inside fire.
 	_response_fire_respond_hooks(r)
 
-	// PR8 H2 oneshot: never assemble H1 status-line / Content-Length wire.
 	// Body middleware runs; h2_host maps status/headers/body → HPACK + DATA.
 	if conn != nil && conn.h2_active {
 		if r._streaming {
@@ -1776,7 +1765,6 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		return
 	}
 
-	// PR5 ciphered: window plain through SSL_write → CT drain → multi-CQE send.
 	// Clear-H1: single host_submit_send of full body.
 	if conn.ciphered && conn.tls_ssl != nil {
 		// Full materialize path: single plain part (no borrowed body).
@@ -1807,10 +1795,8 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Middleware on_complete (LIFO): wire done, request arena still live.
-	// Design §5.12 step 1 — complete hooks while arena live.
 	_response_fire_complete_hooks(&conn.slot.res)
 
-	// Design §5.12 step 2 — cancel outbound client jobs (sync on_done .Exchange_Gone)
 	// before wire/tls clear and conn_temp_reset. User must not be request-temp.
 	exchange_cancel_slot(&conn.slot, true)
 

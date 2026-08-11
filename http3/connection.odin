@@ -2,7 +2,6 @@
 // unidirectional streams, exchanges SETTINGS, and maps requests/responses onto
 // QUIC bidirectional streams — wiring `webstream` (streams), `h3` (frames), and
 // `qpack` (header compression) together.
-//
 // QPACK: decoder table (peer encoder stream → our table) and encoder table
 // (our inserts → peer). Field sections use dynamic indexing when the peer
 // advertises capacity > 0; with blocked_streams = 0 we only index known-received
@@ -91,7 +90,6 @@ Http3_Connection :: struct {
 // Bring up the connection: open control + QPACK encoder/decoder uni streams,
 // write their stream-type prefixes, and send SETTINGS first on the control
 // stream (RFC 9114 §6.2.1). The QUIC handshake must already be Connected.
-//
 // Default `settings` is DEFAULT_SETTINGS (QPACK max table capacity 4096).
 // Pass an explicit Settings{qpack_max_table_capacity=0,...} for static-only.
 h3_conn_init :: proc(
@@ -548,11 +546,9 @@ _write_data :: proc(h: ^Http3_Connection, s: Http3_Stream, body: []u8) -> Http3_
 
 
 
-//
 // ///////////////////////////////////////////////////////////////
 //                         Tests
 // ///////////////////////////////////////////////////////////////
-//
 
 
 // Test cert + key copied from quic's loopback_test.odin (those live in quic's

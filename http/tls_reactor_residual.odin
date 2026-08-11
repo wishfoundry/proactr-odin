@@ -1,9 +1,7 @@
 package http
 
 // Shared residual CT helpers for dense TLS flush (Darwin kqueue + Linux io_uring).
-//
 // Single residual region lives in dual_ct.tx[reactor_res_off:][:reactor_res_n].
-// Residual WRITE arm is platform-specific (see reactor_arm_write_residual):
 //   Darwin: level EVFILT_WRITE on reactor kq
 //   Linux:  host_submit_send (io_uring) with reactor_h1 so CQE is not soft_cq
 
@@ -102,7 +100,6 @@ reactor_sync_residual_from_pending :: proc(conn: ^Connection) {
 
 // reactor_arm_write_residual: stage residual on the wire after EAGAIN.
 // Contract: set reactor_h1 before arm so soft_cq_send_completes is never charged.
-//
 // Darwin: level EVFILT_WRITE until residual empty (native reactor kq).
 // Linux:  host_submit_send (io_uring); residual CQE demuxes via reactor_on_send_complete.
 @(private)

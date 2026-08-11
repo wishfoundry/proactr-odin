@@ -1,16 +1,12 @@
 // Package proactr: portable completion-based (proactor) async I/O.
-//
 // Model: submit ops → reap completions → dispatch. Hosts never see readiness.
-//
 // Backends (same portable API; separate from core:nbio):
 //   - Linux:   io_uring
 //   - Windows: IOCP
 //   - Darwin / FreeBSD / OpenBSD / NetBSD: kqueue façade
 //   - WASI:    host façade (only WASM port; no js_wasm32)
-//
 // Buffer rule: for Recv/Send, caller-owned buffers stay valid until the matching
 // completion is harvested and operation_free is called (or the op is recycled).
-//
 // Linux registration (REGISTER_FILES / REGISTER_BUFFERS): platform_linux.odin.
 // Non-Linux no-ops: registration_stub.odin (+build !linux).
 package proactr

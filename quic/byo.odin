@@ -1,10 +1,7 @@
-// LIBRARY CORE helpers — bring-your-own UDP.
-//
 // Drain outbound QUIC packets without touching sockets. Your loop:
 //   conn_on_udp_recv(conn, datagram)
 //   … advance app / http3 …
 //   conn_poll_send(conn, my_emit, user)  // my_emit sends via your socket
-//
 // Convenience pumps in http3.pump_quic_* wrap these with net.send_udp/recv_udp.
 // See docs/LIBRARY.md.
 package quic

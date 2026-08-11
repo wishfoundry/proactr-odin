@@ -1,4 +1,3 @@
-// PR5: prefer_h3 opt-in + polish (H3-first then TCP fallback).
 package client
 
 import "core:fmt"

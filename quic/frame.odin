@@ -1,9 +1,7 @@
 package quic
 
 // RFC 9000 §19 — QUIC frame encoding
-//
 // Frame types this package decodes:
-//
 //   0x00  PADDING             — fills remaining packet space
 //   0x01  PING                — keepalive / ACK elicit
 //   0x02  ACK                 — acknowledgement (no ECN)
@@ -21,7 +19,6 @@ package quic
 //   0x1d  CONNECTION_CLOSE_APP — application-level close
 //   0x1e  HANDSHAKE_DONE      — parse-and-ignore (server->client, post handshake)
 //   0x30-0x31  DATAGRAM       — RFC 9221, unreliable datagrams
-//
 // Frame types we still don't handle (parse as Unknown_Type):
 //   0x03 ACK(ECN), 0x07 NEW_TOKEN, 0x18-0x19 NEW/RETIRE_CONNECTION_ID,
 //   0x1a-0x1b PATH_CHALLENGE/RESPONSE.

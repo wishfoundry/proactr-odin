@@ -1,9 +1,11 @@
 # App Contract
 
-**Frozen public story for application and middleware authors.**  
-If it is correct on clear HTTP/1.1, it is correct on HTTPS and HTTP/2 — *for capabilities marked ✅ in [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md)* (including TLS H2 concurrent unary + multi-SSE after PR9 offline M1–M6). ⏳ cells (e.g. WS-on-H2, bulk firehose) are listen/phase-gated, not handler `#if`.
+Rules for application and middleware authors. A correct clear HTTP/1.1 handler is
+correct on HTTPS and HTTP/2 for the oneshot / SSE / WS surfaces the host exposes.
+Gaps (for example WS-on-H2) are listen- or phase-gated — not handler `#if`
+protocol branches.
 
-Host design docs under `docs/design/` are **not** required reading for app authors. See also [`MIDDLEWARE_CONTRACT.md`](MIDDLEWARE_CONTRACT.md) and [`PHASE0_E0.md`](PHASE0_E0.md).
+See also [`MIDDLEWARE_CONTRACT.md`](MIDDLEWARE_CONTRACT.md).
 
 ---
 
@@ -19,22 +21,20 @@ LONG-LIVED
   sse_start / ws_start → Effects
   Session events only:
     Start | Timer | External | Client_Gone | Idle_Timeout | Writable
-  Hangup law: ONLY .Client_Gone (never protocol death enums)
+  Hangup: ONLY .Client_Gone (never protocol death enums)
   Backpressure: ONLY .Writable
 
-ADVANCED (optional read — never required for correctness)
-  plan_context(res) → exactly four fields:
+ADVANCED (optional)
+  plan_context(res) → four fields:
     sendfile_ok, preferred_copy_budget, max_write_unit, zero_copy_send
 
-NEVER (reject PR / docs / examples)
+NEVER in handlers / public docs / examples
   SSL*, Provider, BIO, stream ids, Response._sid, Session as frame id
-  body_set_pull or any app-registered pull / Host_Pull from app code
+  body_set_pull or app-registered pull / Host_Pull
   io.Stream as SSE/long-lived API
   resume / poll / "arm write"
-  Conn_Proto / Message_Proto / caps / http/debug in handler or examples/
+  Conn_Proto / Message_Proto / caps / http/debug
   body modes that mean writev | sendfile | SSL_write
-  progressive stream_* as a second long-lived product
-  third public intent rail (anything beyond commands | effects)
 ```
 
 | Path | API |

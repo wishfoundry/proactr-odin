@@ -60,7 +60,6 @@ tls_host_stream_long_lived :: proc(conn: ^Connection) -> bool {
 
 // tls_host_stream_try_submit: progressive SSE/WS over TLS H1.
 // Encrypts plain from resp_buf[plain_off:] via SSL_write (no stream_pool slabs).
-//
 // Linux: dual-CT seal∥send (tls_host_submit_ct + try_ahead); CQE advances stream_sent.
 // Darwin (Plan R2 P4/P5-lite): residual-first CT write + reactor residual arm
 // (reactor_h1 → no soft_cq). dual_ct_try_ahead is a no-op. Multi-window continues
@@ -223,7 +222,6 @@ tls_host_stream_try_submit :: proc(conn: ^Connection) {
 	conn.wire.exec_n = 0
 
 	when ODIN_OS == .Darwin {
-		// Residual-first CT write for this seal window (no soft-CQ; no dual-CT ahead).
 		// Advance stream_sent only after full CT of this window is on the wire — if
 		// EAGAIN mid-window, stash residual and arm WRITE via host_submit_send with
 		// reactor_h1 (documented residual arm; not charged as soft_cq).

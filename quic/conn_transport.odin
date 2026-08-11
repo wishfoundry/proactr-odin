@@ -9,11 +9,9 @@ import "core:sys/posix"
 import "core:time"
 
 // Synchronous UDP transport layer.
-//
 // Drives the handshake to completion via blocking send/recv on a UDP
 // socket. This is deliberately simple — no async, no nbio — so the zenoh
 // integration can reuse zenoh's existing blocking-connect pattern.
-//
 // Once the handshake is complete, callers should use conn_send_datagram
 // (then net.send_udp with the produced packet) and conn_udp_read +
 // conn_on_udp_recv to move application data.

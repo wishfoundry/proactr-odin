@@ -1,9 +1,7 @@
 // Provider — host-injected SSL surface (IOC).
 // Vtable methods take self (^Provider) so adapters can use user_data (dynlib).
-//
 // Opaque handles only: no SSL* / SSL_CTX* types leave this package into public
 // http API. Host (Tls_Pipe / cipher module) holds Ctx/Conn as distinct rawptrs.
-//
 // Product I/O path (Plan A mem-BIO law):
 //   setup_mem_bios → bio_write_net (inbound CT) / bio_read_net + bio_pending_out
 //   (outbound CT) + accept/read/write on plaintext side.
@@ -97,8 +95,6 @@ set_default_provider :: proc(p: ^Provider) {
 // Default for convenience APIs. Selected at compile time via HTTP_TLS_BACKEND
 // (see config.odin). Override at runtime with set_default_provider or pass an
 // explicit ^Provider into host init.
-//
-// PR5: only "dynlib". Returns nil if system libssl cannot be loaded — callers
 // must handle that (tests skip; product host reports config error).
 default_provider :: proc() -> ^Provider {
 	if g_default != nil do return g_default

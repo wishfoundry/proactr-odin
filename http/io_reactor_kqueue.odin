@@ -2,12 +2,10 @@
 package http
 
 // Darwin native kqueue reactor I/O (Plan R2 P5 full wait ownership).
-//
 // Design (stable vs P5 crash): product sockets use a **per-worker reactor kqueue**
 // separate from proactr's ring kqueue. udata is Connection* (or accept sentinel),
 // never proactr op_id — so ring_wait/complete_apply cannot mis-decode socket events
 // under multi-worker load (prior hybrid on shared kq → segfault / 0 RPS).
-//
 // Timers stay on proactr soft_cq (D5). Worker loop: kevent (reactor) + ring_wait(0)
 // to harvest timeouts only. No proactr.submit_accept/recv/send/close from http/.
 
@@ -37,7 +35,6 @@ Reactor_Host :: struct {
 @(thread_local)
 reactor_host: Reactor_Host
 
-// Residual CT helpers + reactor_arm_write_residual: tls_reactor_residual.odin
 // (shared with Linux dense flush / io_uring residual arm).
 
 // ---------------------------------------------------------------------------
@@ -578,7 +575,6 @@ reactor_on_writable :: proc(s: ^Server, fd: i32) {
 			}
 			return
 		}
-		// Residual fully on wire — disable level WRITE, demux continue.
 		reactor_residual_clear(conn)
 		conn.wire.pending_send = nil
 		conn.wire.kind = .None

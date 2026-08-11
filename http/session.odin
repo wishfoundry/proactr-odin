@@ -1,7 +1,6 @@
 // Effect-based Sessions (D0–D2): host-driven events → Effects → wire/timer/end.
 // SSE codec in session_sse.odin; WS in session_ws.odin (D3).
 // Progressive Stream wire is D0 (response/wire).
-// PR9 M6: SSE/Effects on H2 multi-slot — same App Contract; H1 chunked or H2 DATA.
 package http
 
 import "base:runtime"
@@ -299,7 +298,6 @@ sse_start :: proc(
 		}
 		sid, sok := h2_host_sid_for_slot(conn, ex)
 		assert(sok && sid != 0, "sse_start: H2 slot has no stream id", loc)
-		// PR10: mark stream interactive so RR flush prefers SSE over bulk oneshots.
 		http2.conn_stream_set_interactive(&conn.h2, sid, true)
 		// Default 200 when handler left the response_init Not_Found.
 		if res.status == .Not_Found {

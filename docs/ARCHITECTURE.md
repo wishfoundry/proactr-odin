@@ -1,98 +1,73 @@
-# Architecture: proactor core for odin-http
+# Architecture
 
 ## Reactor vs proactor
 
 | | Reactor | Proactor |
 |--|---------|----------|
-| Kernel tells you | “FD ready” | “Op finished (result)” |
-| Typical APIs | epoll, kqueue, `poll` | IOCP, io_uring CQ |
-| Who issues the I/O | App, after readiness | App submits; kernel runs it |
-| Buffer ownership | Often after ready | At submit time through completion |
-| Re-arm | Often every readiness cycle | Op is one-shot (or multi-shot CQEs) |
+| Kernel reports | FD ready | Op finished |
+| Typical APIs | epoll, kqueue | IOCP, io_uring CQ |
+| Who runs I/O | App after readiness | Kernel after submit |
+| Buffer ownership | Often after ready | Submit through completion |
 
-**laytan / `core:nbio`:** on Linux uses io_uring under the hood, but the public model is still “queue callback ops + `tick`” shared with readiness-backed OS paths. Useful, portable, not optimized as a pure proactor surface.
+**proactr** is a portable completion-native package (not `core:nbio`). See [`PROACTR.md`](PROACTR.md).
 
-**proactr:** portable completion-native package (separate from `core:nbio`). See `docs/PROACTR.md`.
+## Handlers and middleware
 
-## Writing handlers (app authors)
+- [`APP_CONTRACT.md`](APP_CONTRACT.md) — oneshot / long-lived handlers
+- [`MIDDLEWARE_CONTRACT.md`](MIDDLEWARE_CONTRACT.md) — middleware rules
+- [`PRODUCTION_CHECKLIST.md`](PRODUCTION_CHECKLIST.md) — multi-worker / shutdown edges
 
-**Required reading:** [`APP_CONTRACT.md`](APP_CONTRACT.md) (oneshot / long-lived / optional four-field `plan_context`).  
-Also: [`MIDDLEWARE_CONTRACT.md`](MIDDLEWARE_CONTRACT.md), [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md), Phase 0 gates in [`PHASE0_E0.md`](PHASE0_E0.md).  
-**Ship honesty (what is actually done):** [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).
-
-Design notes under `docs/design/dual-tls-h2/` are **implementer / reviewer** material — not required reading for app or middleware authors. Do not teach host pipe internals in tutorials or `examples/`.
-
-## Package split
+## Package layout
 
 ```
-proactr/                    # standalone proactor (compare vs nbio later)
-  proactr.odin              # Ring, Op, Completion, submit_*, ring_wait
-  platform_linux.odin       # io_uring (true proactor)
-  platform_windows.odin     # IOCP (true proactor)
-  platform_kqueue.odin      # kqueue façade (Darwin/BSD)
-  platform_wasi.odin        # WASI host façade (only WASM port; no js_wasm32)
-  timers.odin / registration_stub.odin
-
-http/
-  # Protocol + host; driven by proactr completions
-  middleware/           # Static files etc. (import as middleware; see http/middleware/STATIC.md)
+proactr/          # Ring, submit_*, ring_wait, platform backends
+http/             # Server host, routing, TLS/H2, middleware
+http2/            # H2 framing (sans host I/O)
+client/           # Outbound HTTP (stream + proactr jobs)
+quic/ http3/ qpack/
+tls_server/ openssl_dynlib/
+hpack/ huffman/
 ```
 
-## Completion loop (target)
+## Completion loop
 
 ```
 loop:
   submit pending SQEs (batch)
   wait/peek CQEs (batch)
   for each CQE:
-    dispatch by user_data → connection state machine
-    maybe enqueue more SQEs (recv after accept, send after respond, …)
+    dispatch by user_data → connection / client job
+    maybe enqueue more SQEs
 ```
 
-No intermediate “readable → recv” step on the hot path.
+No intermediate “readable → recv” step on the Linux proactr hot path.
 
-## Op user data
+Darwin product sockets use a reactor kqueue for readiness; soft proactr harvest covers timers and outbound client ops (dual-wait when client work is pending).
 
-Prefer a tagged pointer or dense `Op_Id` into a slab:
+## Op identity
 
-```odin
-Op_Kind :: enum u8 { Accept, Recv, Send, Close, Cancel, … }
-Op :: struct {
-    kind:   Op_Kind,
-    conn:   ^Conn,   // or index
-    // buffer views, iovecs, flags …
-}
-```
+In-flight work is a slab/op with kind + connection (or client job) reference. CQE `user_data` is a stable op id or tagged pointer. Host inbound connections stay untagged; outbound client jobs use a low-bit tag so demux never confuses the two.
 
-`user_data` in the SQE/CQE is the stable id or pointer to `Op`.
-
-## HTTP host state machine (sketch)
+## Server state (sketch)
 
 ```
 Listening ──Accept──► Connected ──Recv──► Parsing ──► Handler
-                              ▲                         │
-                              │                      respond
-                              └──────── Send ◄──────────┘
-                                         │
-                                      Close?
+ ▲ │
+ │ respond
+ └──────── Send ◄──────────┘
 ```
 
-Handlers stay synchronous w.r.t. the connection’s logical request (like laytan), but I/O is always async-completion under the hood.
+TLS and H2 sit on the same host with ALPN; long-lived sessions (SSE/WS) are documented in [`SESSION_SSE.md`](SESSION_SSE.md) and [`TLS_H1.md`](TLS_H1.md).
 
-## Multi-worker
+## Client
 
-v1: one ring per worker thread, SO_REUSEPORT listen sockets (classic Seastar/ntex style).
-Shared accept via multishot accept on one ring is a later option.
+Blocking facade for CLI/tests (`get` / `request`). In-handler outbound uses `get_async` bound to the inbound `Stream_Slot` (cancel on clean). See [`../client/README.md`](../client/README.md).
 
-## Non-goals (near term)
+## Related docs
 
-**Product honesty:** TLS H1 oneshot + SSE/WS and TLS H2 concurrent unary + multi-SSE
-(PR9 M1–M6 offline) are product for matrix ✅ cells. Still **not** claimed: WS-on-H2,
-bastion multi-stream RPS peer matrix, live dual-CT bulk firehose, HTTP/3. Design
-track: `docs/design/dual-tls-h2/` + [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).
-
-- HTTP/3 as a shipped protocol surface (later; vapor-http owns a separate multi-protocol fork space)
-- Drop-in `core:nbio` API compatibility (packages stay separate for comparison)
-- Fixed files/buffers on non-Linux backends
-// Non-Linux: fixed files / registered recv pool are unavailable.
-// Real implementations live only in platform_linux.odin.
+| Doc | Topic |
+|-----|--------|
+| [`PROACTR.md`](PROACTR.md) / [`PROACTR_RING.md`](PROACTR_RING.md) | Ring API |
+| [`H2_ENGINE.md`](H2_ENGINE.md) | HTTP/2 host notes |
+| [`TLS_H1.md`](TLS_H1.md) | TLS H1 path |
+| [`BENCHMARKS.md`](BENCHMARKS.md) | Bench conventions |

@@ -1,10 +1,7 @@
 // HTTP/2 framing (RFC 9113 §4–§6). Fixed 9-byte frame header followed by a
 // type-specific payload, all big-endian:
-//
 //   Length(24) Type(8) Flags(8) R(1)+StreamID(31)  Payload(Length)
-//
 // Sans-I/O: encode/decode only; no sockets, TLS, or host wiring.
-//
 // Hot path (item 5): frame_write does one capacity check + one payload copy
 // (no multi-step append growth on DATA). Callers pre-size known body framing
 // via frame_dst_reserve_data to kill _append_elems reallocation churn on s1m.

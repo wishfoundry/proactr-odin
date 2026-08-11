@@ -1,5 +1,3 @@
-// PR8/PR9 H2 host — unit tests (no TLS / ring required).
-//
 // Run: odin test http -define:ODIN_TEST_THREADS=1 -o:none
 package http
 
@@ -552,7 +550,7 @@ test_default_opts_h2_serial_false :: proc(t: ^testing.T) {
 	testing.expect(t, !Default_Server_Opts.h2_serial_dispatch)
 }
 
-// Offline: two concurrent GET streams → two responses in h2_out (PR9).
+// Offline: two concurrent GET streams → two responses in h2_out.
 @(test)
 test_h2_host_concurrent_two_get_streams :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -820,7 +818,6 @@ test_h2_slots_pointer_not_embedded_tax :: proc(t: ^testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PR9 M6: SSE multi-slot offline (HEADERS + DATA; RST → Client_Gone)
 // ---------------------------------------------------------------------------
 
 // Scan h2_out for DATA frames; return whether sid appeared with non-empty payload.
@@ -1112,7 +1109,6 @@ test_h2_sse_rst_client_gone_once :: proc(t: ^testing.T) {
 	conn.h2_slot_sids[i2] = 0
 }
 
-// PR10: simulated server shutdown emits GOAWAY NO_ERROR once; idle → Closing offline.
 @(test)
 test_h2_host_graceful_goaway_drain_no_error :: proc(t: ^testing.T) {
 	s: Server
@@ -1165,7 +1161,6 @@ test_h2_host_graceful_goaway_drain_no_error :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(conn.h2_out), n1)
 }
 
-// PR10: after graceful GOAWAY, new peer stream is REFUSED; prior stream not killed.
 @(test)
 test_h2_host_after_goaway_new_stream_refused :: proc(t: ^testing.T) {
 	conn: Connection
@@ -1256,7 +1251,6 @@ test_h2_host_after_goaway_new_stream_refused :: proc(t: ^testing.T) {
 	testing.expect(t, !ok3, "refused stream not opened")
 }
 
-// PR10 soft admission: multi-slot full → RST_STREAM(REFUSED_STREAM); conn not Closing.
 @(test)
 test_h2_host_slot_full_refused_stream :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -1337,7 +1331,6 @@ test_h2_host_slot_full_refused_stream :: proc(t: ^testing.T) {
 	testing.expect(t, !again, "refused stream not re-taken")
 }
 
-// PR10 soft admission: sse_start over cap on H2 → 503 HEADERS END_STREAM, invalid Session.
 @(test)
 test_h2_sse_start_soft_reject_over_cap :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

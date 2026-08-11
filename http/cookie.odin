@@ -88,7 +88,6 @@ cookie_string :: proc(c: Cookie, allocator := context.allocator) -> string {
 }
 
 // TODO: check specific whitespace requirements in RFC.
-//
 // Allocations are done to check case-insensitive attributes but they are deleted right after.
 // So, all the returned strings (inside cookie) are slices into the given value string.
 cookie_parse :: proc(value: string, allocator := context.allocator) -> (cookie: Cookie, ok: bool) {

@@ -3,10 +3,8 @@ package quic
 import "core:testing"
 
 // RFC 9001 §A.1 — QUIC Initial key derivation test vectors.
-//
 // Given:
 //   dcid = 0x8394c8f03e515708
-//
 // Expected values (RFC 9001 §A.1):
 //   initial_secret        = 7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44
 //   client_initial_secret = c00cf151ca5be075ed0ebfb5c0ff07c8d3fa65e39b5c85a4a7b3ec4d6b8b3b1b

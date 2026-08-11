@@ -1,9 +1,6 @@
-// PR5 host: real mem-BIO TLS on proactr accept/recv/send path.
-//
 // Opaque SSL only (tls_server.Conn) — no SSL* leaves this module into handlers.
 // Product I/O: rBIO fed by recv CT; wBIO drained to host_submit_send CT.
 // Clear-H1 paths are unchanged when Server.tls_provider/tls_ctx are nil.
-//
 // Handshake: conn.tls_pipe.state = Handshake until SSL_accept OK → Open +
 // connection_enable_ciphered (lightweight: plan_policy only; no seal_q/CT[2]).
 // Response send (ciphered oneshot / stream / H2): single seal engine in
@@ -367,7 +364,6 @@ tls_host_on_recv :: proc(conn: ^Connection, result: i32) {
 	case .Handshake:
 		tls_host_drive_handshake(conn)
 	case .Open:
-		// PR8 H2 eng: feed PT to http2 engine (not H1 scanner).
 		if conn.h2_active {
 			h2_host_on_ct_ready(conn)
 			return
@@ -617,7 +613,6 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 		return false
 	}
 
-	// Residual WRITE CQE (Darwin EVFILT_WRITE or Linux io_uring submit_send+reactor_h1):
 	// single residual region — continue flush law (HS / H2 / oneshot demux inside
 	// reactor_on_send_complete). No dual-CT promote; CQE not charged as soft_cq.
 	when ODIN_OS == .Darwin || ODIN_OS == .Linux {
@@ -659,13 +654,11 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 		}
 	}
 
-	// PR8 H2 eng: continue windowed frame flush; duplex re-arm CT recv.
 	// Linux dual-CT promote path; Darwin residual already handled above.
 	if conn.h2_active {
 		return h2_host_on_send_complete(conn)
 	}
 
-	// PR6 progressive stream / long-lived session: do NOT clean_request_loop mid-session.
 	if tls_host_stream_long_lived(conn) {
 		p := conn.server.tls_provider
 		ssl := conn.tls_ssl
