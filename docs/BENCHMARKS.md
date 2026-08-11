@@ -17,18 +17,17 @@
 
 See `comparisons/load/SCENARIOS.md` for readiness scenarios (`api_steady`, `spike`, `mixed`, `soak`, …).
 
-## Peers
+## Peers (published set)
 
 | ID | Source | Build notes |
 |----|--------|-------------|
-| `laytan` | `vendor/laytan/odin-http` | `odin build` example empty server |
-| `proactr` | this tree `http` + `proactr` | io_uring host; pass `Server_Opts` as `listen_and_serve` 4th arg |
-| `ntex` | `third_party/ntex` + peer crate in comparisons | `cargo build --release`; Linux: try `neon-uring` / compio feature |
-| `compio` | `third_party/compio` + peer crate | completion I/O Rust baseline |
-| `drogon` | `third_party/drogon` | CMake; needs trantor etc. |
-| `asio` | `third_party/asio` | header-only Asio HTTP sample |
-| `seastar` | `third_party/seastar` | heavy; optional / SKIP by default |
-| `envoy` | `third_party/envoy` | proxy config in front of static cluster; optional |
+| `proactr` | this tree | io_uring host on Linux |
+| `laytan` | `vendor/laytan/odin-http` | nbio baseline |
+| `ntex` | crates.io (`comparisons/*/ntex`) | neon-uring on Linux |
+| `drogon` | `third_party/drogon` | CMake peer builds |
+| `go` | `comparisons/*/go` | `net/http` |
+
+Published tables: [`benchmarks/TFB.md`](../benchmarks/TFB.md).
 
 ## Methodology
 
