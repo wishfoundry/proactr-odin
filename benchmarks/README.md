@@ -1,33 +1,26 @@
 # Benchmarks
 
-## Peers we publish
+## Peers
 
-| Peer | Stack | Where |
-|------|--------|--------|
-| **proactr** | this tree | `comparisons/tfb`, `tls-h2` |
-| **laytan** | vendored odin-http | `vendor/laytan` |
-| **ntex** | Rust (crates.io) | `comparisons/*/ntex` |
-| **drogon** | C++ (`third_party/drogon`) | `comparisons/*/drogon` |
-| **go** | `net/http` | `comparisons/*/go` |
+| Peer | Stack |
+|------|--------|
+| **proactr** | this tree (io_uring on Linux) |
+| **laytan** | `vendor/laytan/odin-http` |
+| **ntex** | crates.io neon-uring |
+| **drogon** | `third_party/drogon` (epoll) |
+| **go** | `comparisons/tfb/go` |
 
 ## Numbers
 
-**[`TFB.md`](TFB.md)** — latest checked-in matrices:
+**[`TFB.md`](TFB.md)** — clear H1 size ladder + fortunes, **2026-08-11** bastion run  
+(`comparisons/tfb/results/summary_20260811.tsv`).
 
-| Suite | Date / source | Routes |
-|-------|----------------|--------|
-| Clear H1 size ladder | bastion R3 (`tfb/results/summary.tsv`) | plaintext … 1 MiB |
-| Fortunes (partial) | `tfb/results/fortunes_fair_v2.tsv` | plaintext + fortunes |
-| TLS H1 / H2 | 2026-08-10 (`tls-h2/results/`) | plaintext … 1 MiB |
-
-Re-run before marketing claims; numbers drift with host noise and code.
+TLS/H2 last pin: 2026-08-10 under `comparisons/tls-h2/results/`.
 
 ```bash
 ./scripts/fetch_third_party.sh
 ./comparisons/tfb/schema/prepare.sh
-SERVERS="proactr laytan ntex drogon" WORKERS=8 \
-  TESTS="plaintext s4k s64k s1m" \
+SERVERS="proactr laytan ntex drogon go" WORKERS=8 \
+  TESTS="plaintext s4k s64k s1m s4m fortunes" \
   ./comparisons/tfb/run_peer_matrix.sh
 ```
-
-Empty-OK wiring canary only: `comparisons/empty-ok/`.

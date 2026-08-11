@@ -52,9 +52,15 @@ func main() {
 	_, _ = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`)
 
 	mux := http.NewServeMux()
+	// /api/tiny is the harness path for the 13 B plaintext cell (same body as /plaintext).
+	hello := []byte("Hello, World!")
+	mux.HandleFunc("/api/tiny", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(hello)
+	})
 	mux.HandleFunc("/plaintext", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("Hello, World!"))
+		_, _ = w.Write(hello)
 	})
 	mux.HandleFunc("/s/4k", plainBytes(p4k))
 	mux.HandleFunc("/s/64k", plainBytes(p64k))

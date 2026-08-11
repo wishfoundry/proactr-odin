@@ -1,0 +1,24 @@
+proactr plaintext rps=352088.5833 lat_avg= oha_size=13
+proactr s4k rps=347887.1208 lat_avg= oha_size=4096
+proactr s64k rps=152773.7231 lat_avg= oha_size=65536
+proactr s1m rps=4220.4645 lat_avg= oha_size=1048576
+proactr s4m rps=1341.1251 lat_avg= oha_size=4194304
+proactr fortunes rps=83974.5624 lat_avg= oha_size=1229
+laytan plaintext rps=321398.6034 lat_avg= oha_size=13
+laytan s4k rps=259554.8106 lat_avg= oha_size=4096
+laytan s64k rps=116144.6784 lat_avg= oha_size=65536
+laytan s1m rps=2615.6178 lat_avg= oha_size=1048576
+laytan s4m rps=602.4319 lat_avg= oha_size=4194304
+laytan fortunes n/a
+ntex plaintext rps=354236.8366 lat_avg= oha_size=13
+ntex s4k rps=319078.1678 lat_avg= oha_size=4096
+ntex s64k rps=138047.8849 lat_avg= oha_size=65536
+ntex s1m rps=6087.9787 lat_avg= oha_size=1048576
+ntex s4m rps=1662.1410 lat_avg= oha_size=4194304
+ntex fortunes rps=12034.0730 lat_avg= oha_size=1229
+drogon plaintext rps=278284.5178 lat_avg= oha_size=13
+drogon s4k rps=147992.2697 lat_avg= oha_size=74
+drogon s64k rps=22983.2517 lat_avg= oha_size=222
+drogon s1m rps=1454.8817 lat_avg= oha_size=2601
+drogon s4m rps=329.8867 lat_avg= oha_size=10230
+drogon fortunes rps=7812.6210 lat_avg= oha_size=638
