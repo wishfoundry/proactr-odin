@@ -1807,7 +1807,12 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
 	// Middleware on_complete (LIFO): wire done, request arena still live.
+	// Design §5.12 step 1 — complete hooks while arena live.
 	_response_fire_complete_hooks(&conn.slot.res)
+
+	// Design §5.12 step 2 — cancel outbound client jobs (sync on_done .Exchange_Gone)
+	// before wire/tls clear and conn_temp_reset. User must not be request-temp.
+	exchange_cancel_slot(&conn.slot, true)
 
 	// Ensure multi-buffer / file-send queue is inactive before reusing conn.
 	// Must nil exec_bufs (not only exec_n) so keep-alive cannot retain dangling

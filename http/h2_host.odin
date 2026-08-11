@@ -620,6 +620,8 @@ h2_host_exchange_done_slot :: proc(conn: ^Connection, idx: u8, sid: u32) {
 		return
 	}
 	_response_fire_complete_hooks(&conn.h2_slots[idx].res)
+	// Cancel outbound jobs on this stream slot before free/reset (client-proactr §5.11).
+	exchange_cancel_slot(&conn.h2_slots[idx], true)
 	h2_host_slot_free(conn, idx)
 	if conn.h2_dispatch_sid == sid {
 		conn.h2_dispatch_sid = 0

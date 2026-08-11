@@ -38,6 +38,7 @@ laytan/odin-http (and `core:nbio`) already use io_uring on Linux, but the progra
 proactr/                 # Proactor I/O core (io_uring-first)
 http/                    # HTTP/1.1 server+types on proactr (fork of laytan APIs)
   middleware/            # Static file server (see http/middleware/STATIC.md)
+quantile/                # Optional p50/p75/p90/p99 helpers for app middleware/handlers
 vendor/laytan/odin-http  # Unmodified upstream for baseline benches
 third_party/             # Peer frameworks (git submodules)
   ntex/  drogon/  asio/  seastar/  compio/  envoy/
@@ -58,11 +59,17 @@ H2 RPS claim until bastion numbers exist. See
 Operators: multi-worker / admission / shutdown edges in
 [`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md).
 
+**HTTP/3 track (client-driven):** packages `qpack/`, `quic/`, `http3/`, and `client/` are
+in-tree. **Single TLS dependency:** system **OpenSSL ≥3.5 dynlib** via `openssl_dynlib/`
+(server, QUIC, and client TCP). Not yet a product H3 *server* host claim.
+
 ## Dependencies
 
 - Recent Odin master
 - Linux kernel with io_uring (5.1+; 6.x preferred for modern ops)
 - For peer benches: Rust (ntex, compio), CMake/C++ (drogon, asio, seastar, envoy)
+- OpenSSL **≥ 3.5** (Homebrew `openssl@3`); set `LIBRARY_PATH` / `DYLD_LIBRARY_PATH` as needed
+  (optional `#config:PROACTR_OPENSSL_DYNLIB_PATH`)
 
 ## Quick start (once implemented)
 

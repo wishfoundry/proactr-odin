@@ -8,6 +8,10 @@
 *.out
 *.dSYM/
 
+# Temporary QUIC BoringSSL static libs (package quic / client)
+!boringssl/lib/*.a
+!boringssl/lib/*.lib
+
 # Odin
 *.profraw
 *.profdata

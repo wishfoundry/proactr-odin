@@ -655,6 +655,16 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 		}
 		defer proactr.ring_destroy(&td.ring)
 
+		// Client×proactr: install worker Client_Runtime on this ring (no private ring).
+		if client_bridge.on_worker_enter != nil {
+			client_bridge.on_worker_enter(rawptr(&td.ring), s.conn_allocator)
+		}
+		defer {
+			if client_bridge.on_worker_leave != nil {
+				client_bridge.on_worker_leave()
+			}
+		}
+
 		// Optional registered recv pool (scanner windows). Non-fatal on failure.
 		if berr := proactr.ring_register_recv_pool(
 			&td.ring,
@@ -742,6 +752,11 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 				c := completions[i]
 				op := proactr.complete_apply(&td.ring, c)
 				if op == nil {
+					continue
+				}
+				// Outbound client jobs claim first (tagged user demux); zero map tax on inbound.
+				if client_bridge.on_cqe != nil &&
+				   client_bridge.on_cqe(rawptr(&td.ring), c, op) {
 					continue
 				}
 				host_dispatch(s, op, c)

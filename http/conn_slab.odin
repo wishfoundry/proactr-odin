@@ -300,6 +300,10 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 @(private)
 connection_destroy :: proc(c: ^Connection) {
 	c.state = .Closed
+
+	// Outbound client jobs first (sync .Exchange_Gone) before temp reset / slot zero.
+	exchange_cancel_conn(c, true)
+
 	conn_temp_reset(c)
 
 	if td != nil {

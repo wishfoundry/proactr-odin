@@ -25,6 +25,10 @@ server_reactor_dispatch_soft :: proc(s: ^Server, completions: []proactr.Completi
 		if op == nil {
 			continue
 		}
+		if client_bridge.on_cqe != nil &&
+		   client_bridge.on_cqe(rawptr(&td.ring), c, op) {
+			continue
+		}
 		host_dispatch(s, op, c)
 		if op.status != .Submitted {
 			proactr.op_free(&td.ring, c.op_id)
@@ -89,19 +93,48 @@ server_reactor_worker_loop :: proc(s: ^Server) {
 			}
 		}
 
-		// Pre-I/O soft harvest only when a timer is due now (avoid empty proactr kevent).
+		// Outbound client ops arm proactr kq (not product reactor). When pending,
+		// dual-wait: block on proactr (min_complete=1) for client readiness, then
+		// nonblock product. Full reactor registration of client fds is later polish.
+		// Pre-I/O soft harvest when timer due now.
 		if has_timer && tms == 0 {
 			server_reactor_dispatch_soft(s, completions)
 		}
+		// Re-sample after soft harvest (may have submitted more outbound).
+		client_work := client_bridge.has_work != nil && client_bridge.has_work()
 
-		// One blocking wait: product sockets + timer deadline in kevent timeout.
-		_ = reactor_wait(s, loop_wait)
+		if client_work {
+			// CRITICAL: min_complete=1 so platform kevent actually waits (0 returns immediately).
+			n_soft, werr := proactr.ring_wait(&td.ring, completions[:], 1, loop_wait)
+			if werr != .None {
+				log.errorf("ring_wait(client dual) error: %v", werr)
+			} else {
+				for i in 0 ..< n_soft {
+					c := completions[i]
+					op := proactr.complete_apply(&td.ring, c)
+					if op == nil {
+						continue
+					}
+					if client_bridge.on_cqe != nil &&
+					   client_bridge.on_cqe(rawptr(&td.ring), c, op) {
+						continue
+					}
+					host_dispatch(s, op, c)
+					if op.status != .Submitted {
+						proactr.op_free(&td.ring, c.op_id)
+					}
+				}
+			}
+			_ = reactor_wait(s, 0)
+		} else {
+			// One blocking wait: product sockets + timer deadline in kevent timeout.
+			_ = reactor_wait(s, loop_wait)
+		}
 
-		// Post-I/O soft harvest: only when timers are registered (product sockets
-		// use reactor kq; soft_cq_send=0 on bulk TLS). Skip empty proactr kevent(0)
-		// when the soft ring has no timer interest.
+		// Post-I/O soft harvest: timers or remaining client work (nonblocking peek).
 		_, has_timer_post := proactr.ring_next_timer_ms(&td.ring)
-		if has_timer_post {
+		client_work_post := client_bridge.has_work != nil && client_bridge.has_work()
+		if has_timer_post || client_work_post {
 			server_reactor_dispatch_soft(s, completions)
 		}
 		reactor_drain_deferred_clean()
