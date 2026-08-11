@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # empty-ok multi-peer harness — fair worker count across peers.
 # WORKERS is passed to every peer that honors it (proactr, laytan, ntex, drogon).
-# asio/compio remain single accept-loop baselines (same as TFB).
 set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${HOME}/.cargo/bin:${HOME}/go/bin:/usr/local/bin:${PATH}"
 
@@ -15,10 +14,8 @@ BENCH_C="${BENCH_C:-100}"
 BENCH_N="${BENCH_N:-50000}"
 BENCH_Z="${BENCH_Z:-10s}"
 WARMUP_Z="${WARMUP_Z:-2s}"
-SERVERS="${SERVERS:-ntex drogon asio laytan proactr}"
-SKIP_HEAVY="${SKIP_HEAVY:-1}"
-LOGDIR="${LOGDIR:-/tmp/proactr-empty-ok}"
-mkdir -p "$LOGDIR"
+SERVERS="${SERVERS:-ntex drogon laytan proactr}"
+LOGDIR="${LOGDIR:-/tmp/proactr-empty-ok}"mkdir -p "$LOGDIR"
 
 export PORT WORKERS
 
@@ -112,15 +109,6 @@ for s in $SERVERS; do
         echo "skip ntex (no crate)"
       fi
       ;;
-    compio)
-      if [[ -f compio/Cargo.toml ]]; then
-        (cd compio && cargo build --release)
-        # Single accept-loop baseline — WORKERS env ignored by peer.
-        run_peer compio ./compio/target/release/compio-empty-ok
-      else
-        echo "skip compio"
-      fi
-      ;;
     drogon)
       if [[ -x drogon/build/drogon_empty_ok ]]; then
         run_peer drogon ./drogon/build/drogon_empty_ok
@@ -128,14 +116,6 @@ for s in $SERVERS; do
         echo "skip drogon (build comparisons/empty-ok/drogon first)"
       else
         echo "skip drogon"
-      fi
-      ;;
-    asio)
-      if [[ -x asio/asio_empty_ok ]]; then
-        # Single-thread io_context baseline — WORKERS env ignored by peer.
-        run_peer asio ./asio/asio_empty_ok
-      else
-        echo "skip asio (build comparisons/empty-ok/asio first)"
       fi
       ;;
     laytan)
@@ -146,16 +126,8 @@ for s in $SERVERS; do
       build_proactr
       run_peer proactr ./proactr/server.bin
       ;;
-    seastar)
-      if [[ "$SKIP_HEAVY" == "1" ]]; then echo "skip seastar (SKIP_HEAVY=1)"; continue; fi
-      echo "seastar peer: build not automated yet"
-      ;;
-    envoy)
-      if [[ "$SKIP_HEAVY" == "1" ]]; then echo "skip envoy (SKIP_HEAVY=1)"; continue; fi
-      echo "envoy peer: config under envoy/ — not automated yet"
-      ;;
     *)
-      echo "unknown server: $s" >&2
+      echo "unknown server: $s (want: ntex drogon laytan proactr)" >&2
       ;;
   esac
 done

@@ -1,21 +1,33 @@
 # Benchmarks
 
-## Product TFB suite
+## Peers we actually run
 
-**[TFB.md](TFB.md)** — consolidate benchmarks on kqueue and io_uring:
+| Peer | Stack | Where |
+|------|--------|--------|
+| **proactr** | this tree | `comparisons/tfb/proactr`, `tls-h2/proactr` |
+| **laytan** | vendored odin-http / nbio | `vendor/laytan` |
+| **ntex** | Rust (crates.io; neon-uring on Linux) | `comparisons/*/ntex` |
+| **drogon** | C++ (built from `third_party/drogon`) | `comparisons/*/drogon` |
+| **go** | `net/http` | `comparisons/*/go` |
 
-- Peers: **ntex**, **drogon**, **laytan**, **proactr**, **go**
-- Routes: plaintext size ladder + `/fortunes`
-- Hosts: **io_uring** (Ubuntu) and **kqueue** (Darwin)
+No Asio / Seastar / Envoy / Compio trees in-repo. Optional experimental peers
+under `comparisons/` may still exist as local crates; they are not the published set.
 
-Harness: `comparisons/tfb/run_bench.sh`.
+## Numbers
 
-## Planner A/B (experiment)
+**[TFB.md](TFB.md)** — last published size-ladder + fortunes RPS (io_uring + kqueue).
 
-**[`comparisons/plan/`](../comparisons/plan/README.md)** — per-handler body profiles + shadow `plan_body` counters:
+Re-run:
 
-- Modes: `PLAN_MODE=materialize` vs `optimize`
-- Routes: tiny / gen / assembled (Writev) / blob / file (Sendfile) / SSE
-- Harness: `./comparisons/plan/run_plan_ab.sh`
+```bash
+./scripts/fetch_third_party.sh
+./comparisons/tfb/schema/prepare.sh
+# build peers as needed (ntex: cargo; drogon: comparisons/tfb/drogon/build.sh; go: go build)
+SERVERS="proactr laytan ntex drogon go" WORKERS=8 \
+  TESTS="plaintext s4k s64k s1m s4m fortunes" \
+  ./comparisons/tfb/run_peer_matrix.sh
+```
 
-Does not replace TFB; answers “did the planner choose the right ops?” before wire-level gather/sendfile.
+TLS/H2 matrix: `comparisons/tls-h2/` (peers: proactr, ntex, drogon, go).
+
+Empty-OK wiring canary: `comparisons/empty-ok/` (not product numbers).

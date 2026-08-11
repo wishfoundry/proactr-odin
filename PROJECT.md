@@ -15,4 +15,5 @@
 3. **Batched CQ reaping** — amortize syscalls; multi-shot where available.
 4. **Explicit op lifetime** — in-flight ops own buffers until completion.
 5. **Thin HTTP host** — parse/respond sit on the proactor; no hidden `core:nbio`.
-6. **Measure peers** — harnesses under `comparisons/`; numbers under `benchmarks/`.
+6. **Measure peers** — published set is proactr / laytan / ntex / drogon / go
+   (`benchmarks/TFB.md`); harnesses under `comparisons/`.

@@ -1,79 +1,41 @@
-# Plain text / HTML baselines (io_uring on Linux)
+# TFB-style comparisons
 
 **No JSON.** Routes:
 
 | Path | Role |
 |------|------|
-| `GET /plaintext` | I/O ceiling (`text/plain`) |
-| `GET /fortunes` | **Primary** — DB + sort + HTML escape |
+| `GET /plaintext` | 13 B I/O ceiling |
+| `GET /s/4k` … `/s/4m` | size ladder |
+| `GET /fortunes` | SQLite + sort + HTML |
 
-## io_uring (ranch-bastion)
+## Peers (published set)
 
-Default `SERVERS` on Linux are **io_uring-backed only**. See [`IO_URING.md`](IO_URING.md).
+| Peer | Backend (Linux) | Build |
+|------|-----------------|--------|
+| `proactr` | proactr / io_uring | odin (`proactr/`) |
+| `laytan` | nbio / io_uring | odin (`laytan/`) |
+| `ntex` | neon-uring | `cargo` (`ntex/`) |
+| `drogon` | trantor / epoll | CMake (`drogon/build.sh`) |
+| `go` | net/http | `go build` (`go/`) |
 
-| Peer | Backend |
-|------|---------|
-| `ntex` | neon-uring |
-| `ntex-compio` | ntex + compio runtime |
-| `compio` | compio-net (io_uring driver) |
-| `asio` | `BOOST_ASIO_HAS_IO_URING` + `DISABLE_EPOLL` |
-| `laytan` | core:nbio Linux = io_uring |
-| `proactr` / `proactr-sync` | proactr io_uring · **sync** SQLite (**per-worker conn** by default; `FORTUNES_SYNC_SHARED=1` = shared+mutex) |
-| `proactr-async` | proactr io_uring · **async** SQLite (thread pool, one conn per DB worker) |
+Published numbers: [`benchmarks/TFB.md`](../../benchmarks/TFB.md).
 
-**Epoll / portable** (opt-in; labeled): `go`, `drogon` (trantor/epoll). Full mixed matrix: `./run_peer_matrix.sh`.
-
-## Fortunes: sync vs async (bastion)
+## Quick run
 
 ```bash
-# ranch-bastion — plaintext + fortunes for ntex + both proactr modes
-./comparisons/tfb/schema/prepare.sh
-./comparisons/tfb/build_uring.sh
-./comparisons/tfb/run_fortunes_bastion.sh | tee /tmp/proactr-fortunes.log
+./schema/prepare.sh
+# build peers as needed, then:
+SERVERS="proactr laytan ntex drogon go" WORKERS=8 \
+  TESTS="plaintext s4k s64k s1m s4m fortunes" \
+  ./run_peer_matrix.sh
 ```
 
-| Mode | Peer ID | Behavior |
-|------|---------|----------|
-| **sync** | `proactr-sync` | Blocking query on I/O worker; **per-worker SQLite conn** (default). `FORTUNES_SYNC_SHARED=1` = ntex-style shared+mutex |
-| **async** | `proactr-async` | Offload query+HTML to `DB_WORKERS` pool; I/O worker responds via tick |
-
-Size-ladder wire for proactr is **materialize** (`plan_optimize` off). Fortunes app work is **not** equal across ntex/drogon/proactr — see `WORKLOAD.md` fairness section and `CRITIC.md`.
-
-Same binary (`proactr/tfb-proactr.bin`); mode via `FORTUNES_MODE=sync|async`. WAL is set in `schema/prepare.sh` and re-applied on open.
-
-## ranch-bastion quick start
-
-```bash
-# from laptop
-rsync -az --exclude '.git' --exclude '**/target' \
-  ./ ranch-bastion.local:Projects/proactr-odin/
-
-ssh ranch-bastion.local '
-  export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-  cd ~/Projects/proactr-odin
-  ./scripts/check_io_uring.sh
-  ./comparisons/tfb/build_uring.sh
-  SERVERS="ntex ntex-compio compio laytan" \
-    BENCH_Z=15s BENCH_C=64 WORKERS=8 \
-    ./comparisons/tfb/run_bench.sh | tee /tmp/proactr-tfb-uring.log
-'
-```
-
-Optional Asio (needs `libsqlite3-dev` + `liburing-dev`):
-
-```bash
-SERVERS="ntex ntex-compio compio asio laytan" ./comparisons/tfb/run_bench.sh
-```
-
-## Env
-
-| Var | Default (Linux) |
-|-----|-----------------|
-| `SERVERS` | `ntex ntex-compio compio laytan` |
-| `TESTS` | `plaintext fortunes` |
-| `REQUIRE_URING` | `1` (runs `scripts/check_io_uring.sh`) |
+| Env | Default |
+|-----|---------|
+| `SERVERS` | see `run_peer_matrix.sh` |
+| `TESTS` | plaintext ladder (+ fortunes if set) |
+| `WORKERS` | 8 in peer matrix |
+| `BENCH_C` / `BENCH_Z` | load tool concurrency / duration |
 | `DATABASE_PATH` | `/tmp/proactr-tfb.sqlite` |
-| `WORKERS` | `1` |
-| `DB_WORKERS` | same as `WORKERS` (async only) |
-| `FORTUNES_MODE` | `sync` (peer env; harness sets per peer id) |
-| `BENCH_C` / `BENCH_Z` | `64` / `15s` |
+
+Fortunes fairness notes: [`WORKLOAD.md`](WORKLOAD.md). io_uring host check: [`IO_URING.md`](IO_URING.md).

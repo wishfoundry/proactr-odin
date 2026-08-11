@@ -25,15 +25,20 @@ Fork lineage of [laytan/odin-http](https://github.com/laytan/odin-http) (unmodif
 ## Quick start
 
 ```bash
-# Example: empty 200 OK
 odin run examples/empty_ok
-
-# Fair peer empty-ok canary (optional)
-./comparisons/empty-ok/proactr/build.sh
-SERVERS="ntex laytan proactr" WORKERS=8 ./comparisons/empty-ok/run_bench.sh
 ```
 
-Benchmarks and methodology: [`benchmarks/TFB.md`](benchmarks/TFB.md). Harnesses live under `comparisons/`.
+## Benchmarks
+
+Published peer matrix: **[`benchmarks/TFB.md`](benchmarks/TFB.md)**  
+(proactr · laytan · ntex · drogon · go — size ladder + fortunes).
+
+```bash
+./scripts/fetch_third_party.sh   # ntex reference + drogon source
+# see benchmarks/README.md for full reproduce steps
+```
+
+Harnesses: `comparisons/tfb/`, `comparisons/tls-h2/`, `comparisons/empty-ok/` (wiring canary).
 
 ## Docs
 
@@ -55,14 +60,10 @@ client/           # HTTP client
 quic/ http3/ qpack/
 examples/
 comparisons/      # Peer microservers + harnesses
-benchmarks/       # Published numbers
+benchmarks/       # Published numbers (TFB.md)
 docs/
-vendor/laytan/    # Upstream baseline (do not edit)
-third_party/      # Optional peer sources (fetch script)
-```
-
-```bash
-./scripts/fetch_third_party.sh   # ntex, drogon, …
+vendor/laytan/    # Upstream Odin baseline
+third_party/      # ntex (ref) + drogon (build)
 ```
 
 ## License

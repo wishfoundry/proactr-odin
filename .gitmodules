@@ -6,18 +6,6 @@
 [submodule "third_party/ntex"]
 	path = third_party/ntex
 	url = https://github.com/ntex-rs/ntex.git
-[submodule "third_party/compio"]
-	path = third_party/compio
-	url = https://github.com/compio-rs/compio.git
 [submodule "third_party/drogon"]
 	path = third_party/drogon
 	url = https://github.com/drogonframework/drogon.git
-[submodule "third_party/asio"]
-	path = third_party/asio
-	url = https://github.com/boostorg/asio.git
-[submodule "third_party/seastar"]
-	path = third_party/seastar
-	url = https://github.com/scylladb/seastar.git
-[submodule "third_party/envoy"]
-	path = third_party/envoy
-	url = https://github.com/envoyproxy/envoy.git
