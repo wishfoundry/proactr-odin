@@ -157,7 +157,6 @@ runtime_pump_until :: proc(rt: ^Client_Runtime, done: ^bool, timeout_ms: int) ->
 
 // Drain CQEs after cancel/timeout. Default wait_ms=0 = non-blocking peeks only
 // (no quiet-tax sleep). Pass wait_ms>0 only when close CQEs need a short block.
-// Returns true if a quiet harvest occurred.
 runtime_drain :: proc(rt: ^Client_Runtime, rounds := 32, wait_ms: i32 = 0) -> bool {
 	if rt == nil || rt.ring == nil do return true
 	completions: [16]proactr.Completion

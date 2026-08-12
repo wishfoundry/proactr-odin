@@ -1,13 +1,5 @@
 // Basic path instrumentation for TLS/H2 matrix and performance tuning.
 // Always compiled; atomic adds only (cheap). Log/scrape via path_metrics_*.
-// Buckets (where time/bytes go on the ciphered path):
-//   seal_calls / pt_bytes / ct_bytes  — SSL_write + wBIO CT produced
-//   h2_flush / h2_pt_bytes            — H2 frame plain into SSL_write
-//   ct_sends                          — ciphertext submit_send ops
-//   materialize                       — plan materialize (clear path cousin)
-//   reqs                              — completed response seal cycles (approx)
-// Cycle counters (HTTP_PHASE_STATS only — profiling builds):
-//   seal_cyc / ssl_write_cyc / bio_read_cyc / materialize_cyc / ahead_seals
 package http
 
 import "base:intrinsics"
@@ -193,7 +185,6 @@ path_metrics_io_engine :: proc() -> string {
 // Operator scrape note (not APP_CONTRACT). Keep short; expand in INVENTORY.md.
 path_metrics_io_engine_note :: proc() -> string {
 	when ODIN_OS == .Darwin {
-		// Honesty: shared multi-kq listen (scale), level R/W, wBIO peek+cache, 128KiB seal.
 		return "reactor_kqueue_wait;shared_listen_multi_kq;level_read;level_residual_write;timers_merged_wait;wbio_peek_only;wbio_cache;seal_128k;fairness_write_rearm;darwin_no_hold_slab;plain_split_8k;no_proactr_socket_submit;no_dual_ct_ahead"
 	} else when ODIN_OS == .Linux {
 		// H1 oneshot dense flush (soft_cq=0 between seals); residual arm = submit_send+reactor_h1.

@@ -1,19 +1,5 @@
 // Mirror of server.H3_Session / client.H2_Session on the client side: you own
 // the QUIC connection's I/O (UDP recv → conn_on_udp_recv / conn_poll_recv;
-// conn_poll_send → sendto). This type wraps http3.Http3_Connection. No
-// threads, no sockets — only framing / QPACK / stream state over a ^quic.Conn
-// that is already Connected (post-handshake, ALPN h3).
-// Pull-based state machine (typical non-blocking host):
-//   1. h3_client_session_init(s, connected_quic_conn)
-//   2. poll_send SETTINGS; on datagram: poll_recv → process until
-//      h3_client_session_peer_settings_ready
-//   3. stream := h3_client_session_send_request(s, &req)  // queues on conn
-//   4. poll_send; on datagram: poll_recv → process
-//   5. take_response(stream) when done
-// You own quic.conn_poll_recv / conn_poll_send (or http3.pump_quic_* adapters).
-// Blocking dial/request (Options.version = .Http3) is a convenience adapter
-// that drives this session with a sleep-poll loop — see client/h3.odin.
-// See docs/LIBRARY.md.
 package client
 
 import "../http3"
@@ -102,7 +88,6 @@ h3_client_session_response :: proc(
 }
 
 // Fully-received response for `stream`, copied into a client.Response.
-// Returns ok=false if the stream is not yet complete.
 h3_client_session_take_response :: proc(
 	s: ^H3_Session, stream: http3.Http3_Stream, allocator := context.allocator,
 ) -> (res: Response, ok: bool) {

@@ -1,7 +1,4 @@
-// Optional per-request phase timers (cycle counters). Enable with:
 //   odin build … -define:HTTP_PHASE_STATS=true
-// Aggregates every HTTP_PHASE_STATS_EVERY completed requests.
-// Hot path: lock-free atomic adds only.
 package http
 
 import "base:intrinsics"

@@ -3,7 +3,6 @@ package quic
 import "core:testing"
 import "core:fmt"
 
-// --- Phase 7b: end-to-end loopback handshake test ---
 // Creates a client Conn and a server Conn, shuttles emitted packets between
 // them via direct function calls (no network), and drives both state
 // machines forward until they both report .Connected. Proves:
@@ -194,7 +193,6 @@ test_loopback_handshake :: proc(t: ^testing.T) {
 	testing.expect(t, client.one_rtt.have_rx_keys && client.one_rtt.have_tx_keys)
 }
 
-// --- Phase 7c: DATAGRAM round-trip after handshake ---
 // Extends the handshake test above to shuttle application-level DATAGRAMs
 // through 1-RTT packets in both directions. This validates short-header
 // encrypt/decrypt, header protection with 5-bit mask, DATAGRAM frame
@@ -216,7 +214,6 @@ test_loopback_datagram_roundtrip :: proc(t: ^testing.T) {
 	)
 	defer conn_free(server)
 
-	// --- Drive the handshake to completion (same as above, condensed). ---
 	conn_start_handshake(client)
 	c_init: [2048]u8
 	c_init_len, _ := conn_build_initial_packet(client, c_init[:])
@@ -245,7 +242,6 @@ test_loopback_datagram_roundtrip :: proc(t: ^testing.T) {
 	// Server Initial processing in conn_on_udp_recv.
 	testing.expect_value(t, client.dst_cid_len, server.src_cid_len)
 
-	// --- Client -> Server DATAGRAM ---
 	msg_c2s := transmute([]u8)string("hello from client")
 	c_dg: [1500]u8
 	c_dg_len, c_dg_err := conn_send_datagram(client, msg_c2s, c_dg[:])
@@ -259,7 +255,6 @@ test_loopback_datagram_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "server should have received one datagram")
 	testing.expect_value(t, string(recv_c2s), string(msg_c2s))
 
-	// --- Server -> Client DATAGRAM ---
 	msg_s2c := transmute([]u8)string("pong from server")
 	s_dg: [1500]u8
 	s_dg_len, s_dg_err := conn_send_datagram(server, msg_s2c, s_dg[:])

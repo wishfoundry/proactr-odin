@@ -13,7 +13,6 @@ test_respond_hooks_lifo_order :: proc(t: ^testing.T) {
 	res._slot = &conn.slot
 	conn.slot.conn = &conn
 	conn.slot.res = res
-	// Note: fire uses &r._conn.loop.req — ok zero request.
 
 	test_hook_order = make([dynamic]int, 0, 4)
 	defer {

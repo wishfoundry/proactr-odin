@@ -1,7 +1,5 @@
 // Unit smoke for tls_server OpenSSL dynlib provider.
 // Run: odin test tls_server -o:none
-// If system libssl cannot load, tests skip gracefully (do not fail the suite).
-// When OpenSSL is present: ctx + PEM load + conn + mem-BIO smoke.
 package tls_server
 
 import "core:c"

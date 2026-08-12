@@ -1,11 +1,5 @@
 // Provider — host-injected SSL surface (IOC).
 // Vtable methods take self (^Provider) so adapters can use user_data (dynlib).
-// Opaque handles only: no SSL* / SSL_CTX* types leave this package into public
-// http API. Host (Tls_Pipe / cipher module) holds Ctx/Conn as distinct rawptrs.
-// Product I/O path (Plan A mem-BIO law):
-//   setup_mem_bios → bio_write_net (inbound CT) / bio_read_net + bio_pending_out
-//   (outbound CT) + accept/read/write on plaintext side.
-// set_fd is an optional fallback for blocking/simple demos; not the product path.
 package tls_server
 
 import "core:c"
@@ -49,7 +43,6 @@ Provider :: struct {
 	bio_read_net:     proc(self: ^Provider, ssl: Conn, buf: rawptr, n: c.int) -> c.int,
 	bio_pending_out:  proc(self: ^Provider, ssl: Conn) -> c.int,
 	// Zero-copy wBIO view (mem-BIO BIO_get_mem_data). out_ptr → internal buf;
-	// returns len. Valid only until bio_reset_out or further SSL/BIO ops.
 	// Product OpenSSL requires these (reactor_drain_wbio peek-only). nil = cold BIO_read only.
 	bio_peek_out:     proc(self: ^Provider, ssl: Conn, out_ptr: ^rawptr) -> c.int,
 	bio_reset_out:    proc(self: ^Provider, ssl: Conn) -> c.int,
@@ -84,7 +77,6 @@ Provider :: struct {
 
 g_default: ^Provider
 
-// Owned by default_provider() dynlib path; destroyed only if process exits
 // without set_default_provider override (adapters own cleanup via destroy).
 g_dynlib_owned: ^Provider
 
@@ -92,7 +84,6 @@ set_default_provider :: proc(p: ^Provider) {
 	g_default = p
 }
 
-// Default for convenience APIs. Selected at compile time via HTTP_TLS_BACKEND
 // (see config.odin). Override at runtime with set_default_provider or pass an
 // explicit ^Provider into host init.
 // must handle that (tests skip; product host reports config error).
@@ -120,9 +111,6 @@ default_provider :: proc() -> ^Provider {
 	return g_default
 }
 
-// ---------------------------------------------------------------------------
-// Thin wrappers (nil-safe)
-// ---------------------------------------------------------------------------
 
 ctx_new :: proc(p: ^Provider) -> Ctx {
 	if p == nil || p.ctx_new == nil || p.server_method == nil do return nil
@@ -153,7 +141,6 @@ conn_free :: proc(p: ^Provider, ssl: Conn) {
 	if p != nil && ssl != nil && p.conn_free != nil do p.conn_free(p, ssl)
 }
 
-// Fallback FD path — not the product mem-BIO path.
 set_fd :: proc(p: ^Provider, ssl: Conn, fd: c.int) -> c.int {
 	if p == nil || ssl == nil || p.set_fd == nil do return 0
 	return p.set_fd(p, ssl, fd)
@@ -251,7 +238,6 @@ bio_reset_out_bio :: proc(p: ^Provider, wbio: rawptr) -> bool {
 	return p.bio_reset_out_bio(p, wbio) == 1
 }
 
-// True when peek+reset are wired (Darwin reactor CT drain prefers this).
 // Direct-bio path (bio_*_out_bio) is preferred when host has a cached wbio.
 bio_peek_supported :: proc(p: ^Provider) -> bool {
 	if p == nil {
@@ -303,11 +289,9 @@ provider_destroy :: proc(p: ^Provider) {
 	if p.destroy != nil do p.destroy(p)
 }
 
-// ---------------------------------------------------------------------------
 // ALPN select — wire format of in_data: repeated (1-byte length + protocol bytes).
 // Product host: alpn_select_h2_or_http11 (prefer h2, fallback http/1.1).
 // alpn_select_http11 kept for H1-only tests.
-// ---------------------------------------------------------------------------
 
 ALPN_H2     :: "h2"
 ALPN_HTTP11 :: "http/1.1"
@@ -340,7 +324,6 @@ _alpn_match :: proc "contextless" (in_data: [^]u8, in_len: c.uint, want: string)
 }
 
 // Use with ctx_set_alpn_select_cb(p, ctx, alpn_select_http11, nil).
-// Returns TLSEXT_ERR_OK (0) when http/1.1 is offered; TLSEXT_ERR_NOACK (3) otherwise.
 // H1-only — tests and callers that must not negotiate h2.
 alpn_select_http11 :: proc "c" (
 	ssl:     rawptr,

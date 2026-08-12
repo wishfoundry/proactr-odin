@@ -8,7 +8,6 @@ import "core:time"
 // them, opens a bidi stream on the client side, and exchanges bytes over
 // the stream via `stream_write` / `conn_build_stream_packet` /
 // `conn_on_udp_recv` / `stream_read`.
-// Companion to `test_loopback_handshake` and `test_loopback_datagram_roundtrip`
 // which cover the handshake and DATAGRAM paths respectively.
 
 @(test)

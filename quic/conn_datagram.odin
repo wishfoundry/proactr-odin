@@ -64,7 +64,6 @@ _pick_next_send_stream :: proc(conn: ^Conn) -> ^Stream {
 // Build a 1-RTT packet draining the highest-priority stream with pending
 // data into a STREAM frame. Optionally piggybacks an ACK frame if one is owed.
 // Records a Sent_Packet entry for loss tracking.
-// Returns bytes written to `out` and the number of stream bytes consumed.
 // A return value of (0, 0, .None) means "nothing to send right now" (not an
 // error — the caller should just skip this tick).
 conn_build_stream_packet :: proc(

@@ -1,11 +1,4 @@
 // Minimal crash manager for the proactr HTTP host.
-// Design (happy path cost ≈ zero):
-//   Listener — signal / API only sets `Server.closing` (async-signal-safe).
-//   Reaper   — workers observe the flag after `ring_wait`, close listen once,
-//              drain connections, exit the host loop (existing shutdown path).
-// No per-CQE registration, no locks on the completion path, no buffer
-// checkpointing. Process-level hard crashes still rely on the OS + external
-// supervisor (systemd, etc.).
 package http
 
 import "core:c/libc"

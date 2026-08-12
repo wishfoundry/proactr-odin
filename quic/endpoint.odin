@@ -209,7 +209,6 @@ endpoint_on_udp_recv :: proc(ep: ^Endpoint, packet: []u8, src: net.Endpoint) -> 
 }
 
 // Block until a Conn's handshake completes (or `timeout` elapses) and
-// return it. The caller is responsible for the Conn's lifetime from
 // here on — `conn_free` cleans up Conn state but not the Endpoint's
 // socket (which is shared by other in-flight Conns).
 endpoint_accept :: proc(ep: ^Endpoint, timeout: time.Duration = 5 * time.Second) -> (conn: ^Conn, err: Endpoint_Error) {

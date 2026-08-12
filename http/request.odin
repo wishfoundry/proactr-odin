@@ -20,7 +20,6 @@ Request :: struct {
 	params:        Path_Params,
 	// Middleware + Match_Proc bag. Host clears n at exchange start; match never clears.
 	ctx:           Request_Ctx,
-	// Optional interned template on radix hit; "" otherwise.
 	route_pattern: string,
 
 	// Internal usage only.

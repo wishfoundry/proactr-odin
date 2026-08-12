@@ -2,7 +2,6 @@ package quic
 
 import "core:testing"
 
-// --- Nonce construction (RFC 9001 §5.3) ---
 
 @(test)
 test_make_nonce_xor :: proc(t: ^testing.T) {
@@ -23,7 +22,6 @@ test_make_nonce_xor :: proc(t: ^testing.T) {
 	testing.expect(t, slice_equal(nonce[:], expected[:]), "pn=2 nonce mismatch")
 }
 
-// --- AES-ECB header protection mask ---
 
 @(test)
 test_aes_ecb_block_known_answer :: proc(t: ^testing.T) {
@@ -50,7 +48,6 @@ test_aes_ecb_block_known_answer :: proc(t: ^testing.T) {
 	testing.expect(t, slice_equal(out[:], expected[:]), "AES-128 KAT mismatch")
 }
 
-// --- Initial packet roundtrip (our encoder ↔ our decoder) ---
 
 @(test)
 test_initial_roundtrip_small :: proc(t: ^testing.T) {
@@ -156,7 +153,6 @@ test_build_long_first_byte_layout :: proc(t: ^testing.T) {
 	testing.expect_value(t, build_long_first_byte(Long_Type_Handshake, 4), u8(0xe3))
 }
 
-// --- RFC 9001 §A.2 — Client Initial packet decryption ---
 // The RFC gives the complete 1200-byte protected packet that a client sends
 // when the DCID is 0x8394c8f03e515708, the packet number is 2, and the CRYPTO
 // frame contains a specific (example) ClientHello. This test decrypts that
@@ -186,7 +182,6 @@ test_rfc9001_a2_client_initial_decrypt :: proc(t: ^testing.T) {
 		0x4e, 0x15, 0xda, 0xf8, 0x50, 0x0a, 0x6e, 0xf6, 0x9e, 0xc4, 0xe3, 0xfe, 0xb6, 0xb1, 0xd9, 0x8e,
 		0x61, 0x0a, 0xc8, 0xb7, 0xec, 0x3f, 0xaf, 0x6a, 0xd7, 0x60, 0xb7, 0xba, 0xd1, 0xdb, 0x4b, 0xa3,
 	}
-	// Note: we only embed the first ~256 bytes of the 1200-byte packet.
 	// decrypt_initial will fail AEAD on this truncated input — that's OK for
 	// structural validation. We just want to verify:
 	//   1. Header parsing walks to the correct pn_offset.

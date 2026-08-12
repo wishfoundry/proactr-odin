@@ -1,16 +1,5 @@
 // Streaming quantile / quartile helpers for app middleware and handlers.
 // Live path (fixed memory, O(1) per sample):
-//   Est  — one Frugal-2 estimate for a single target quantile
-//   Set  — ServiceNow-style four-field set: p50, p75, p90, p99
-// Rate path (RPS / ops-per-second style):
-//   rate_from_counts — turn a counter delta + window into one rate sample
-//   feed that sample into a separate Set (do not mix with latency samples)
-// Offline (true order statistics; allocates a sort copy unless you pass sorted):
-//   percentile, percentiles, quartiles
-// These are *estimates* on the live path (not offline rank statistics). Label
-// scrapes as est_p99 etc. if you need to avoid confusing them with loadgen truth.
-// Concurrency: Est/Set are single-writer. Use per-worker sets or an external
-// mutex if multiple threads observe the same instance.
 package quantile
 
 import "core:math"
@@ -51,7 +40,6 @@ Quartiles :: struct {
 	n:          int,
 }
 
-// --- streaming: single Est -------------------------------------------------
 
 est_init :: proc(e: ^Est) {
 	e^ = {}
@@ -120,7 +108,6 @@ est_value :: #force_inline proc(e: Est) -> f64 {
 	return e.estimate
 }
 
-// --- streaming: p50/p75/p90/p99 Set ----------------------------------------
 
 set_init :: proc(s: ^Set) {
 	s^ = {}
@@ -154,14 +141,12 @@ set_snapshot :: proc(s: Set) -> Snapshot {
 	}
 }
 
-// --- rate samples (RPS / ops-per-second) -----------------------------------
 
 // rate_from_counts converts a monotonic counter into a rate sample for a window.
 // Pass the same counter (e.g. completed requests) at window boundaries:
 //   sample := quantile.rate_from_counts(prev, now, dt_sec)
 //   quantile.set_observe(&rps_set, sample)
 //   prev = now
-// Returns 0 if dt_sec <= 0 or now < prev (counter reset / clock glitch).
 rate_from_counts :: proc(prev_count, now_count: u64, dt_sec: f64) -> f64 {
 	if dt_sec <= 0 || now_count < prev_count {
 		return 0
@@ -206,7 +191,6 @@ rate_window_snapshot :: proc(w: Rate_Window) -> Snapshot {
 	return set_snapshot(w.set)
 }
 
-// --- offline order statistics ---------------------------------------------
 
 // percentile returns the p-quantile of samples (p in [0, 1]).
 // Copies and sorts; empty input → 0.
@@ -310,7 +294,6 @@ set_percentiles :: proc(samples: []f64, allocator := context.allocator) -> Snaps
 	}
 }
 
-// --- internals -------------------------------------------------------------
 
 @(private)
 max_f64 :: #force_inline proc(a, b: f64) -> f64 {

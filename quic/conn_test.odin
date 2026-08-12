@@ -3,7 +3,6 @@ package quic
 import "core:testing"
 import "core:fmt"
 
-// --- Phase 7a: connection setup + ClientHello Initial generation ---
 // These tests exercise the full pipeline from conn_new() through Initial
 // packet emission, without any network I/O. A successful test proves:
 //   1. BoringSSL SSL_QUIC_METHOD callbacks wire up correctly.
@@ -135,7 +134,6 @@ test_conn_peer_transport_params_placeholder :: proc(t: ^testing.T) {
 	testing.expect_value(t, conn.peer_tp.max_datagram_frame_size, u64(0))
 }
 
-// --- Test helpers ---
 
 // Build an ALPN wire-format byte string from a single protocol name.
 // Wire format: [length byte][protocol bytes] per entry (RFC 7301 §3.1).

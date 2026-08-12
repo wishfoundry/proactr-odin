@@ -1,13 +1,5 @@
 // Scope:
 //   - After TLS Open, if ALPN is h2: drive Http2_Connection instead of H1 scanner
-//   - Multi-slot slab (H2_SLOT_CAP) allocated only on h2 open (lazy; clear/TLS H1 free)
-//   - Default concurrent unary (h2_serial_dispatch=false): take while free slots
-//   - Opt-in serial (h2_serial_dispatch=true): single in-flight oneshot (eng/debug)
-//   - Live windows: feed WINDOW_UPDATE; flush pending body on update
-//   - Duplex: keep CT recv armed while CT send may be in flight under H2
-//   - Unary GET/POST oneshot handlers via the same server.handler
-//   - On conn_feed error / fail_code: real GOAWAY then flush-once then close
-// WS-on-H2 unsupported. Baseline: docs/ARCHITECTURE.md
 package http
 
 import "core:log"
@@ -18,7 +10,6 @@ import "core:sync"
 
 import http2 "../http2"
 
-// Note: Response._buf is core:bytes.Buffer; body scrap reuses Connection.resp_buf.
 // Concurrent oneshot materialize is safe because handlers on one worker are
 // strictly sequential (no nested respond): each respond finishes copy into
 // engine pending before the next take/handler runs. Shared resp_buf is not
@@ -30,9 +21,7 @@ import http2 "../http2"
 @(private)
 h2_test_arm_recv_count: int
 
-// ---------------------------------------------------------------------------
 // Lifecycle
-// ---------------------------------------------------------------------------
 
 // h2_host_ensure_slots: allocate multi-slot slab once (on open or unit setup).
 // Clear/TLS-H1 Connections leave h2_slots nil — no H2_SLOT_CAP × Stream_Slot tax.
@@ -167,9 +156,7 @@ h2_host_destroy :: proc(conn: ^Connection) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // CT / PT path
-// ---------------------------------------------------------------------------
 
 // h2_host_on_ct_ready: ciphertext already fed to rBIO; SSL_read PT → conn_feed.
 @(private)
@@ -228,9 +215,7 @@ h2_host_on_pt :: proc(conn: ^Connection, pt: []u8) {
 }
 
 
-// ---------------------------------------------------------------------------
 // Dispatch (concurrent default; serial opt-in)
-// ---------------------------------------------------------------------------
 
 // h2_host_serial_mode: true when Server_Opts.h2_serial_dispatch requests single-flight.
 @(private)
@@ -422,9 +407,7 @@ h2_host_dispatch_one :: proc(conn: ^Connection) {
 	h2_host_dispatch_available(conn)
 }
 
-// ---------------------------------------------------------------------------
 // Response path
-// ---------------------------------------------------------------------------
 
 // h2_host_send_response: map Response → frames on the stream for r._slot; flush via SSL_write.
 @(private)
@@ -750,9 +733,7 @@ h2_host_poll_session_resets :: proc(conn: ^Connection) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Request construction (public helper for unit tests)
-// ---------------------------------------------------------------------------
 
 // h2_request_from_headers builds a Request from H2 pseudo + regular headers.
 // Version is HTTP/1.1 for handler compat (many handlers assume 1.x).

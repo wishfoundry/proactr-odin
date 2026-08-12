@@ -83,7 +83,6 @@ _sse_format_effect :: proc(b: ^[dynamic]u8, e: Effect) {
 }
 
 // Pure helper: HTTP chunk framing around payload (mirrors _http_write_chunk for tests).
-// Returns hex-size CRLF payload CRLF as a newly allocated string (caller deletes).
 sse_http_chunk_string :: proc(payload: string, allocator := context.allocator) -> string {
 	if len(payload) == 0 {
 		return strings.clone("", allocator)

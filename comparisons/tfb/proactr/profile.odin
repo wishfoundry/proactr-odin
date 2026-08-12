@@ -1,6 +1,5 @@
 // Fortunes phase profiling. Enable:
 //   odin build . -out:tfb-proactr.bin -o:speed -define:FORTUNES_PROFILE=true
-// Logs every FORTUNES_PROFILE_EVERY requests (default 100000).
 package main
 
 import "base:intrinsics"

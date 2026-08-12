@@ -17,7 +17,6 @@ Ciphered_Oneshot_Plan :: enum u8 {
 	Heading_Plus_Borrowed_Body, // heading in resp_buf, body view borrowed
 }
 
-// Returns Heading_Plus_Borrowed_Body only when: ciphered, TLS live, not h2,
 // not stream, not HEAD, single Borrowed Static/Bytes cmd, body ≥ 8 KiB.
 // Otherwise Materialize_Full (caller materializes as usual).
 ciphered_oneshot_plan :: proc(r: ^Response, conn: ^Connection) -> Ciphered_Oneshot_Plan {

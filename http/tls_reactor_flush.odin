@@ -65,7 +65,6 @@ reactor_tls_flush :: proc(conn: ^Connection) {
 			return
 		}
 
-		// --- residual first (R-ORDER): write only; no SSL_write while residual > 0 ---
 		if conn.reactor_res_n > 0 {
 			if !reactor_may_ssl_write(conn.reactor_res_n) {
 				// gate holds — write residual
@@ -380,7 +379,6 @@ reactor_send_ct_view :: proc(conn: ^Connection, view: []u8) -> (again: bool, har
 // expect 0 on bulk matrix). Dual-CT seal engines still use bio_read_net for hold staging
 // (not this drain).
 // R-ORDER: residual in dual_ct.tx forbids SSL_write until drained (caller residual-first).
-// Used by H1/H2 reactor flush and Darwin HS WANT_WRITE drain.
 @(private)
 reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	if conn == nil || conn.tls_ssl == nil {
@@ -403,7 +401,6 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	}
 	use_peek := use_bio || tls_server.bio_peek_supported(p)
 
-	// --- Zero-copy peek path (product bulk; no BIO_read) ---
 	if use_peek {
 		for {
 			pending := 0
@@ -450,7 +447,6 @@ reactor_drain_wbio :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 		}
 	}
 
-	// --- Cold: no peek support → BIO_read into dual_ct.tx (counted; product expect 0) ---
 	path_metrics_note_wbio_bio_read_fallback()
 	dst := conn.dual_ct.tx
 	if len(dst) == 0 {
@@ -536,7 +532,6 @@ reactor_finish_h2 :: proc(conn: ^Connection) {
 }
 
 // reactor_on_send_complete: residual WRITE CQE fully delivered → continue flush.
-// Returns true if handled (caller must not run dual-CT promote / clear-H1 finish).
 // Demux: HS → drive handshake; H2 → reactor H2 flush; stream → stream submit; else oneshot.
 @(private)
 reactor_on_send_complete :: proc(conn: ^Connection) -> bool {

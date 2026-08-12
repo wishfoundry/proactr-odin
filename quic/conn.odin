@@ -1,9 +1,5 @@
 // quic — QUIC transport (RFC 9000/9001).
 // Mostly library core (frames, crypto, streams, loss). Conn may carry optional
-// socket fields for convenience connect/pump paths. BYO UDP: conn_on_udp_recv
-// + packet builders without conn_connect. Full socket detachment is follow-up.
-// See docs/LIBRARY.md.
-// TLS: OpenSSL 3.5+ dynlib via SSL_set_quic_tls_cbs (not BoringSSL, not OSSL_QUIC_*).
 package quic
 
 import "base:runtime"
@@ -65,7 +61,6 @@ Pn_Space :: struct {
 	rx_range_count: int,
 }
 
-// --- Handshake-phase PTO retransmission -------------------------------------
 // `flight` mirrors the level's full sent crypto stream [0, len). On PTO the
 // whole (small: ClientHello / Finished) flight is re-queued at offset 0 — far
 // simpler than per-packet range tracking, and a duplicate CRYPTO range is
@@ -311,19 +306,15 @@ Conn :: struct {
 	rx_uni_max_advertised:  u64,
 	rx_max_streams_uni_pending: bool,
 
-	// --- Debug counters (always active, near-zero overhead) ---
 	stats: Conn_Stats,
 
-	// --- Loss recovery (see conn_loss.odin) ---
 	loss_sent:                 [dynamic]Sent_Packet, // 1-RTT packets we've sent, awaiting ACK
 	loss_pto_deadline:         time.Time,             // next PTO expiry; zero value = disarmed
 	loss_pto_factor:           int,                   // exponent on the base PTO (resets on any ACK)
 	loss_last_ack_eliciting_at: time.Time,            // when the most recent ack-eliciting 1-RTT was sent
 
-	// --- Congestion control (see congestion.odin) ---
 	cc: Congestion,
 
-	// --- Test clock ---
 	// Zero value = use real wall-clock time.now(). Set to a non-zero time in
 	// tests to drive loss_check_pto / PTO deterministically. No runtime cost
 	// in production (the _now helper short-circuits when this is zero).
@@ -395,7 +386,6 @@ conn_take_pending_close :: proc(conn: ^Conn) -> (code: u64, reason: []u8, ok: bo
 	return code, reason, true
 }
 
-// --- Connection lifecycle ---
 
 Quic_Error :: enum {
 	None,

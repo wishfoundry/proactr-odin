@@ -4,7 +4,6 @@ package quic
 
 import od "../openssl_dynlib"
 
-// --- types / constants ---
 Os :: od.Os
 Os_Error :: od.Os_Error
 OSSL_PARAM :: od.OSSL_PARAM

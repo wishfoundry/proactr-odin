@@ -126,7 +126,6 @@ _win_pending_ok :: proc() -> bool {
 	return err == windows.WSA_IO_PENDING || err == windows.ERROR_IO_PENDING
 }
 
-// --- submit -----------------------------------------------------------------
 
 _submit_nop :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {

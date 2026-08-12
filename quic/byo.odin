@@ -1,9 +1,5 @@
 // Drain outbound QUIC packets without touching sockets. Your loop:
 //   conn_on_udp_recv(conn, datagram)
-//   … advance app / http3 …
-//   conn_poll_send(conn, my_emit, user)  // my_emit sends via your socket
-// Convenience pumps in http3.pump_quic_* wrap these with net.send_udp/recv_udp.
-// See docs/LIBRARY.md.
 package quic
 
 // Callback for each fully-built datagram ready to put on the wire.
@@ -17,7 +13,6 @@ POLL_SEND_MAX_APP_PACKETS :: 64
 
 // Build and emit every currently-available outbound packet (Initial, Handshake,
 // 1-RTT stream). Runs PTO / loss checks first. Does not read or write sockets.
-// Returns the number of application (1-RTT) packets emitted.
 conn_poll_send :: proc(conn: ^Conn, emit: Packet_Emit, user: rawptr = nil) -> int {
 	if emit == nil do return 0
 	buf: [2048]u8

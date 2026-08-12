@@ -1,15 +1,5 @@
 // HTTP/2 multiplexes logical streams over ONE byte stream: unlike HTTP/3, the
 // transport hands us a single ordered pipe and WE demux frames into per-stream
-// state and maintain the (single, order-dependent) HPACK decoder table. This
-// type is transport-agnostic: feed it received bytes + an out buffer for
-// auto-replies (SETTINGS/PING ACKs); the caller owns the socket / event loop.
-// Scope: HEADERS + CONTINUATION reassembly, stream state / SETTINGS validation,
-// GOAWAY/RST (strict unit pins — not a full h2spec suite). Padding and PRIORITY
-// are stripped; PUSH is SETTINGS-disabled. Outbound DATA respects peer windows
-// (flow.odin). Inbound DATA is auto-granted 1:1 via WINDOW_UPDATE (buffering
-// engine; not peer-throttle receive windows). Closed streams are reaped from
-// the map (conn_reap_streams) so multiplexed load does not grow unbounded. No
-// host/TLS wiring — pure sans-I/O engine.
 package http2
 
 
@@ -152,7 +142,6 @@ Http2_Connection :: struct {
 	// (Host Connection has no separate cursor — engine owns multi-stream flush.)
 	flush_rr: u32,
 
-	// Optional SSE-vs-bulk fairness weights. 0 → engine default (2 / 1).
 	// Interactive streams get weight_interactive DATA frames per RR turn;
 	// bulk gets weight_bulk. Host copies from Server_Opts on open.
 	weight_interactive: u8,

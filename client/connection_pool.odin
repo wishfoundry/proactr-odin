@@ -1,20 +1,5 @@
 // Idle connection pool — Go-like reuse for many short get/request calls.
 // A single Connection already supports multi-request reuse without a pool:
-// dial once, then call request() repeatedly (h1 keep-alive, h2 mux, h3 streams).
-// Use a Connection_Pool when you issue many independent short gets and want idle
-// connections reused across those calls for the same origin.
-// Reuse is only offered when ALL of the following hold:
-//   - Same origin (scheme + host + port)
-//   - Connection still alive:
-//       h1  → h1_alive
-//       h2  → fail_code == 0 and peer has not sent GOAWAY
-//       h3  → transport state + QUIC conn present
-//   - Protocol matches Options.version:
-//       forced .Http1 / .Http2 / .Http3 only reuse that negotiated version
-//       .Auto accepts any idle protocol for the origin
-// Thread safety: core:sync.Mutex guards the idle list only; dial and request
-// I/O run outside the lock. Not a full browser connection manager — no
-// per-host concurrency caps, no Happy Eyeballs, no cross-process sharing.
 package client
 
 import "core:mem"
@@ -97,7 +82,6 @@ connection_pool_dial :: proc(
 	return dial(url, opts, allocator)
 }
 
-// Return a connection to the pool if still reusable; otherwise close it.
 // Safe with c == nil. Never put the same connection twice.
 connection_pool_put :: proc(p: ^Connection_Pool, c: ^Connection) {
 	if c == nil do return
@@ -185,7 +169,6 @@ connection_pool_request :: proc(
 	return res, .None
 }
 
-// ---- internals -------------------------------------------------------------
 
 @(private)
 _conn_pool_reusable :: proc(c: ^Connection) -> bool {

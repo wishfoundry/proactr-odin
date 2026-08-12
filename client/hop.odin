@@ -1,6 +1,5 @@
 // Hop — dial result with meta and optional FD.
 // hop_dial_stream: Connection path (TLS-complete stream + ALPN OK).
-// hop_dial_clear_fd: proactr path (nonblocking clear TCP only).
 package client
 
 import "core:io"
@@ -81,7 +80,6 @@ hop_close :: proc(h: ^Hop) {
 }
 
 // hop_take_fd transfers FD ownership to the caller (job). hop will not close fd.
-// Returns -1 if hop has no fd.
 hop_take_fd :: proc(h: ^Hop) -> i32 {
 	if h == nil || h.fd < 0 do return -1
 	fd := h.fd

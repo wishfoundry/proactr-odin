@@ -1,9 +1,5 @@
 // Live dual-CT seal∥send engine.
 // Two CT slabs on Connection.dual_ct: while one sock send is in flight, seal the
-// next plain window into the free slab. Shared by H1 oneshot, progressive stream,
-// and H2 frame flush — one SSL_write window + one ahead-seal path each.
-// Promote-before-residual ordering (CRITIC C2) stays at flush/CQE call sites;
-// this file owns slab ready/hold bookkeeping and seal physics only.
 package http
 
 import "base:runtime"
@@ -13,9 +9,7 @@ import "core:sync"
 
 import tls_server "../tls_server"
 
-// ---------------------------------------------------------------------------
 // Dual_Ct — primary + hold CT slabs and sealed-not-submitted lengths
-// ---------------------------------------------------------------------------
 
 // Dual_Ct groups live seal∥send ciphertext state. tx = primary; hold = second.
 // A slab currently in wire.pending_send is "sending" (not ready); do not overwrite
@@ -101,9 +95,7 @@ dual_ct_clear_meta :: proc(d: ^Dual_Ct) {
 	d.hold_plain_n = 0
 }
 
-// ---------------------------------------------------------------------------
 // Shared dual-CT wire ops
-// ---------------------------------------------------------------------------
 
 // Fairness bound for H2 dense seal∥send (multi-window in one flush turn).
 // 8 × 256 KiB plain ≈ 2 MiB PT per reactor turn before re-arm.
@@ -220,8 +212,6 @@ tls_host_seal_dst_for_ahead :: proc(conn: ^Connection) -> (dst: []u8, mark_hold:
 }
 
 // Drain wBIO into free slab; if sock free submit immediately, else mark ready.
-// Returns false if connection closed or send armed (caller must wait CQE).
-// Returns true if idle (no CT pending / nothing submitted).
 // Darwin (Plan R2 P4b): when the sock is free, use reactor residual-first drain
 // (write until EAGAIN + single residual arm) — no dual-CT promote soup / soft-CQ
 // between full wBIO windows. While a non-reactor send is already in flight, fall
@@ -321,7 +311,6 @@ tls_host_try_drain_out :: proc(conn: ^Connection, hs: bool) -> bool {
 }
 
 // After sock send CQE: submit any ready CT (hold preferred, then primary).
-// Returns true if a new send was armed.
 @(private)
 tls_host_promote_hold :: proc(conn: ^Connection) -> bool {
 	if conn == nil {
@@ -350,9 +339,7 @@ tls_host_promote_hold :: proc(conn: ^Connection) -> bool {
 	return false
 }
 
-// ---------------------------------------------------------------------------
 // Progressive stream plain cursor (dual-CT aware)
-// ---------------------------------------------------------------------------
 
 // Plain offset for the next progressive SSL_write: stream_sent plus plain already
 // sealed into dual-CT slabs (or deferred residual) but not yet CQE-advanced.
@@ -377,12 +364,9 @@ tls_host_stream_set_slab_plain :: proc(conn: ^Connection, mark_hold: bool, plain
 	dual_ct_set_slab_plain(&conn.dual_ct, mark_hold, plain_n)
 }
 
-// ---------------------------------------------------------------------------
 // Single seal engine: SSL_write plain window → bio_read CT into dst
-// ---------------------------------------------------------------------------
 
 // tls_seal_window: SSL_write from plain source into OpenSSL; drain wBIO CT into dst.
-// Returns (n_ct, plain_consumed, ok).
 // Oneshot: advances tls_plain_* + pt_admit (as before).
 // Stream: does NOT advance stream_sent (caller sets slab plain_n / deferred).
 // H2: advances h2_out cursor via h2_out_consume.
@@ -620,9 +604,7 @@ tls_seal_window_h2 :: proc(conn: ^Connection, dst: []u8) -> (n_ct: int, plain_n:
 	return n, consumed, true
 }
 
-// ---------------------------------------------------------------------------
 // Single ahead-seal (while sock send inflight)
-// ---------------------------------------------------------------------------
 
 // tls_dual_ct_try_ahead: seal next plain window into free CT slab while send is inflight.
 // Failure: Stream → session Client_Gone; Oneshot/H2 → connection_close.

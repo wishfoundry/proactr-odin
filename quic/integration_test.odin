@@ -2,7 +2,6 @@ package quic
 
 import "core:testing"
 
-// --- Integration tests (Layer 1 of the QUIC test plan) ---
 // These tests go beyond the basic loopback handshake to validate the full
 // stack under realistic usage patterns. All tests are self-contained (no
 // network) and use the embedded minica PEMs from loopback_test.odin.
@@ -18,7 +17,6 @@ import "core:testing"
 // failure should manifest as an assertion error, not flakiness.
 
 // Run the full handshake sequence between two Conns in one go.
-// Returns once both sides are Connected or the first error is encountered.
 @(private)
 _drive_handshake :: proc(client, server: ^Conn) -> bool {
 	conn_start_handshake(client)
@@ -69,7 +67,6 @@ _make_pair :: proc() -> (client, server: ^Conn, ok: bool) {
 	return c, s, true
 }
 
-// --- Idempotent teardown ---
 
 @(test)
 test_integration_idempotent_free :: proc(t: ^testing.T) {
@@ -85,7 +82,6 @@ test_integration_idempotent_free :: proc(t: ^testing.T) {
 	conn_free(nil)
 }
 
-// --- Back-to-back handshakes (leak detection) ---
 
 @(test)
 test_integration_many_handshakes :: proc(t: ^testing.T) {
@@ -103,7 +99,6 @@ test_integration_many_handshakes :: proc(t: ^testing.T) {
 	}
 }
 
-// --- Handshake produces the right encryption level transitions ---
 
 @(test)
 test_integration_encryption_levels :: proc(t: ^testing.T) {
@@ -123,7 +118,6 @@ test_integration_encryption_levels :: proc(t: ^testing.T) {
 	testing.expect_value(t, server.tx_level, Encryption_Level.Application)
 }
 
-// --- Peer transport params negotiation ---
 
 @(test)
 test_integration_transport_params_exchanged :: proc(t: ^testing.T) {
@@ -149,7 +143,6 @@ test_integration_transport_params_exchanged :: proc(t: ^testing.T) {
 		"client should have peer initial_source_cid")
 }
 
-// --- Burst datagrams + FIFO ordering ---
 
 @(test)
 test_integration_datagram_burst_100 :: proc(t: ^testing.T) {
@@ -189,7 +182,6 @@ test_integration_datagram_burst_100 :: proc(t: ^testing.T) {
 	testing.expect(t, !empty)
 }
 
-// --- Large datagram near MTU ---
 
 @(test)
 test_integration_large_datagram :: proc(t: ^testing.T) {
@@ -218,7 +210,6 @@ test_integration_large_datagram :: proc(t: ^testing.T) {
 		"payload should round-trip byte-exact")
 }
 
-// --- Bidirectional datagrams ---
 
 @(test)
 test_integration_bidirectional :: proc(t: ^testing.T) {
@@ -249,7 +240,6 @@ test_integration_bidirectional :: proc(t: ^testing.T) {
 	}
 }
 
-// --- Datagram send before handshake completes ---
 
 @(test)
 test_integration_datagram_before_handshake_fails :: proc(t: ^testing.T) {
@@ -264,7 +254,6 @@ test_integration_datagram_before_handshake_fails :: proc(t: ^testing.T) {
 	testing.expect(t, err != .None, "send should fail before handshake")
 }
 
-// --- Reject datagrams larger than peer's advertised max ---
 
 @(test)
 test_integration_oversized_datagram_rejected :: proc(t: ^testing.T) {
@@ -283,7 +272,6 @@ test_integration_oversized_datagram_rejected :: proc(t: ^testing.T) {
 	testing.expect(t, err != .None, "oversized datagram must be rejected")
 }
 
-// --- Truncated UDP payload is rejected cleanly ---
 
 @(test)
 test_integration_truncated_packet_is_error :: proc(t: ^testing.T) {
@@ -302,7 +290,6 @@ test_integration_truncated_packet_is_error :: proc(t: ^testing.T) {
 	testing.expect(t, err != .None, "truncated packet must fail AEAD")
 }
 
-// --- Determinism: repeated handshakes produce different CIDs ---
 
 @(test)
 test_integration_cid_uniqueness :: proc(t: ^testing.T) {

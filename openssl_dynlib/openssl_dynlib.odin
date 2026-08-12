@@ -97,11 +97,9 @@ Os :: struct {
 	// ready == crypto_ready (full product); kept for quic callers.
 	ready:     bool,
 
-	// --- version ---
 	OpenSSL_version_num: proc "c" () -> c.ulong,
 	OpenSSL_version:     proc "c" (t: c.int) -> cstring,
 
-	// --- SSL methods / CTX / SSL ---
 	TLS_client_method: proc "c" () -> rawptr,
 	TLS_server_method: proc "c" () -> rawptr,
 	SSL_CTX_new:  proc "c" (method: rawptr) -> rawptr,
@@ -163,7 +161,6 @@ Os :: struct {
 	ERR_get_error:      proc "c" () -> c.ulong,
 	ERR_error_string_n: proc "c" (e: c.ulong, buf: rawptr, len: c.size_t),
 
-	// --- BIO / PEM ---
 	BIO_s_mem:               proc "c" () -> rawptr,
 	BIO_new:                 proc "c" (method: rawptr) -> rawptr,
 	BIO_new_mem_buf:         proc "c" (buf: rawptr, len: c.int) -> rawptr,
@@ -177,7 +174,6 @@ Os :: struct {
 	X509_free:               proc "c" (x: rawptr),
 	EVP_PKEY_free:           proc "c" (pkey: rawptr),
 
-	// --- EVP cipher ---
 	EVP_CIPHER_CTX_new:   proc "c" () -> rawptr,
 	EVP_CIPHER_CTX_free:  proc "c" (ctx: rawptr),
 	EVP_EncryptInit_ex:   proc "c" (ctx, cipher, impl, key, iv: rawptr) -> c.int,
@@ -604,7 +600,6 @@ load_system_roots :: proc(ctx: rawptr) -> bool {
 	return false
 }
 
-// --- OSSL_PARAM helpers ---
 
 ossl_param_int :: proc(key: cstring, val: ^c.int) -> OSSL_PARAM {
 	return OSSL_PARAM{

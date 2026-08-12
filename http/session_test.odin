@@ -144,7 +144,6 @@ test_sse_drive_for_test_start_end :: proc(t: ^testing.T) {
 	headers_set_unsafe(&res.headers, "date", "Fri, 05 Feb 2023 09:01:10 GMT")
 	conn.slot.conn = &conn
 	conn.slot.res = res
-	// Note: res on stack; re-bind after copy into conn.slot
 	conn.slot.res._slot = &conn.slot
 	conn.slot.res._conn = &conn
 	wire := make([dynamic]u8, 0, 1024, context.allocator)

@@ -10,7 +10,6 @@ import "../quic"
 // Sans-I/O: client.H3_Session looped against a server-role Http3_Connection
 // over in-memory QUIC (same pattern as http3 test_h3_loopback_request_response
 // and client session_h2_test). No UDP sockets.
-// Note: cannot import server from client tests — package cycle risk.
 
 @(private = "file")
 h3_tp :: proc() -> quic.Transport_Params {

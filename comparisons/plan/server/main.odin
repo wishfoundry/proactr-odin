@@ -1,19 +1,5 @@
 // Planner A/B demo server — body-archetype routes + plan counters.
 // Phase 3–5: PLAN_MODE=optimize sets Server_Opts.plan_optimize and route profiles so
-// the real wire path can multi-buffer send (Writev-style) for multi-static routes
-// and stream File regions via chunked pread+send for /file/1m (prefer_sendfile).
-// /sse uses response_begin_stream (Phase 5) — not plan_body.
-// Shadow plan_body counters remain for policy checks; http.plan_wire_* counters
-// show what the executor actually chose on the wire.
-// Env:
-//   PORT              listen port (default 19090)
-//   WORKERS           worker threads / rings (default 1)
-//   PLAN_MODE         materialize | optimize  (default materialize)
-//   PLAN_SENDFILE_OK  1 to allow sendfile in optimize mode (default 1)
-//   PLAN_COPY_BUDGET  preferred_copy_budget bytes (default 4096)
-//   PLAN_MAX_IOVECS   max iovecs incl. heading (default 1024)
-//   PLAN_FILE_PATH    path for /file/1m (default: create under data dir)
-//   PLAN_DATA_DIR     dir for generated file payload (default /tmp/proactr-plan-bench)
 package main
 
 import "core:fmt"
@@ -26,7 +12,6 @@ import "core:sync"
 
 import http "../../../http"
 
-// --- plan mode & global knobs ------------------------------------------------
 
 Plan_Mode :: enum {
 	Materialize,
@@ -52,7 +37,6 @@ g_file_len: i64
 g_file_fd: i32 = -1 // process-lifetime open for body_file wire path
 g_file_wire: []u8 // preloaded bytes for materialize-mode / fallback
 
-// --- metrics (atomic) --------------------------------------------------------
 
 Metrics :: struct {
 	plan_materialize: u64,
@@ -105,7 +89,6 @@ record_plan_simple :: proc(r: http.Plan_Result) {
 	}
 }
 
-// --- plan context from mode + profile ----------------------------------------
 
 Handler_Profile :: struct {
 	name:               string,
@@ -167,7 +150,6 @@ run_shadow_plan :: proc(cmds: []http.Response_Cmd, profile: Handler_Profile) {
 	record_plan_simple(r)
 }
 
-// --- routes ------------------------------------------------------------------
 
 on_tiny :: proc(req: ^http.Request, res: ^http.Response) {
 	inc(&g_m.hit_tiny)
@@ -332,7 +314,6 @@ on_health :: proc(req: ^http.Request, res: ^http.Response) {
 	http.respond_plain(res, "ok")
 }
 
-// --- init helpers ------------------------------------------------------------
 
 make_pattern_buf :: proc(n: int) -> []u8 {
 	pat := transmute([]u8)string("0123456789abcdef0123456789ABCDEF")

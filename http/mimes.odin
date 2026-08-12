@@ -14,7 +14,6 @@ import "core:path/filepath"
 import "core:strings"
 
 Mime_Type :: enum {
-	// Fallback for unknown extensions (static/binary-safe).
 	Octet_Stream,
 
 	// Text / documents
@@ -164,7 +163,6 @@ mime_to_content_type :: proc(m: Mime_Type) -> string {
 	return _mime_to_content_type[m]
 }
 
-// True when static responses should append "; charset=utf-8".
 mime_uses_charset_utf8 :: proc(m: Mime_Type) -> bool {
 	#partial switch m {
 	case .Html, .Css, .Js, .Plain, .Csv, .Xml, .Markdown, .Atom, .Rss:

@@ -1,4 +1,0 @@
-WARN drogon h2 plaintext negotiated 'http/1.1' not h2 → N/A
-WARN drogon h2 s4k negotiated 'http/1.1' not h2 → N/A
-WARN drogon h2 s64k negotiated 'http/1.1' not h2 → N/A
-WARN drogon h2 s1m negotiated 'http/1.1' not h2 → N/A

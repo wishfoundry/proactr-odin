@@ -1,11 +1,5 @@
 // Manual HTTPS oneshot + SSE demo.
 // Self-signed localhost cert.
-//   odin build examples/https_demo -out:examples/https_demo/https_demo.bin -o:none
-//   ./examples/https_demo/https_demo.bin
-//   curl -k --http1.1 https://127.0.0.1:18443/
-//   curl -kN --http1.1 -H 'Accept: text/event-stream' https://127.0.0.1:18443/sse
-//   curl -k --http2 https://127.0.0.1:18443/   # eng unary H2 probe only
-// Not a product example (E0 sample remains examples/empty_ok clear-H1).
 package main
 
 import "core:fmt"

@@ -125,7 +125,6 @@ scanner_reset_pooled :: proc(s: ^Scanner) {
 }
 
 // scanner_prepare resets parse state for a new request and restores the RECV window.
-// Pooled: len=cap. Dynamic: scanner_reset may shrink len via remove_range — restore to opts.recv_buf_size.
 @(private)
 scanner_prepare :: proc(c: ^Connection) {
 	if c.scanner_pooled {

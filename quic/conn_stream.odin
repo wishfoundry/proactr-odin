@@ -42,7 +42,6 @@ Rx_Fragment :: struct {
 Stream :: struct {
 	id: u64, // always 0 for our single client-bidi stream
 
-	// --- Send side ---
 	// Bytes are retained in tx_buffered until ACKed so a lost packet can be
 	// retransmitted by rewinding tx_sent_off (see _stream_requeue_range).
 	//   tx_buffered: everything written via stream_write, not yet fully ACKed
@@ -63,7 +62,6 @@ Stream :: struct {
 	tx_fin_sent:      bool,             // FIN bit has been emitted on the wire
 	tx_fin_acked:     bool,             // peer ACK'd the FIN-bearing packet
 
-	// --- Recv side ---
 	rx_next_offset:   u64,              // next byte to hand to the caller
 	rx_fragments:     [dynamic]Rx_Fragment,
 	rx_delivered:     [dynamic]u8,      // contiguous bytes ready for stream_read
@@ -129,7 +127,6 @@ NUM_PRIORITY_UNI_STREAMS :: 7
 // its own send channel. Caller is responsible for calling this in
 // priority order so the natural stream-id ordering matches priority
 // ordering on the peer side (zenoh-rs relies on the same convention).
-// Returns nil if the peer's initial_max_streams_uni budget has been
 // exhausted — caller must back off or fall back to the control stream.
 conn_open_uni :: proc(conn: ^Conn, allocator := context.allocator) -> ^Stream {
 	if !conn.next_local_uni_id_inited {
@@ -163,7 +160,6 @@ conn_open_uni :: proc(conn: ^Conn, allocator := context.allocator) -> ^Stream {
 
 // Allocate and open a new locally-initiated BIDIRECTIONAL stream — one per
 // HTTP/3 request. Client-bidi IDs are 4n+0, server-bidi IDs are 4n+1.
-// Returns nil if the peer's initial_max_streams_bidi budget is exhausted.
 // (zenoh itself only ever uses bidi id 0 via conn_open_stream; this is the
 // multi-request allocator HTTP/3 needs.)
 conn_open_bidi :: proc(conn: ^Conn, allocator := context.allocator) -> ^Stream {
@@ -195,7 +191,6 @@ conn_open_bidi :: proc(conn: ^Conn, allocator := context.allocator) -> ^Stream {
 // should carry its frames. In single-stream mode every priority uses
 // the control bidi (id 0). In multi-stream mode Control stays on id 0
 // and priorities 1..7 use the locally-opened uni streams in open order.
-// Returns nil if the corresponding stream hasn't been opened yet. Callers
 // in multi-stream mode are expected to open all 7 uni streams up front
 // (zenoh-rs does this in UniStreams::try_open) so the lookup is hit-only
 // in steady state.
@@ -281,7 +276,6 @@ stream_close_send :: proc(s: ^Stream) {
 }
 
 // Copy up to len(buf) contiguous bytes out of rx_delivered into buf.
-// Returns the number of bytes written. Returns 0 and ok=false when the
 // stream has been closed and no more bytes will arrive.
 stream_read :: proc(s: ^Stream, buf: []u8) -> (n: int, ok: bool) {
 	if len(s.rx_delivered) == 0 {
@@ -356,7 +350,6 @@ _stream_flush_fragments :: proc(s: ^Stream) {
 	}
 }
 
-// Return true if we should emit a MAX_STREAM_DATA update — triggered when
 // the caller has drained more than half of the advertised window.
 stream_needs_flow_control_update :: proc(s: ^Stream) -> bool {
 	return s.rx_next_offset > s.rx_our_max_data / 2

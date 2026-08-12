@@ -1,6 +1,5 @@
 // TLS mem-BIO drive for Client_Job.
 // Ciphertext on the wire via proactr send/recv; SSL never owns the fd.
-// Free SSL only from job_free_transport when ops_outstanding == 0.
 package client
 
 import "core:c"

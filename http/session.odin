@@ -1,6 +1,5 @@
 // Effect-based Sessions (D0–D2): host-driven events → Effects → wire/timer/end.
 // SSE codec in session_sse.odin; WS in session_ws.odin (D3).
-// Progressive Stream wire is D0 (response/wire).
 package http
 
 import "base:runtime"
@@ -14,9 +13,7 @@ import "core:time"
 import http2 "../http2"
 import proactr "../proactr"
 
-// ---------------------------------------------------------------------------
 // D2 metrics (atomics; sum at scrape)
-// ---------------------------------------------------------------------------
 
 session_metrics_started:               u64
 session_metrics_ended:                 u64
@@ -35,9 +32,7 @@ SESSION_MAX_STREAM_BUFFER_DEFAULT :: 64 * 1024
 SESSION_IDLE_TIMEOUT_MS_DEFAULT :: 60_000
 SESSION_MAILBOX_DEPTH_DEFAULT :: 256
 
-// ---------------------------------------------------------------------------
 // Public alloc / hooks
-// ---------------------------------------------------------------------------
 
 // Permanent connection allocator (not request temp). Prefer for session nested state.
 conn_allocator :: proc(res: ^Response) -> runtime.Allocator {
@@ -121,9 +116,7 @@ Session_Event :: struct {
 
 Session_On_Event :: #type proc(sess: ^Session, ev: Session_Event, user: rawptr) -> Effects
 
-// ---------------------------------------------------------------------------
 // Effects
-// ---------------------------------------------------------------------------
 
 EFFECTS_MAX :: 8
 
@@ -194,9 +187,7 @@ effects_of :: proc(effs: ..Effect, loc := #caller_location) -> Effects {
 	return out
 }
 
-// ---------------------------------------------------------------------------
 // Host Session_State (conn_allocator)
-// ---------------------------------------------------------------------------
 
 Session_Proto :: enum u8 {
 	Sse,
@@ -237,9 +228,7 @@ Session_State :: struct {
 	allocator: runtime.Allocator,
 }
 
-// ---------------------------------------------------------------------------
 // sse_start
-// ---------------------------------------------------------------------------
 
 /*
 Start a long-lived SSE session on this response.
@@ -375,7 +364,6 @@ sse_start :: proc(
 
 // Worker-affine external event post (D2). Any thread may call; drained on owning
 // worker via session_mailbox_drain (hook from on_worker_tick or host loop).
-// Returns false if mailbox full (metric session_metrics_mailbox_drops).
 session_post_external :: proc(s: Session, cookie: rawptr) -> bool {
 	st := _session_lookup(s)
 	if st == nil || st.closed || st.public.id != s.id {
@@ -390,7 +378,6 @@ session_status :: proc(s: Session) -> bool {
 	return st != nil && !st.closed && st.public.id == s.id
 }
 
-// True when live sessions are under max_sessions_per_worker × thread_count.
 @(private)
 _session_admission_ok :: proc(conn: ^Connection) -> bool {
 	if conn == nil || conn.server == nil {
@@ -409,7 +396,6 @@ _session_admission_ok :: proc(conn: ^Connection) -> bool {
 // Soft 503 when session cap is exceeded. Does not allocate Session_State.
 // H1: respond(503) on a worker; offline unit marks sent only.
 // H2: 503 HEADERS + END_STREAM on the exchange stream; no session attach.
-// Returns Session{} (id=0) — caller checks session_status / id != 0.
 @(private)
 _session_soft_reject :: proc(res: ^Response, loc := #caller_location) -> Session {
 	_ = loc
@@ -467,9 +453,7 @@ sse_drive_for_test :: proc(sess: ^Session, ev: Session_Event) -> Effects {
 	return _session_drive_st(st, ev)
 }
 
-// ---------------------------------------------------------------------------
 // Drive + apply
-// ---------------------------------------------------------------------------
 
 // H1 convenience: drive the embed slot session (TLS hangup / wire error paths).
 @(private)
@@ -760,7 +744,6 @@ _session_abort_st :: proc(st: ^Session_State) {
 	ex := _session_ex(st)
 
 	if conn != nil && conn.h2_active {
-		// Optional RST_STREAM so peer stops the stream; free session/slot only.
 		sid, sok := h2_host_sid_for_slot(conn, ex)
 		if sok && sid != 0 {
 			http2.rst_stream_write(&conn.h2_out, sid, http2.H2_CANCEL)
@@ -871,9 +854,7 @@ _session_destroy_st :: proc(st: ^Session_State, after_wire: bool) {
 	_ = after_wire
 }
 
-// ---------------------------------------------------------------------------
 // D2 mailbox (per-worker, drained on host tick)
-// ---------------------------------------------------------------------------
 
 Session_Mail_Slot :: struct {
 	conn:   ^Connection,

@@ -1,9 +1,5 @@
 // Alt-Svc (RFC 7838) — Chrome-like alternative-service discovery.
 // Servers advertise `Alt-Svc: h3=":443"; ma=86400` on h1/h2 responses. We parse,
-// cache by origin, and on the next Auto dial to that origin try H3 first,
-// falling back to TCP+ALPN if QUIC fails (same recovery shape as browsers).
-// Non-goals: Alt-Used request header, persist=1 disk store, h2-over-alt TCP
-// (we only follow h3 / h3-* ALPNs onto QUIC).
 package client
 
 import "core:fmt"
@@ -266,7 +262,6 @@ alt_svc_cache_lookup :: proc(
 	if ent.broken_until._nsec != 0 && time.diff(now, ent.broken_until) > 0 {
 		return {}, false
 	}
-	// Return entry borrowing cache storage — valid until put/clear/mark_broken.
 	return ent, true
 }
 

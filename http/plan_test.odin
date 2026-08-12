@@ -320,11 +320,9 @@ test_plan_bytes_and_static_same_memory_path :: proc(t: ^testing.T) {
 	expect_kinds(t, got, { .Writev })
 }
 
-// =============================================================================
 // E0.8 — pure plan_body policy table (Plan A R4 merge-blocker gate)
 // File+ciphered → no Sendfile; gather only on clear path; max_write_unit coalesce.
 // Host meters (ciphered, max_iovecs) live on Plan_Policy / Plan_Host only.
-// =============================================================================
 
 @(test)
 test_e0_8_plan_body_policy_table :: proc(t: ^testing.T) {
@@ -462,7 +460,6 @@ test_e0_8_conn_caps_plan_host_sendfile_path :: proc(t: ^testing.T) {
 @(test)
 test_e0_8_plan_context_public_four_fields_only :: proc(t: ^testing.T) {
 	// Case 8: Public Plan_Context has only 4 fields — plan_context() does not expose max_iovecs.
-	// Runtime field count via reflect (compile would also fail if callers used max_iovecs on Plan_Context).
 	names := reflect.struct_field_names(Plan_Context)
 	testing.expect_value(t, len(names), 4)
 	// Exact public four (order is struct declaration order).
@@ -497,7 +494,6 @@ test_e0_8_plan_context_public_four_fields_only :: proc(t: ^testing.T) {
 	testing.expect_value(t, back.zero_copy_send, pub.zero_copy_send)
 }
 
-// --- Phase 2: Handler_Profile, plan_context / plan_policy, body middleware ---
 
 @(test)
 test_plan_context_public_is_four_fields :: proc(t: ^testing.T) {
@@ -761,7 +757,6 @@ test_body_middleware_apply_in_place :: proc(t: ^testing.T) {
 	testing.expect_value(t, body_middleware_apply(nil, nil, buf[:1]), 1)
 }
 
-// --- Phase 3: multi-buffer exec queue advance + Writev wire policy ------------
 // Single host mutator: _conn_advance_exec_bufs (WRITEV short writes and multi_send).
 
 @(test)
@@ -1117,7 +1112,6 @@ test_cmds_mem_body_len :: proc(t: ^testing.T) {
 	testing.expect(t, !ok2)
 }
 
-// --- Phase 5: Response_Stream (not Response_Cmd / plan_body) -----------------
 
 @(test)
 test_http_chunk_framing :: proc(t: ^testing.T) {

@@ -817,8 +817,6 @@ test_h2_slots_pointer_not_embedded_tax :: proc(t: ^testing.T) {
 	testing.expect(t, size_of(Connection) > 1024)
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 
 // Scan h2_out for DATA frames; return whether sid appeared with non-empty payload.
 @(private)

@@ -1,18 +1,5 @@
 // QPACK (RFC 9204) field-section encoder/decoder.
 // Encoder: static table always; optional dynamic table when `enc_dt` is provided
-// and capacity > 0. New entries may be inserted onto `enc_stream` (Insert with
-// Name Reference / Literal Name). Field lines use dynamic indexed / name-ref
-// when the entry is referenceable (see `allow_unacked` / `known_received`).
-// With no encoder table, output is static-only (RIC = 0) — same as capacity 0.
-// Decoder: optional dynamic table. Pass a `^Dynamic_Table` (populated from the
-// peer's QPACK encoder stream) to accept indexed / name-ref / post-base
-// dynamic references. With `dt == nil`, dynamic references are rejected
-// (legacy capacity-0 behaviour).
-// Building blocks:
-//   - Prefix integer (RFC 7541 §5.1, reused by RFC 9204 §4.1.1) — NOT QUIC varint.
-//   - String literal (RFC 9204 §4.1.2), optionally Huffman-coded.
-//   - Field section prefix (RFC 9204 §4.5.1): Required Insert Count + Base.
-//   - Field line representations (RFC 9204 §4.5.2–4.5.6).
 package qpack
 
 import "core:mem"
@@ -36,7 +23,6 @@ Qpack_Error :: enum {
 	Blocked,                   // RIC > insert count (would need blocked streams)
 }
 
-// ---- Prefix integer (RFC 7541 §5.1) ---------------------------------------
 
 // Encode `value` with an `n`-bit prefix. `flags` holds the high (8-n) bits of
 // the first byte already set (the representation pattern); they must not touch
@@ -78,7 +64,6 @@ prefix_int_decode :: proc(src: []u8, n: uint) -> (value: u64, consumed: int, err
 	return value, consumed, .None
 }
 
-// ---- String literal (RFC 9204 §4.1.2) -------------------------------------
 
 // Encode `s` with an n-bit length prefix. `flags` = the representation pattern
 // bits above the length field (NOT the Huffman bit). The Huffman bit is at bit
@@ -125,7 +110,6 @@ qpack_decode_string :: proc(
 	return strings.clone(string(raw), allocator), consumed, .None
 }
 
-// ---- Field section ---------------------------------------------------------
 
 // Encode options for dynamic-table field sections. Zero value = static-only.
 Qpack_Encode_Opts :: struct {
@@ -146,7 +130,6 @@ Qpack_Encode_Opts :: struct {
 
 // Encode a header list into a complete QPACK field section (prefix + lines).
 // Without opts / with enc_dt == nil: static-only (RIC = 0, Base = 0).
-// Returns the Required Insert Count used in the section prefix (0 if static-only).
 qpack_encode_field_section :: proc(
 	dst: ^[dynamic]u8,
 	headers: []Header,

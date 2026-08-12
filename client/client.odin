@@ -1,14 +1,5 @@
 // client — multi-protocol HTTP client toolkit.
 // Layers (see docs/LIBRARY.md):
-//   CORE         H2_Session / H3_Session (sans-I/O), Dialer + request over io.Stream
-//   ADAPTERS     tcp_dialer, tls_dialer, h3 dial (QUIC sleep-poll over H3_Session)
-//   CONVENIENCE  get() one-shot
-// Session negotiation (toolkit defaults; optional browser-ish Alt-Svc):
-//   .Auto → TLS ALPN [h2, http/1.1] only (no surprise H3)
-//   follow_alt_svc → try cached Alt-Svc h3 first, then ALPN fallback
-//   Forced .Http1 / .Http2 → ALPN offer matches; mismatch → Unsupported_Version
-//   Forced .Http3 → QUIC only
-//   H1 keep-alive + H2 mux + H3 multi-stream on a reused Connection
 package client
 
 import "core:bytes"
@@ -34,7 +25,6 @@ DEFAULT_MAX_REDIRECTS      :: 10
 // Stable User-Agent when the request does not set one (not version-churny).
 DEFAULT_USER_AGENT         :: "vapor-http/client"
 
-// ---- Dialer: the pluggable transport seam ----------------------------------
 
 // A Dialer produces a duplex byte stream to `target` and reports the version it
 // negotiated (e.g. via ALPN). Swap it for TLS, a Unix socket, an SSH channel,
@@ -94,13 +84,11 @@ Options :: struct {
 	use_proactr_io: bool,
 }
 
-// ---- Public API ------------------------------------------------------------
 
 get :: proc(url: string, opts := Options{}, allocator := context.allocator) -> (Response, Http_Error) {
 	if http_worker_active {
 		return {}, .Invalid_Use
 	}
-	// Optional proactr path: clear H1 + https H1/H2 (mem-BIO) + H3 (explicit or prefer_h3).
 	if opts.use_proactr_io {
 		t, ok := parse_target(url)
 		if !ok do return {}, .Invalid_Url
@@ -259,7 +247,6 @@ get_proactr :: proc(url: string, opts := Options{}, allocator := context.allocat
 	)
 }
 
-// True when Auto+https should attempt H3 before TCP (prefer_h3 opt-in).
 @(private)
 _opts_prefer_h3_first :: proc(opts: Options, scheme: string) -> bool {
 	return opts.prefer_h3 && opts.version == .Auto && scheme == "https"
@@ -612,7 +599,6 @@ response_destroy :: proc(r: ^Response, allocator := context.allocator) {
 	delete(r.body)
 }
 
-// ---- HTTP/1.1 driver (keep-alive over ANY io.Stream) -----------------------
 
 @(private)
 _h1_do :: proc(
@@ -907,7 +893,6 @@ _find_crlf :: proc(buf: []u8) -> int {
 	return strings.index(s, "\r\n")
 }
 
-// ---- HTTP/2 driver (persistent sans-IO mux over ANY io.Stream) --------------
 
 @(private)
 _h2_do :: proc(c: ^Connection, stream: io.Stream, req: ^Request, allocator: mem.Allocator) -> (Response, Http_Error) {
@@ -1007,7 +992,6 @@ _headers_to_response :: proc(
 	return res
 }
 
-// ---- Default headers / redirects / timeouts --------------------------------
 
 @(private)
 _resolve_max_redirects :: proc(opt: int) -> int {
@@ -1226,7 +1210,6 @@ _resolve_redirect_target :: proc(base: Target, location: string) -> (Target, boo
 	return t, true
 }
 
-// ---- Timeouts / body limits ------------------------------------------------
 
 @(private)
 _resolve_dial_timeout_ms :: proc(timeout_ms: int) -> int {
@@ -1287,7 +1270,6 @@ _set_sock_timeouts :: proc(sock: net.TCP_Socket, timeout: time.Duration) {
 	_ = net.set_option(sock, .Send_Timeout, timeout)
 }
 
-// ---- Built-in TCP dialer + transport adapters ------------------------------
 
 // The default Dial_Proc for http targets: plaintext TCP, exposed as an
 // io.Stream. (https defaults to tls_dialer — see tls.odin.)

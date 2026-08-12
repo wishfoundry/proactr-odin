@@ -262,9 +262,7 @@ test_static_content_type_html_charset :: proc(t: ^testing.T) {
 	testing.expect_value(t, http.mime_content_type_for_path_extra("a.gltf", extra), "model/gltf+json")
 }
 
-// ---------------------------------------------------------------------------
 // Integration: temp dir + real open/prepare (no live server)
-// ---------------------------------------------------------------------------
 
 @(private = "file")
 _static_test_fixture :: proc(t: ^testing.T) -> (dir, file_path: string, body: string, ok: bool) {

@@ -17,9 +17,7 @@ import proactr "../proactr"
 
 _SO_REUSEPORT :: c.int(0x0200)
 
-// ---------------------------------------------------------------------------
 // Listen helpers
-// ---------------------------------------------------------------------------
 
 @(private)
 _kqueue_listen_tcp :: proc(
@@ -141,9 +139,7 @@ server_close_listen_sockets :: proc(s: ^Server) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Close / interest / worker enter
-// ---------------------------------------------------------------------------
 
 @(private)
 conn_reactor_io_in_flight :: proc(c: ^Connection) -> bool {

@@ -128,7 +128,6 @@ conn_close_finish :: proc(c: ^Connection) {
 	c.close_pending = true
 }
 
-// Returns true if this backend took over the worker thread (native loop).
 @(private)
 host_worker_enter :: proc(s: ^Server) -> bool {
 	_ = s

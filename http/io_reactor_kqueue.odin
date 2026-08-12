@@ -2,7 +2,6 @@
 package http
 
 // Darwin native kqueue reactor I/O (Plan R2 P5 full wait ownership).
-// Design (stable vs P5 crash): product sockets use a **per-worker reactor kqueue**
 // separate from proactr's ring kqueue. udata is Connection* (or accept sentinel),
 // never proactr op_id — so ring_wait/complete_apply cannot mis-decode socket events
 // under multi-worker load (prior hybrid on shared kq → segfault / 0 RPS).
@@ -37,9 +36,7 @@ reactor_host: Reactor_Host
 
 // (shared with Linux dense flush / io_uring residual arm).
 
-// ---------------------------------------------------------------------------
 // Reactor kqueue lifecycle
-// ---------------------------------------------------------------------------
 
 @(private)
 reactor_host_init :: proc(allocator := context.allocator) -> bool {
@@ -200,9 +197,7 @@ reactor_delete_filters :: proc(fd: i32, del_read, del_write: bool) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Accept / recv / write / close ownership
-// ---------------------------------------------------------------------------
 
 // reactor_host_submit_accept: level EVFILT_READ on shared listen (REACTOR_UDATA_ACCEPT).
 // Multi-worker: each worker arms the same listen fd on its own reactor kq; nonblocking
@@ -354,9 +349,7 @@ reactor_host_close :: proc(conn: ^Connection) {
 	connection_destroy(conn)
 }
 
-// ---------------------------------------------------------------------------
 // Event dispatch (read before write; accept separate)
-// ---------------------------------------------------------------------------
 
 @(private)
 reactor_try_accept_once :: proc() -> (client: i32, again: bool, hard: bool) {

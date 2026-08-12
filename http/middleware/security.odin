@@ -15,7 +15,6 @@ Security_Opts :: struct {
 	// Referrer-Policy. Empty → "strict-origin-when-cross-origin".
 	referrer_policy:         string,
 	disable_referrer_policy: bool,
-	// Optional HSTS value e.g. "max-age=31536000; includeSubDomains". Empty → omit.
 	hsts: string,
 	// Optional Content-Security-Policy. Empty → omit.
 	csp: string,

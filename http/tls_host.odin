@@ -1,12 +1,5 @@
 // Opaque SSL only (tls_server.Conn) — no SSL* leaves this module into handlers.
 // Product I/O: rBIO fed by recv CT; wBIO drained to host_submit_send CT.
-// Clear-H1 paths are unchanged when Server.tls_provider/tls_ctx are nil.
-// Handshake: conn.tls_pipe.state = Handshake until SSL_accept OK → Open +
-// connection_enable_ciphered (lightweight: plan_policy only; no seal_q/CT[2]).
-// Response send (ciphered oneshot / stream / H2): single seal engine in
-// tls_dual_ct.odin (tls_seal_window + tls_dual_ct_try_ahead) over Connection.dual_ct.
-// Progressive Stream / SSE / WS: tls_host_stream_try_submit; stream_sent after CT CQE.
-// Pure pipe Seal_SM remains the formal model; dual_ct is the live path.
 package http
 
 import "core:c"
@@ -18,12 +11,9 @@ import "core:sync"
 import proactr "../proactr"
 import tls_server "../tls_server"
 
-// ---------------------------------------------------------------------------
 // Server TLS context lifecycle
-// ---------------------------------------------------------------------------
 
 // server_tls_init loads default OpenSSL provider + shared SSL_CTX from PEMs.
-// Returns false if provider missing, ctx/PEM fail — caller must clear PEMs / stay clear-H1.
 @(private)
 server_tls_init :: proc(s: ^Server) -> bool {
 	if s == nil {
@@ -88,9 +78,7 @@ server_tls_live :: proc(s: ^Server) -> bool {
 	return s != nil && s.tls_provider != nil && s.tls_ctx != nil
 }
 
-// ---------------------------------------------------------------------------
 // Per-connection TLS setup / teardown
-// ---------------------------------------------------------------------------
 
 // TLS_CT_RX_DEFAULT / TX: network ciphertext windows (not app-visible).
 TLS_CT_RX_DEFAULT :: 16 * 1024
@@ -226,9 +214,7 @@ tls_host_conn_destroy :: proc(conn: ^Connection) {
 	connection_disable_ciphered(conn)
 }
 
-// ---------------------------------------------------------------------------
 // Recv arm (CT into tls_ct_rx)
-// ---------------------------------------------------------------------------
 
 // tls_host_arm_recv arms CT RECV into tls_ct_rx.
 // Idempotent: if CT RECV is already outstanding, returns true without re-arm
@@ -269,9 +255,7 @@ tls_host_arm_recv :: proc(conn: ^Connection) -> bool {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // host_on_recv entry (ciphertext)
-// ---------------------------------------------------------------------------
 
 // tls_host_session_client_gone: peer hangup on long-lived stream/session (metrics + abort).
 @(private)
@@ -381,9 +365,7 @@ tls_host_on_recv :: proc(conn: ^Connection, result: i32) {
 }
 
 
-// ---------------------------------------------------------------------------
 // Handshake drive
-// ---------------------------------------------------------------------------
 
 @(private)
 tls_host_drive_handshake :: proc(conn: ^Connection) {
@@ -462,9 +444,7 @@ tls_host_drive_handshake :: proc(conn: ^Connection) {
 
 // Dual-CT submit / seal_dst / drain / promote live in tls_dual_ct.odin.
 
-// ---------------------------------------------------------------------------
 // Open: start HTTP parse + decrypt path
-// ---------------------------------------------------------------------------
 
 // tls_host_open_start_protocol: after handshake Open, branch on negotiated ALPN.
 // h2 → engineering unary H2 host; http/1.1 or empty → H1 scanner path.
@@ -599,14 +579,11 @@ tls_host_try_ssl_read_into :: proc(conn: ^Connection, buf: []u8) -> int {
 	return tls_host_ssl_read_burst(conn, buf)
 }
 
-// ---------------------------------------------------------------------------
 // Send complete (handshake / H2 / stream / oneshot CQE)
-// ---------------------------------------------------------------------------
 
 // tls_host_on_send_complete: after a full CT buffer was delivered on the wire.
 // Handshake: re-drive accept. Progressive stream/session: advance plain, reflush, hangup arm.
 // Oneshot response: more CT / next plain window / clean.
-// Returns true if handled (caller must not run clear-H1 finish path).
 @(private)
 tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	if conn == nil || conn.tls_ssl == nil {
@@ -778,9 +755,7 @@ tls_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	return false
 }
 
-// ---------------------------------------------------------------------------
 // Metrics (server atomics)
-// ---------------------------------------------------------------------------
 
 @(private)
 tls_metrics_note_pt :: proc(s: ^Server, pt: u64) {
@@ -824,9 +799,7 @@ tls_metrics_inc_seal :: proc(s: ^Server) {
 	sync.atomic_add(&s.tls_seal_units.raw, 1)
 }
 
-// ---------------------------------------------------------------------------
 // Public convenience
-// ---------------------------------------------------------------------------
 
 // listen_and_serve_tls sets PEM material on opts then listen_and_serve.
 // PEMs are in-memory slices (caller retains ownership for process life).

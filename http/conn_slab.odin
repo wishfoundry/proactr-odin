@@ -9,7 +9,6 @@ import proactr "../proactr"
 
 // Default initial capacity of permanent Connection.resp_buf (1 MiB body + 4 KiB headers).
 // Overridable via Server_Opts.resp_buf_initial (0 → this). Grows on demand; capacity retained.
-// Owned by Connection.resp_buf (conn_allocator), never the request temp arena.
 @(private)
 HOST_RESP_BUF_INITIAL :: (1 << 20) + 4096
 
@@ -52,7 +51,6 @@ _server_thread_init_temp :: proc(t: ^Server_Thread, s: ^Server) {
 }
 
 // conn_temp_grow appends one chunk of buffer slots and pushes indices onto temp_free.
-// Returns false if at max or slot size is invalid.
 @(private)
 conn_temp_grow :: proc(s: ^Server) -> bool {
 	assert_has_td()
@@ -201,7 +199,6 @@ conn_scanner_bind :: proc(c: ^Connection, s: ^Server) {
 }
 
 // conn_alloc: pop free list or grow a chunk of Connection records (no hot-path new after warm-up).
-// Returns nil if the temp pool cannot attach a slot (caller must close the client fd).
 @(private)
 conn_alloc :: proc(s: ^Server) -> ^Connection {
 	assert_has_td()
@@ -240,7 +237,6 @@ conn_alloc :: proc(s: ^Server) -> ^Connection {
 	// file_send_buf retained across free-list reuse (allocated lazily).
 	// Progressive stream + session on Stream_Slot: zero exchange; preserve gen; wire pipe.
 	stream_slot_reset_exchange(&c.slot, c)
-	// Plan A pipe bags (POD init; clear-H1 still uses Wire_State)
 	// ciphered starts false; seal_q remains nil until connection_enable_ciphered_pipe_sm.
 	c.ciphered = false
 	pt_ring_init(&c.pt)

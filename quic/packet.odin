@@ -33,7 +33,6 @@ build_long_first_byte :: proc(long_type: u8, pn_len: int) -> u8 {
 	return 0xc0 | (long_type << 4) | u8(pn_len - 1)
 }
 
-// --- AEAD nonce construction (§5.3) ---
 // The nonce for packet N is iv XOR padded_pn, where padded_pn is the 62-bit
 // packet number zero-extended to the AEAD's nonce length (12 bytes) with the
 // packet number occupying the least-significant bytes.
@@ -46,7 +45,6 @@ make_nonce :: proc(nonce: ^[QUIC_IV_LEN]u8, iv: []u8, pn: u64) {
 	}
 }
 
-// --- Header protection (§5.4) ---
 // For AES-based AEADs, the HP mask is AES-ECB(hp_key, sample)[0..5].
 // `sample` is 16 bytes taken at offset pn_offset+4 in the already-AEAD-sealed
 // packet (i.e. sample begins 4 bytes after the start of the packet number
@@ -139,7 +137,6 @@ remove_header_protection :: proc(
 	return pn_len, true
 }
 
-// --- Initial packet encryption ---
 // Produces the fully-protected wire bytes in `out`. Layout:
 //   first_byte (1)
 //   version (4)
@@ -165,7 +162,6 @@ encrypt_initial :: proc(
 ) -> (packet_len: int, ok: bool) {
 	assert(pn_len >= 1 && pn_len <= 4)
 
-	// --- Build unprotected header ---
 	pos := 0
 	if len(out) < 1 do return 0, false
 	out[pos] = build_long_first_byte(Long_Type_Initial, pn_len)
@@ -217,7 +213,6 @@ encrypt_initial :: proc(
 	// Header (AAD) is out[0..pos] at this point.
 	header_len := pos
 
-	// --- AEAD seal the plaintext into out[pos..] ---
 	nonce: [QUIC_IV_LEN]u8
 	make_nonce(&nonce, keys.iv[:], pn)
 
@@ -229,7 +224,6 @@ encrypt_initial :: proc(
 
 	packet_len = pos + ct_len
 
-	// --- Apply header protection ---
 	if !apply_header_protection(out[:packet_len], pn_offset, pn_len, keys, true) do return 0, false
 
 	return packet_len, true
@@ -245,7 +239,6 @@ decrypt_initial :: proc(
 	buf:  []u8,
 	keys: ^Packet_Keys,
 ) -> (plaintext: []u8, pn: u64, ok: bool) {
-	// --- Parse fixed-offset header fields (up to packet number) ---
 	if len(buf) < 7 do return nil, 0, false
 
 	// Must be long header + fixed bit.
@@ -284,7 +277,6 @@ decrypt_initial :: proc(
 	// At this point `pos` is the packet-number offset.
 	pn_offset := pos
 
-	// --- Remove header protection ---
 	pn_len, ok_hp := remove_header_protection(buf, pn_offset, keys, true)
 	if !ok_hp do return nil, 0, false
 	if pn_offset + pn_len > len(buf) do return nil, 0, false
@@ -295,13 +287,11 @@ decrypt_initial :: proc(
 		truncated_pn = (truncated_pn << 8) | u64(buf[pn_offset + i])
 	}
 	// For the Initial packet case, we accept the truncated PN as-is. A full
-	// implementation would reconstruct against largest_acked per §A.3.
 	pn = truncated_pn
 
 	header_len := pn_offset + pn_len
 	ciphertext := buf[header_len:]
 
-	// --- AEAD open ---
 	nonce: [QUIC_IV_LEN]u8
 	make_nonce(&nonce, keys.iv[:], pn)
 
@@ -312,7 +302,6 @@ decrypt_initial :: proc(
 	return ciphertext[:pt_len], pn, true
 }
 
-// --- 1-RTT short header packets (RFC 9000 §17.3.1) ---
 // Layout:
 //   byte 0:  0 1 S R R K P P
 //            ^ header form (0 = short)
@@ -405,7 +394,6 @@ decrypt_one_rtt :: proc(
 	return ciphertext[:pt_len], pn, true
 }
 
-// --- Helper: fixed 2-byte varint encoding ---
 // RFC 9000 §16 allows non-minimal encodings. We use a fixed 2-byte encoding
 // for the packet Length field because the header protection sample offset
 // must be stable regardless of the length's numeric value. A 2-byte varint

@@ -40,7 +40,6 @@ _mono_ns :: proc() -> i64 {
 	return time.duration_nanoseconds(time.tick_diff(_mono_epoch, time.tick_now()))
 }
 
-// --- min-heap by deadline (tie-break op_id) ----------------------------------
 
 _timer_less :: #force_inline proc(a, b: Timer_Entry) -> bool {
 	if a.deadline != b.deadline {
@@ -239,7 +238,6 @@ _ring_wait_budget_ms :: proc(r: ^Ring, timeout_ms: i32, deadline_ns: i64) -> i32
 	return wait_ms
 }
 
-// True when ring_wait should return without (another) blocking platform wait.
 _ring_wait_should_stop :: proc(
 	r: ^Ring,
 	n: int,
@@ -277,7 +275,6 @@ _ring_wait_should_stop :: proc(
 	return false
 }
 
-// --- public API -------------------------------------------------------------
 
 // submit_timeout arms a portable software timer.
 // Completes with TIMEOUT_ETIME on expiry (via soft_cq / ring_wait).
@@ -298,7 +295,6 @@ submit_timeout :: proc(
 
 // cancel_timeout posts TIMEOUT_CANCELED if the timer is still live.
 // Never frees — host must harvest the CQE and operation_free.
-// Returns true if a cancel completion was posted.
 cancel_timeout :: proc(r: ^Ring, id: u32) -> bool {
 	if !_soft_post_timeout(r, id, TIMEOUT_CANCELED) {
 		return false

@@ -48,8 +48,6 @@ _ring_destroy_platform :: proc(r: ^Ring) {
 }
 
 
-// --- helpers ----------------------------------------------------------------
-
 _kq_post :: proc(r: ^Ring, id: u32, result: i32, flags: u32 = 0) {
 	append(&r.impl.cq, Completion{op_id = id, result = result, flags = flags})
 }
@@ -147,7 +145,6 @@ _kq_flush_changes :: proc(r: ^Ring) -> Error {
 	return .None
 }
 
-// --- submit -----------------------------------------------------------------
 
 _submit_nop :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	if !r.impl.active {
@@ -223,7 +220,6 @@ _submit_writev :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return .Unsupported
 }
 
-// --- Darwin sendfile(2) -------------------------------------------------------
 // macOS: sendfile(fd, s, offset, *len, hdtr, flags) — file→socket zero-copy.
 // FreeBSD/others: leave Unsupported (different sendfile ABI); host uses pread+send.
 // Lifecycle mirrors Linux: drive with cap, soft-complete progress, EVFILT_WRITE on EAGAIN.

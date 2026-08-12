@@ -1,8 +1,5 @@
 // Microbench for proactr software timers (baseline + after unify).
 // Usage:
-//   odin build examples/timer_bench -out:timer_bench -o:speed
-//   ./timer_bench                 # all benches, human + CSV
-//   ./timer_bench -bench=B3 -k=10000
 package proactr:tests
 
 import "core:fmt"
@@ -111,7 +108,6 @@ init_ring :: proc(entries: u32 = 4096) -> (ring: proactr.Ring, ok: bool) {
 	return ring, true
 }
 
-// --- B1: wall-clock fire accuracy (duration_ns must be real, not grace-dominated) ---
 run_b1_fire_accuracy :: proc(duration_ns: i64, iters: int) {
 	ring, ok := init_ring(64)
 	if !ok {
@@ -162,7 +158,6 @@ run_b1_fire_accuracy :: proc(duration_ns: i64, iters: int) {
 	csv("B1_fire_accuracy", 1, iters, "mean_error_pct", err_pct, "pct", ms_label)
 }
 
-// --- B2: K timers same deadline, one wait drains ---
 run_b2_fire_burst :: proc(k: int) {
 	// Need enough ops; ring entries is SQ size, ops grow dynamically.
 	ring, ok := init_ring(256)
@@ -213,7 +208,6 @@ run_b2_fire_burst :: proc(k: int) {
 	csv("B2_fire_burst", k, 1, "fires_per_s", 1e9 / ns_per, "1/s", "")
 }
 
-// --- B3: next-deadline / fire scan cost with far timers ---
 // Arms K timers 1h out, then peeks N times (timeout_ms=0). Each peek scans timers.
 run_b3_next_deadline :: proc(k: int, peeks: int) {
 	ring, ok := init_ring(256)
@@ -253,7 +247,6 @@ run_b3_next_deadline :: proc(k: int, peeks: int) {
 	csv("B3_next_deadline", k, peeks, "total_wall", f64(elapsed), "ns", "")
 }
 
-// --- B4: cancel all armed timers ---
 run_b4_cancel_storm :: proc(k: int) {
 	ring, ok := init_ring(256)
 	if !ok {
@@ -303,7 +296,6 @@ run_b4_cancel_storm :: proc(k: int) {
 	csv("B4_cancel_storm", k, 1, "cqes_drained", f64(drained), "count", "0_means_free_on_cancel")
 }
 
-// --- B5: mixed deadlines, wait until all complete ---
 run_b5_wait_mix :: proc(k: int) {
 	ring, ok := init_ring(256)
 	if !ok {
@@ -346,7 +338,6 @@ run_b5_wait_mix :: proc(k: int) {
 	csv("B5_wait_mix", k, 1, "ns_per_timer", f64(elapsed) / f64(k), "ns", "")
 }
 
-// --- B6: flake rate for short timers ---
 run_b6_flake :: proc(iters: int, duration_ns: i64) {
 	ring, ok := init_ring(64)
 	if !ok {
@@ -379,7 +370,6 @@ run_b6_flake :: proc(iters: int, duration_ns: i64) {
 	csv("B6_flake", 1, iters, "fails", f64(fails), "count", "")
 }
 
-// --- stats ---
 mean :: proc(s: []f64) -> f64 {
 	if len(s) == 0 {
 		return 0

@@ -15,7 +15,6 @@ package quic
 
 import "core:time"
 
-// --- Constants (RFC 9002 §7) -------------------------------------------------
 // All in bytes. kInitialWindow and kMinimumWindow scale with the path MTU;
 // callers pass a max_datagram_size (typically 1200 for IPv6 / 1472 for IPv4)
 // to congestion_init.

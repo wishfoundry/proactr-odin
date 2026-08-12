@@ -136,7 +136,6 @@ decrypt_long_packet :: proc(
 	return ciphertext[:pt_len], pn, consumed, .None
 }
 
-// --- Frame processing ---
 
 // Process all frames inside a decrypted packet payload. Feeds CRYPTO data
 // into the TLS FIFO and schedules ACKs for packets that contain
@@ -276,7 +275,6 @@ process_frames :: proc(
 	return .None
 }
 
-// --- Stream frame handlers (real implementations live in conn_stream.odin) ---
 
 @(private)
 _handle_stream_frame :: proc(conn: ^Conn, frame: Stream_Frame) {
@@ -318,7 +316,6 @@ _handle_max_data :: proc(conn: ^Conn, frame: Max_Data_Frame) {
 }
 
 // Handle a CRYPTO frame: update offset + append to FIFO only (no tls_drive).
-// Returns fed=true when new bytes were appended for a later coalesced drive.
 @(private)
 _handle_crypto_frame :: proc(
 	conn:  ^Conn,
@@ -391,7 +388,6 @@ _mark_ack_elicited :: proc(conn: ^Conn, level: Encryption_Level) {
 	}
 }
 
-// --- Public receive entry point ---
 
 // Process one UDP datagram. May contain multiple coalesced QUIC packets.
 // Dispatches each packet to the appropriate decryption keys based on its
@@ -533,7 +529,6 @@ _handle_short_header_packet :: proc(conn: ^Conn, buf: []u8) -> Recv_Error {
 	return process_frames(conn, .Application, plaintext)
 }
 
-// --- Build Handshake-level packet ---
 // Symmetric with conn_build_initial_packet but uses Handshake keys and
 // omits the Token field. Used to send the client's Finished message.
 

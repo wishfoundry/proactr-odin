@@ -44,14 +44,12 @@ build_zenoh_alpn_wire :: proc(out: ^[64]u8) -> []u8 {
 	return out[:n]
 }
 
-// True when the negotiated ALPN enables priority-mapped uni streams.
 // Callers gate per-priority stream open on this.
 conn_alpn_is_multi_stream :: proc(conn: ^Conn) -> bool {
 	a := conn.alpn_negotiated[:conn.alpn_negotiated_len]
 	return string(a) == ALPN_MULTI_STREAM || string(a) == ALPN_MULTI_STREAM_MIXED_REL
 }
 
-// True when the negotiated ALPN signals per-priority reliability — the
 // peer can carry an unreliable best-effort stream alongside the reliable
 // ones (we route those via DATAGRAM, but the negotiation also opts the
 // peer in to mixed-rel framing).

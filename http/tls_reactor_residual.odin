@@ -45,7 +45,6 @@ reactor_residual_set :: proc(conn: ^Connection, off, n: int) {
 }
 
 // reactor_write_residual: write residual CT until empty, EAGAIN, or hard error.
-// Returns (again, hard). again=true → residual still pending (caller must arm WRITE).
 @(private)
 reactor_write_residual :: proc(conn: ^Connection) -> (again: bool, hard: bool) {
 	if conn == nil {

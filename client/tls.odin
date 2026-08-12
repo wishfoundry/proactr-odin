@@ -1,8 +1,5 @@
 // The TLS dialer — h1/h2 auto-negotiation over OpenSSL dynlib (openssl_dynlib).
 // Offers ALPN ["h2", "http/1.1"]; negotiated version drives the request path.
-// h3 is QUIC (h3.odin), same OpenSSL process load — no BoringSSL.
-// Certificate verification ON by default (system roots + hostname).
-// tls_dialer_insecure / Options.insecure opts out (test servers only).
 package client
 
 import "core:c"

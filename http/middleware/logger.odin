@@ -21,7 +21,6 @@ Logger_Opts :: struct {
 	skip_2xx: bool,
 	// When true, skip logging 3xx.
 	skip_3xx: bool,
-	// Optional custom sink; nil → core:log at opts.level.
 	// Called on the I/O worker during respond (must not block long).
 	write:      proc(line: string, user: rawptr),
 	write_user: rawptr,

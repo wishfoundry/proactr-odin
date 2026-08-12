@@ -16,7 +16,6 @@ Cors_Opts :: struct {
 	allow_methods: string,
 	// Empty → default header list.
 	allow_headers: string,
-	// Optional expose list.
 	expose_headers: string,
 	// Access-Control-Max-Age seconds; 0 → omit.
 	max_age_secs: int,

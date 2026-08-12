@@ -2,7 +2,6 @@ package quic
 
 import "core:testing"
 
-// --- PADDING ---
 
 @(test)
 test_frame_padding_encode :: proc(t: ^testing.T) {
@@ -24,7 +23,6 @@ test_frame_padding_decode_coalesces :: proc(t: ^testing.T) {
 	testing.expect_value(t, pad.count, 5)
 }
 
-// --- PING ---
 
 @(test)
 test_frame_ping_roundtrip :: proc(t: ^testing.T) {
@@ -40,7 +38,6 @@ test_frame_ping_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "expected Ping_Frame variant")
 }
 
-// --- ACK ---
 
 @(test)
 test_frame_ack_simple_roundtrip :: proc(t: ^testing.T) {
@@ -97,7 +94,6 @@ test_pn_space_ranges_and_ack_encode :: proc(t: ^testing.T) {
 	testing.expect_value(t, ack.ack_range_count, u64(1)) // plus [1,7]
 }
 
-// --- CRYPTO ---
 
 @(test)
 test_frame_crypto_roundtrip :: proc(t: ^testing.T) {
@@ -131,7 +127,6 @@ test_frame_crypto_offset :: proc(t: ^testing.T) {
 	testing.expect_value(t, crypto.offset, u64(12345))
 }
 
-// --- CONNECTION_CLOSE ---
 
 @(test)
 test_frame_connection_close_roundtrip :: proc(t: ^testing.T) {
@@ -152,7 +147,6 @@ test_frame_connection_close_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(cc.reason), "bad dreams")
 }
 
-// --- DATAGRAM ---
 
 @(test)
 test_frame_datagram_len_roundtrip :: proc(t: ^testing.T) {
@@ -187,7 +181,6 @@ test_frame_datagram_no_len :: proc(t: ^testing.T) {
 	testing.expect_value(t, dg.data[2], u8(0xcc))
 }
 
-// --- Error cases ---
 
 @(test)
 test_frame_decode_empty :: proc(t: ^testing.T) {
@@ -212,7 +205,6 @@ test_frame_decode_unknown_type :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, Frame_Error.Unknown_Type)
 }
 
-// --- Multi-frame buffer parsing (simulated packet payload) ---
 
 @(test)
 test_frame_decode_sequence :: proc(t: ^testing.T) {

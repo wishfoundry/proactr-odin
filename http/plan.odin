@@ -166,9 +166,7 @@ stream_responses_load :: proc() -> u64 {
 	return sync.atomic_load(&stream_responses_total)
 }
 
-// ---------------------------------------------------------------------------
 // Intent: body commands (POD)
-// ---------------------------------------------------------------------------
 
 // Semantic capabilities. Orthogonal to transport (writev/sendfile/etc).
 Body_Flag :: enum u8 {
@@ -200,9 +198,7 @@ Response_Cmd :: struct {
 	length: i64, // File: byte count; -1 = unknown / rest of file
 }
 
-// ---------------------------------------------------------------------------
 // Constraints (not syscalls)
-// ---------------------------------------------------------------------------
 
 // PUBLIC — advanced handlers may read only these semantic constraints.
 // No ring free, SQE budget, fixed_files, max_iovecs, or cipher flag here.
@@ -241,7 +237,6 @@ Plan_Policy :: struct {
 }
 
 // Host-private orthogonal axes (fill from conn/ALPN later; not app API).
-// Optional PR1 surface: derived sendfile/zc truth; not stored on Plan_Context.
 Conn_Cap :: enum u8 {
 	Ciphered,          // TLS / record path active
 	Multiplex,         // H2+ concurrent slots
@@ -439,9 +434,7 @@ body_middleware_apply :: proc(mw: Body_Middleware, user: rawptr, cmds: []Respons
 	return len(out)
 }
 
-// ---------------------------------------------------------------------------
 // Execution plan (private transport vocabulary)
-// ---------------------------------------------------------------------------
 
 Exec_Op_Kind :: enum u8 {
 	Write_Slice, // one contiguous buffer (today's pending_send)
@@ -475,7 +468,6 @@ PLAN_MAX_BODY_CMDS :: 32
 Plan_Result :: struct {
 	ops:           [PLAN_MAX_OPS]Exec_Op,
 	op_count:      int,
-	// True when planner chose single contiguous materialize (Write_Slice of header+body).
 	materialized:  bool,
 	// Sum of known body lengths; -1 if any body has unknown length.
 	total_body:    i64,
@@ -484,9 +476,7 @@ Plan_Result :: struct {
 	n_file:        int,
 }
 
-// ---------------------------------------------------------------------------
 // Command constructors (intent helpers)
-// ---------------------------------------------------------------------------
 
 cmd_static :: proc(data: []u8) -> Response_Cmd {
 	return Response_Cmd {
@@ -560,9 +550,7 @@ cmd_known_length :: proc(c: Response_Cmd) -> (n: i64, ok: bool) {
 	return -1, false
 }
 
-// ---------------------------------------------------------------------------
 // Planner policy (pure)
-// ---------------------------------------------------------------------------
 
 /*
 plan_body turns body commands + Plan_Policy into an execution plan.
@@ -801,7 +789,6 @@ mem_total :: proc(cmds: []Response_Cmd) -> i64 {
 	return total
 }
 
-// True when a non-empty Static/Bytes cmd appears after a File cmd.
 // Sendfile wire always streams file after all mem; that would reorder such sequences.
 @(private = "file")
 mem_follows_file :: proc(cmds: []Response_Cmd) -> bool {
@@ -820,7 +807,6 @@ mem_follows_file :: proc(cmds: []Response_Cmd) -> bool {
 }
 
 // plan_exec_kinds fills out with the op kind sequence; returns count.
-// Convenience for table tests.
 plan_exec_kinds :: proc(cmds: []Response_Cmd, ctx: Plan_Policy, out: []Exec_Op_Kind) -> int {
 	r := plan_body(cmds, ctx)
 	n := min(r.op_count, len(out))

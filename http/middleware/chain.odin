@@ -13,9 +13,7 @@ package middleware
 import http ".."
 import "base:runtime"
 
-// ---------------------------------------------------------------------------
 // from_fn / call_next
-// ---------------------------------------------------------------------------
 
 // Build a Handler from (req, res, next). Allocates with allocator.
 // next must outlive the returned Handler (Chain nodes or static storage).
@@ -34,9 +32,7 @@ call_next :: proc(next: ^http.Handler, req: ^http.Request, res: ^http.Response) 
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Layer — data + build proc (no closures; Odin-friendly)
-// ---------------------------------------------------------------------------
 
 // Setup-time layer: build(data, next) → wrapping Handler.
 // data is optional heap opts; chain_use auto-tracks non-nil data for free.
@@ -65,9 +61,7 @@ Tracked_Data :: struct {
 	free: proc(data: rawptr, allocator: runtime.Allocator),
 }
 
-// ---------------------------------------------------------------------------
 // Chain — onion stack with heap-stable Handler nodes
-// ---------------------------------------------------------------------------
 
 @(private)
 Tracked_Handler_Free :: struct {

@@ -1,7 +1,4 @@
 // Server host surface forked from laytan/odin-http.
-// proactr completion host: io_uring (Linux), kqueue (Darwin/BSD), IOCP (Windows ring; HTTP host POSIX/Linux).
-// Hardening: I/O backend host (server_io_uring / server_kqueue / server_iocp),
-// multishot accept where proactor, fixed files/bufs, conn slab.
 package http
 
 import "core:bufio"
@@ -28,14 +25,12 @@ import tls_server "../tls_server"
 H2_SLOT_CAP :: 8
 
 Server_Opts :: struct {
-	// Whether the server should accept every request that sends a "Expect: 100-continue" header automatically.
 	// Defaults to true.
 	auto_expect_continue: bool,
 	// When this is true, any HEAD request is automatically redirected to the handler as a GET request.
 	// Then, when the response is sent, the body is removed from the response.
 	// Defaults to true.
 	redirect_head_to_get: bool,
-	// Limit the maximum number of bytes to read for the request line (first line of request containing the URI).
 	// defaults to 8000.
 	limit_request_line:   int,
 	// Limit the length of the headers.
@@ -70,7 +65,6 @@ Server_Opts :: struct {
 	listen_backlog:       int,
 	// Connection slab grow quantum (records per chunk). 0 → CONN_CHUNK_SIZE (64).
 	conn_chunk_size:      int,
-	// Optional per-worker tick after each CQE batch (deferred work, async handlers).
 	// Runs on the worker thread with thread-local host state set (safe to respond).
 	on_worker_tick:       proc(user: rawptr),
 	worker_tick_user:     rawptr,
@@ -190,7 +184,6 @@ Server_Thread :: struct {
 	state:       Server_State,
 	// Listen socket (backend-owned: shared mirror or REUSEPORT fd).
 	listen_fd:          net.TCP_Socket,
-	// True when listen_fd is installed in fixed file slot 0 (use FIXED_FILE for accept).
 	listen_fixed:       bool,
 	// True while an accept SQE is outstanding on this worker's ring.
 	accept_pending:     bool,
@@ -271,7 +264,6 @@ HOST_LISTEN_BACKLOG :: 1024
 // Per-connection request scrap temp region (default for temp_slot_bytes).
 // Headers/parse only — response wire bytes live in Connection.resp_buf.
 // Sized generously for request scrap + embedded virtual.Memory_Block header
-// used by arena_init_buffer; not sized for large response bodies.
 @(private)
 HOST_REQ_TEMP_BYTES :: 4 * 1024 * 1024 + 512 * 1024
 
@@ -509,7 +501,6 @@ Connection :: struct {
 	// Nested wire bag: mem queue, iovecs, file region, in-flight kind (see Wire_State).
 	// Clear-H1 path still drives Wire_State; Plan A pipe bags below are not yet wired.
 	wire:           Wire_State,
-	// Plan A pipe bags (POD; clear-H1 still uses Wire_State for mem/file send).
 	// wire_conn is thin (~24 B); pure-pipe Seal_Queue / Tls_Pipe CT[2] only via
 	// connection_enable_ciphered_pipe_sm (firehose tests). Live TLS seal∥send uses
 	// dual_ct slabs (tls_host_on_accept) + connection_enable_ciphered (flag + plan_policy).
@@ -517,7 +508,6 @@ Connection :: struct {
 	wire_conn: Wire_Conn_State,
 	// tls: Tls_Pipe SM + host mem-BIO engine (opaque Conn; no SSL* public).
 	tls_pipe:  Tls_Pipe,
-	// True when TLS/cipher path is active for this conn (set by connection_enable_ciphered).
 	// plan_policy_for reads this: ciphered ⇒ no sendfile, max_write_unit = PULL_WINDOW_DEFAULT.
 	ciphered:  bool,
 	// Host-private TLS engine (0 / nil = clear). Opaque tls_server.Conn only.
@@ -608,9 +598,7 @@ Connection :: struct {
 	fixed_idx:      i32,
 	// Registered recv buffer index (>= 0) or -1.
 	reg_buf_index:  i32,
-	// True when scanner.buf is owned by the registered pool (do not delete on recycle).
 	scanner_pooled: bool,
-	// Optional phase timers (HTTP_PHASE_STATS).
 	phase:          Phase_Conn,
 }
 
@@ -654,7 +642,6 @@ _server_thread_main :: proc(s: ^Server, ttd: ^Server_Thread) {
 			}
 		}
 
-		// Optional registered recv pool (scanner windows). Non-fatal on failure.
 		if berr := proactr.ring_register_recv_pool(
 			&td.ring,
 			u32(s.opts.reg_buf_count),
@@ -1235,7 +1222,6 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	c.reactor_res_n = 0
 	c.reactor_h1 = false
 	c.reactor_fairness_yield = false
-	// Return any in-flight Stream slab before forgetting the pointer.
 	_stream_pool_abandon(c)
 	c.slot.stream_pin_armed = false
 

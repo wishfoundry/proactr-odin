@@ -8,7 +8,6 @@ import "../http2"
 // Sans-I/O: client.H2_Session looped against a server-role Http2_Connection
 // (same engine server.H2_Session wraps). Pattern matches examples/byo_h2_session
 // and tests/unit/server/session_h2_test.odin (mirrored roles).
-// Note: cannot import serverx from clientx tests — serverx tests already import
 // clientx (package cycle).
 @(test)
 test_h2_client_session_loopback_get :: proc(t: ^testing.T) {

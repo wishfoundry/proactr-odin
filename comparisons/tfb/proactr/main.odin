@@ -1,9 +1,5 @@
 // proactr TFB peer — size ladder + fortunes (sync or async SQLite).
 // Env:
-//   PORT, WORKERS, DATABASE_PATH
-//   FORTUNES_MODE=sync|async   (default sync)
-//   FORTUNES_SYNC_SHARED=1     (sync only: one conn + mutex like ntex; default is per-worker)
-//   DB_WORKERS                 (async only; default = WORKERS)
 package main
 
 import "core:fmt"

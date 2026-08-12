@@ -104,7 +104,6 @@ server_reactor_worker_loop :: proc(s: ^Server) {
 		client_work := client_bridge.has_work != nil && client_bridge.has_work()
 
 		if client_work {
-			// CRITICAL: min_complete=1 so platform kevent actually waits (0 returns immediately).
 			n_soft, werr := proactr.ring_wait(&td.ring, completions[:], 1, loop_wait)
 			if werr != .None {
 				log.errorf("ring_wait(client dual) error: %v", werr)

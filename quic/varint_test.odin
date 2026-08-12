@@ -5,7 +5,6 @@ import "core:testing"
 // RFC 9000 §A.1 — Sample Variable-Length Integer Decoding
 // The RFC gives four test cases, one for each encoding length:
 //   Bytes                            | Value
-//   ---------------------------------+--------------------
 //   0xc2 0x19 0x7c 0x5e 0xff 0x14 0xe8 0x8c | 151_288_809_941_952_652
 //   0x9d 0x7f 0x3e 0x7d                     | 494_878_333
 //   0x7b 0xbd                               | 15_293
@@ -58,7 +57,6 @@ test_varint_rfc9000_a1_alt_2byte :: proc(t: ^testing.T) {
 	testing.expect_value(t, value, u64(37))
 }
 
-// --- Encoding selects minimal length ---
 
 @(test)
 test_varint_encode_1byte_boundary :: proc(t: ^testing.T) {
@@ -90,7 +88,6 @@ test_varint_encode_8byte_boundary :: proc(t: ^testing.T) {
 	testing.expect_value(t, varint_encode(buf[:], VARINT_MAX), 8)
 }
 
-// --- Roundtrip ---
 
 @(test)
 test_varint_roundtrip :: proc(t: ^testing.T) {
@@ -113,7 +110,6 @@ test_varint_roundtrip :: proc(t: ^testing.T) {
 	}
 }
 
-// --- Length helpers ---
 
 @(test)
 test_varint_len_matches_encode :: proc(t: ^testing.T) {
@@ -126,7 +122,6 @@ test_varint_len_matches_encode :: proc(t: ^testing.T) {
 	}
 }
 
-// --- Overflow detection ---
 
 @(test)
 test_varint_encode_out_of_range :: proc(t: ^testing.T) {

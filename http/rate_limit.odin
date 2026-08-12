@@ -24,7 +24,6 @@ Rate_Limit_Opts :: struct {
 	// Zero policies + !disabled → default peer IP 100/s.
 	policies: []Policy,
 
-	// Optional host-owned store. nil → middleware creates/destroys.
 	store: ^Store,
 
 	capacity:    int, // 0 → 65_536; ignored if store != nil
@@ -76,7 +75,6 @@ Rate_Limit_State :: struct {
 
 // Manual wrap. Caller keeps next alive. Destroy with rate_limit_destroy.
 // Invalid opts (limit=0, bad capacity/shards) assert in debug; production build
-// returns a disabled pass-through if state build fails after free.
 rate_limit :: proc(opts: Rate_Limit_Opts, next: ^Handler, allocator := context.allocator) -> Handler {
 	assert(next != nil)
 	st, ok := _rate_limit_state_build(opts, next, allocator)

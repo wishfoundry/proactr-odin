@@ -6,9 +6,7 @@ import "core:log"
 import http2 "../http2"
 import tls_server "../tls_server"
 
-// ---------------------------------------------------------------------------
 // Flush / send-complete
-// ---------------------------------------------------------------------------
 
 // Unsealed plaintext still waiting in h2_out (after h2_out_off).
 // Defensive: if a caller cleared h2_out without resetting the cursor (tests /
@@ -215,7 +213,6 @@ h2_host_flush_out :: proc(conn: ^Connection) {
 }
 
 // h2_host_on_send_complete: after CT buffer delivered. Continue flush; re-arm recv.
-// Returns true if handled (caller skips H1 clean path).
 // Darwin reactor residual CQE is handled earlier via reactor_on_send_complete.
 // This path is dual-CT promote (Linux) or offline tests (nil SSL / no reactor_h1).
 @(private)
@@ -260,9 +257,7 @@ h2_host_on_send_complete :: proc(conn: ^Connection) -> bool {
 	return true
 }
 
-// ---------------------------------------------------------------------------
 // Exchange complete / slot map (multi-sid)
-// ---------------------------------------------------------------------------
 
 // h2_host_conn_drained: no outbound frames / ready CT / ring send holding the pipe.
 @(private)

@@ -1,15 +1,10 @@
 // Pipe POD + seal∥send physics (Plan A R4–PR5 foundation).
 // Pure admission, CT double-buffer, dual high-water, and mock-seal driver —
-// no OpenSSL, no ring, no clear-H1 Wire_State hot path. Real SSL_write plugs
-// later via Cipher_Seal_Fn. Cipher engine (SSL*) never lives here.
-// Conn_Cap / Conn_Caps already defined in plan.odin (orthogonal axes).
 package http
 
 import "base:runtime"
 
-// ---------------------------------------------------------------------------
 // Pipe POD constants (peer-measured defaults; not public Plan_Context knobs)
-// ---------------------------------------------------------------------------
 
 // Max plaintext produce per unit from Static/Bytes/File into Conn_Pt_Ring.
 // Pure firehose / pipe SM use this; live TLS bulk uses TLS_SEAL_WINDOW_DEFAULT.
@@ -63,9 +58,7 @@ SEAL_N_MAX :: CT_SLOTS
 // Firehose CI: peak > FIREHOSE_PEAK_MULT × high-water → fail (detector, not soft warn).
 FIREHOSE_PEAK_MULT :: 4
 
-// ---------------------------------------------------------------------------
 // Seal pipeline SM (normative — not bare sock_send_inflight alone under TLS bulk)
-// ---------------------------------------------------------------------------
 
 Seal_SM :: enum u8 {
 	Idle,            // no CT sealed, socket free
@@ -74,9 +67,7 @@ Seal_SM :: enum u8 {
 	Send_And_Sealed, // sock send + second CT ready
 }
 
-// ---------------------------------------------------------------------------
 // Fairness unit + wire_conn schedule bag (Law D4 / S1)
-// ---------------------------------------------------------------------------
 
 // Identity for fair schedule — gen for ABA; frame_id private (never app-visible).
 Seal_Unit :: struct {
@@ -108,9 +99,7 @@ Wire_Conn_State :: struct {
 	q:                  ^Seal_Queue, // nil until Phase 2 ciphered/multiplex alloc
 }
 
-// ---------------------------------------------------------------------------
 // Conn-level PT admission (first-class; must-alias seal input — Law PT1)
-// ---------------------------------------------------------------------------
 
 // Single admission point for plaintext under bulk / multiplex.
 // Per-slot growable staging is FORBIDDEN as the bulk path.
@@ -121,9 +110,7 @@ Conn_Pt_Ring :: struct {
 	// fixed slab bookkeeping (free list of slab indices) — later PR
 }
 
-// ---------------------------------------------------------------------------
 // CT double-buffer storage (fixed slabs; never growable multi-MiB)
-// ---------------------------------------------------------------------------
 
 // Ownership of one CT slab: free → sealing (holds sealed CT) → sending → free.
 Ct_Slot_Own :: enum u8 {
@@ -132,7 +119,6 @@ Ct_Slot_Own :: enum u8 {
 	Sending, // view submitted; wait CQE before recycle
 }
 
-// Companion CT storage for Tls_Pipe. Allocated by tls_pipe_alloc_buffers;
 // not embedded multi-MiB on free-list Connection.
 Tls_Pipe_Buffers :: struct {
 	ct:        [CT_SLOTS][]u8,
@@ -141,9 +127,7 @@ Tls_Pipe_Buffers :: struct {
 	ct_pt_len: [CT_SLOTS]u32, // PT bytes sealed into this slot (pt_release on complete)
 }
 
-// ---------------------------------------------------------------------------
 // Tls_Pipe POD skeleton (no SSL*, no OpenSSL link)
-// ---------------------------------------------------------------------------
 
 Tls_Pipe_State :: enum u8 {
 	Handshake,
@@ -172,9 +156,7 @@ Tls_Pipe :: struct {
 	// PT: do not store a second window — alias Conn_Pt_Ring views at seal time
 }
 
-// ---------------------------------------------------------------------------
 // Peak meters + firehose detector (Phase 2 CI gate)
-// ---------------------------------------------------------------------------
 
 Pipe_Meters :: struct {
 	peak_pt_admitted: u32,
@@ -185,9 +167,7 @@ Pipe_Meters :: struct {
 	ct_hw_hits:       u64,
 }
 
-// ---------------------------------------------------------------------------
 // Mock / real seal callback (identity mock for pure tests; SSL_write later)
-// ---------------------------------------------------------------------------
 
 // Seal PT into CT destination. Mock: identity copy. Real: SSL_write / record batch.
 // n_ct is ciphertext bytes written; ok=false on hard fail (not WANT_*).
@@ -212,9 +192,7 @@ Pipe_Seal_Result :: struct {
 	pt_used: u32,  // PT bytes consumed when Ok
 }
 
-// ---------------------------------------------------------------------------
 // Pure helpers — free-order + admission laws (unit-testable, no I/O)
-// ---------------------------------------------------------------------------
 
 // pt_ring_init sets high_water (0 → PT_HIGH_WATER_DEFAULT) and clears admitted.
 pt_ring_init :: proc(pt: ^Conn_Pt_Ring, high_water: u32 = 0) {
@@ -686,7 +664,6 @@ pipe_seal_step :: proc(
 }
 
 // pipe_mark_send arms sock send for a Sealing CT slot (socket send ∈ {0,1}).
-// Returns false if socket already inflight or slot not Sealing.
 pipe_mark_send :: proc(pipe: ^Tls_Pipe, slot: u8, meters: ^Pipe_Meters = nil) -> bool {
 	if pipe.bufs == nil {
 		return false
@@ -713,7 +690,6 @@ pipe_mark_send :: proc(pipe: ^Tls_Pipe, slot: u8, meters: ^Pipe_Meters = nil) ->
 
 // pipe_on_send_complete: recycle CT after send CQE.
 // seal_n--, ct_release, pt_release for PT held by that slot, clear sock_send_inflight.
-// Returns PT bytes released (caller may already track).
 pipe_on_send_complete :: proc(
 	pipe:   ^Tls_Pipe,
 	pt:     ^Conn_Pt_Ring,

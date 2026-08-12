@@ -2,7 +2,6 @@ package quic
 
 import "core:testing"
 
-// --- STREAM frame encode/decode ---
 
 @(test)
 test_stream_frame_encode_minimal :: proc(t: ^testing.T) {
@@ -75,7 +74,6 @@ test_stream_frame_empty_with_fin :: proc(t: ^testing.T) {
 	testing.expect_value(t, sf.offset, u64(100))
 }
 
-// --- Flow control frame decoders ---
 
 @(test)
 test_max_stream_data_frame :: proc(t: ^testing.T) {
@@ -131,7 +129,6 @@ test_stream_frame_truncated :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, Frame_Error.Truncated)
 }
 
-// --- Stream state machine ---
 
 @(test)
 test_stream_write_and_read :: proc(t: ^testing.T) {

@@ -1,8 +1,5 @@
 // Package hpack: RFC 7541 HPACK for HTTP/2. Full decoder (static + dynamic
 // table, all literal forms, size updates, Huffman). Encoder supports an optional
-// HPackEncoder with a dynamic table (Indexed / incremental / never-indexed);
-// without it, behaviour is static-only for tests and simple call sites.
-// Header type is shared with QPACK/H3 (package httpfield).
 package hpack
 
 import "core:mem"
@@ -33,7 +30,6 @@ Hpack_Error :: enum {
 	List_Too_Large,  // decoded header list exceeded max_list_size budget
 }
 
-// ---- Dynamic table (RFC 7541 §2.3.2) — ring buffer, O(1) insert/get/evict ----
 
 // Ring: index 0 on the wire-relative scale is the most recently inserted entry.
 // Physical slot of relative r is (head - r) mod capacity.
@@ -179,7 +175,6 @@ get :: proc(dt: ^HPackDynamicTable, rel_index: int) -> (Header, bool) {
 	return ring_at(dt, rel_index), true
 }
 
-// ---- Static table (RFC 7541 Appendix A), 1-indexed on the wire -------------
 
 HPACK_STATIC_LEN :: 61
 
@@ -257,7 +252,6 @@ table_get :: proc(dt: ^HPackDynamicTable, index: int) -> (Header, bool) {
 	return get(dt, di)
 }
 
-// ---- String literals (RFC 7541 §5.2) — 7-bit length prefix, H bit on top ---
 
 @(private = "file")
 encode_string :: proc(dst: ^[dynamic]u8, s: string, use_huffman: bool) {
@@ -323,9 +317,7 @@ decode_string :: proc(
 	return strings.clone(string(raw), allocator), consumed, .None
 }
 
-// ---- Encoder ---------------------------------------------------------------
 
-// Optional encoder state: mirrors what the peer decoder will see after our
 // incremental-indexing emissions. When nil is passed to encode, behaviour is
 // static-only (Literal Without Indexing for non-static pairs).
 HPackEncoder :: struct {
@@ -474,7 +466,6 @@ find_name :: proc(dt: ^HPackDynamicTable, name: string) -> (index: int, ok: bool
 	return 0, false
 }
 
-// ---- Decoder ---------------------------------------------------------------
 // Full: indexed, all literal forms, and dynamic table size updates. Maintains
 // `dt` so the peer's incremental-indexing stays in sync. Appends decoded
 // headers to `out`; strings are allocated from `allocator` except borrowed

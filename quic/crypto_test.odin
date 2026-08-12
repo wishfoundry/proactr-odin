@@ -110,7 +110,6 @@ test_crypto_rfc9001_a1_server_hp :: proc(t: ^testing.T) {
 		"server hp mismatch vs RFC 9001 §A.1")
 }
 
-// --- test helper ---
 
 @(private)
 slice_equal :: proc(a, b: []u8) -> bool {

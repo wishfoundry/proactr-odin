@@ -13,7 +13,7 @@ import "core:sys/linux"
 // Max SQ entries we request (kernel may clamp further with CLAMP).
 MAX_ENTRIES :: 4096
 
-// Setup flags for v1 (see docs/PROACTR_RING.md).
+// Setup flags for v1 (see docs/PROACTR.md).
 // Prefer one-issuer + deferred taskrun when the kernel supports them; fall back.
 _SETUP_FLAG_SETS := [?]linux.IO_Uring_Setup_Flags{
 	{.CLAMP, .SINGLE_ISSUER, .COOP_TASKRUN, .DEFER_TASKRUN},
@@ -264,7 +264,6 @@ _ring_destroy_platform :: proc(r: ^Ring) {
 	}
 }
 
-// --- Registration (Linux public API; sole home for these symbols) -----------
 // REGISTER_FILES / REGISTER_BUFFERS. Non-Linux: registration_stub.odin.
 
 // Max fixed-file table size (clamped to RLIMIT_NOFILE − headroom at init).
@@ -320,7 +319,6 @@ _files_update :: proc(r: ^Ring, offset: u32, fd: i32) -> Error {
 		return .Invalid_Op
 	}
 	// Keep local mirror in sync before/after kernel update.
-	// Note: IORING_REGISTER_FILES_UPDATE returns the number of fds updated
 	// (positive) on success — not 0. core:sys/linux.io_uring_register maps
 	// ret → Errno(-ret), so a successful update of 1 fd looks like an error.
 	// Use the raw syscall and treat ret >= 0 as success.
@@ -435,7 +433,6 @@ ring_recv_buf_slice :: proc(r: ^Ring, index: i32) -> []u8 {
 	return r.impl.recv_pool[off:off + bs]
 }
 
-// --- SQE acquisition / prep -------------------------------------------------
 
 _get_sqe :: proc(r: ^Ring) -> (sqe: ^linux.IO_Uring_SQE, err: Error) {
 	impl := &r.impl
@@ -548,7 +545,6 @@ _prep_poll_out :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 SENDFILE_DRIVE_CAP :: u64(1 << 20) // 1 MiB
 
 // One sendfile(2) attempt. Updates op.offset and op.nbytes on progress.
-// Returns (bytes, again=EAGAIN) or (-errno, false). again with n=0.
 _sendfile_once :: proc(op: ^Operation) -> (n: i32, again: bool) {
 	if op.nbytes == 0 {
 		return 0, false
@@ -581,7 +577,6 @@ _sendfile_once :: proc(op: ^Operation) -> (n: i32, again: bool) {
 // Drive sendfile until: error, EAGAIN with no progress, full region done, or
 // SENDFILE_DRIVE_CAP bytes transferred this issue (yield via soft_cq so host
 // can advance and the ring can service other conns).
-// Returns (total_bytes_or_neg_errno, need_poll).
 _sendfile_drive :: proc(op: ^Operation) -> (result: i32, need_poll: bool) {
 	total: i32 = 0
 	// Cap iterations so a pathological partial-1-byte loop cannot spin forever.
@@ -684,7 +679,6 @@ _submit_sendfile :: proc(r: ^Ring, id: u32, op: ^Operation) -> Error {
 	return _sendfile_issue(r, id, op)
 }
 
-// --- Submit / wait / peek ---------------------------------------------------
 
 // Push local SQE range into the kernel SQ ring array; return pending count.
 _flush_sq :: proc(r: ^Ring) -> u32 {

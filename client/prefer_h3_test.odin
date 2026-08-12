@@ -107,7 +107,6 @@ test_prefer_h3_falls_back_to_tcp_when_quic_fails :: proc(t: ^testing.T) {
 		thread.destroy(th)
 	}
 
-	// Closed UDP is not needed: prefer_h3 dials QUIC to same host:port where only TCP listens → fail → TLS.
 	url := fmt.tprintf("https://127.0.0.1:%d/", ep.port)
 	res: Response
 	err: Http_Error = .Connect_Failed
@@ -131,7 +130,6 @@ test_prefer_h3_falls_back_to_tcp_when_quic_fails :: proc(t: ^testing.T) {
 	}
 	defer response_destroy(&res)
 	testing.expect_value(t, err, Http_Error.None)
-	// Fallback is TCP TLS H1 (ALPN h1-only server).
 	testing.expect_value(t, res.version, ProtocolVersion.Http1)
 	testing.expect_value(t, string(res.body[:]), "ok")
 }

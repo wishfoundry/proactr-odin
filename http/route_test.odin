@@ -272,8 +272,6 @@ test_builder_get_fn_root :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 
 // Status-only handlers for unit tests (default 404/405 call respond → need conn).
 @(private)

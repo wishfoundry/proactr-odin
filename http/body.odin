@@ -95,7 +95,6 @@ body_url_encoded :: proc(plain: Body, allocator := context.temp_allocator) -> (r
 	return queries, true
 }
 
-// Returns an appropriate status code for the given body error.
 body_error_status :: proc(e: Body_Error) -> Status {
 	switch t in e {
 	case bufio.Scanner_Extra_Error:
@@ -290,7 +289,6 @@ _body_chunked :: proc(req: ^Request, max_length: int = -1, user_data: rawptr, cb
 			return
 		}
 
-		// A recipient MUST ignore (or consider as an error) any fields that are forbidden to be sent in a trailer.
 		if !header_allowed_trailer(key) {
 			log.infof("Invalid trailer header received, discarding it: %q", key)
 			headers_delete(&s.req.headers, key)

@@ -5,9 +5,7 @@ import "core:log"
 
 import tls_server "../tls_server"
 
-// ---------------------------------------------------------------------------
 // Ciphered oneshot plain cursor: heading (tls_plain_rest) then borrowed body.
-// ---------------------------------------------------------------------------
 
 // Total remaining plain bytes across rest + body parts.
 @(private)

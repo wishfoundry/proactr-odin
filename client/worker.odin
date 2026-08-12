@@ -45,7 +45,6 @@ worker_uninstall :: proc() {
 	http_worker_active = false
 }
 
-// ---- Slot job list (intrusive singly-linked via Client_Job.slot_next) --------
 
 // job_link_slot binds job to exchange; snapshots exchange_epoch.
 job_link_slot :: proc(job: ^Client_Job, slot: ^http.Stream_Slot) {
@@ -149,7 +148,6 @@ _bridge_on_cqe :: proc(ring: rawptr, c: proactr.Completion, op: ^proactr.Operati
 	return true
 }
 
-// True when worker runtime has in-flight outbound ops (Darwin dual-wait gate).
 @(private)
 _bridge_has_work :: proc() -> bool {
 	if !_worker_rt_installed || !_worker_rt.inited {

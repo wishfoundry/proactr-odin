@@ -16,7 +16,6 @@ Client_Bridge :: struct {
 	// If true, client applied the CQE and freed the op when not Submitted.
 	// Host must not host_dispatch or op_free.
 	on_cqe:          proc(ring: rawptr, c: proactr.Completion, op: ^proactr.Operation) -> bool,
-	// True when outbound client has in-flight proactr ops (Darwin dual-wait).
 	has_work:        proc() -> bool,
 	// Cancel all outbound jobs bound to this exchange (slot is ^Stream_Slot).
 	cancel_slot:     proc(slot: rawptr, exchange_gone: bool),

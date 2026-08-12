@@ -14,9 +14,7 @@ import "core:time"
 //   • Many sequential transfers (leak / state reset)
 //   • Handshake rate smoke (timed, non-failing bound)
 
-// ---------------------------------------------------------------------------
 // Shuttle: deliver all pending packets both ways until idle (ACK pump).
-// ---------------------------------------------------------------------------
 
 @(private)
 _shuttle_once :: proc(a, b: ^Conn, pkt: []u8) -> (moved: bool) {
@@ -60,7 +58,6 @@ _shuttle_until_idle :: proc(client, server: ^Conn, max_iters := 100_000) -> int 
 }
 
 // Transfer `size` bytes client→server on stream 0 with full ACK pumping.
-// Returns (ok, wall duration, bytes read on server).
 @(private)
 _bulk_transfer_c2s :: proc(
 	client, server: ^Conn,
@@ -144,9 +141,7 @@ _bulk_transfer_c2s :: proc(
 	return
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 @(test)
 test_suite_bulk_64kib_with_ack_pump :: proc(t: ^testing.T) {

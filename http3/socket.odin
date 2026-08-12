@@ -1,8 +1,5 @@
 // ADAPTER — real-UDP-socket pumps for a quic.Conn.
 // Not library core: these two procs move bytes between conn and conn.socket.
-// Your event loop (blocking, nbio, fibers, …) can call them — or replace them
-// entirely by reading/writing UDP yourself and calling quic.conn_on_udp_recv /
-// packet builders. See docs/LIBRARY.md.
 package http3
 
 import "core:net"

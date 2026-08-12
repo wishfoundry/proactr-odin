@@ -74,7 +74,6 @@ main :: proc() {
 	}
 }
 
-// --- path discovery ----------------------------------------------------------
 
 path_join :: proc(parts: ..string) -> string {
 	s, _ := filepath.join(parts, context.temp_allocator)

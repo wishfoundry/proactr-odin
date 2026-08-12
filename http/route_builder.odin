@@ -9,9 +9,7 @@ import "core:strings"
 
 import proactr "../proactr"
 
-// ---------------------------------------------------------------------------
 // Layer (re-homed in package http; middleware adapts into this)
-// ---------------------------------------------------------------------------
 
 // Setup-time layer: build(data, next) → wrapping Handler.
 // free_data: free Layer.data (opts shell); nil → free(data) only when tracked.
@@ -24,9 +22,7 @@ Layer :: struct {
 	free_built: proc(h: ^Handler, allocator: runtime.Allocator),
 }
 
-// ---------------------------------------------------------------------------
 // Builder_Error
-// ---------------------------------------------------------------------------
 
 Builder_Error_Kind :: enum {
 	None,
@@ -80,9 +76,7 @@ builder_error_format :: proc(e: Builder_Error, allocator := context.allocator) -
 	return fmt.aprintf("%v", e.kind, allocator = allocator)
 }
 
-// ---------------------------------------------------------------------------
 // Builder tree
-// ---------------------------------------------------------------------------
 
 @(private)
 _Builder_Route :: struct {
@@ -352,9 +346,7 @@ builder_method_not_allowed :: proc(b: ^Builder, h: Handler) {
 	b._status_set = true
 }
 
-// ---------------------------------------------------------------------------
 // Expand
-// ---------------------------------------------------------------------------
 
 builder_expand :: proc(b: ^Builder, allocator := context.allocator) -> (table: Match_Table, err: Builder_Error) {
 	table.allocator = allocator
@@ -560,11 +552,8 @@ _wrap_layers :: proc(layers: []Layer, terminal: Handler, table: ^Match_Table) ->
 	return cur^
 }
 
-// ---------------------------------------------------------------------------
 // listen_builder — canonical product boot
-// ---------------------------------------------------------------------------
 
-// Returns two values always.
 // On expand failure: no listen, err == .None, build_err.kind != .None.
 // On listen failure after successful expand: build_err.kind == .None, err is host error.
 // On clean return from serve: both .None.

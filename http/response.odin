@@ -19,7 +19,6 @@ Response :: struct {
 	// If the response has been sent.
 	sent:             bool,
 
-	// NOTE: use `http.response_status` if the response body might have been set already.
 	status:           Status,
 
 	// Only for internal usage.
@@ -592,9 +591,7 @@ _http_write_chunk_end :: proc(b: ^bytes.Buffer) {
 	bytes.buffer_write_string(b, "0\r\n\r\n")
 }
 
-// ---------------------------------------------------------------------------
 // Phase 5 + D0: Response_Stream — chunked bodies with progressive multi-CQE flush
-// ---------------------------------------------------------------------------
 // Streaming is a different lifetime from the body command planner (G5):
 //   headers / status (mutable) → response_begin_stream → stream_write* → stream_end
 // Body middleware does NOT run on stream data. Any rewrite of body intent must
@@ -1127,7 +1124,6 @@ _response_format_heading :: proc(r: ^Response, content_length: int, out: []byte)
 }
 
 // Like _response_format_heading but with fixed-width zero CL for body_reserve.
-// Returns (bytes written, offset of first CL digit or -1).
 @(private)
 _response_format_heading_reserved :: proc(r: ^Response, out: []byte) -> (hlen: int, cl_off: int) {
 	return _response_format_heading_ex(r, 0, out, cl_placeholder = true)
@@ -1218,7 +1214,6 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 	}
 	assert(!r._session_attached && ex.session == nil, "session attached; cannot respond", loc)
 	assert(!ex.stream_open || r._stream_ended, "progressive stream open; use stream_end", loc)
-	// Note: on_respond hooks fire in response_send_got_body after body discard
 	// may adjust status — so access logs see the status that will hit the wire.
 	r.sent = true
 
@@ -1260,7 +1255,6 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 	}
 }
 
-// True when this response is for a HEAD (or redirect_head_to_get synthetic GET).
 @(private)
 _response_is_head :: proc(conn: ^Connection) -> bool {
 	if conn.loop.req.is_head {
@@ -1287,7 +1281,6 @@ _response_strip_body_keep_heading :: proc(r: ^Response) {
 	// Malformed / empty: leave buffer alone rather than invent a strip point.
 }
 
-// True when wire send may use plan_body (Writev multi-buffer / Sendfile stream)
 // instead of materialize-only.
 // Safe default false: Server_Opts.plan_optimize opt-in (Default_Server_Opts = false).
 // Also true per-request when Handler_Profile.prefer_gather or prefer_sendfile is set —
@@ -1369,7 +1362,6 @@ _cmds_mem_body_len :: proc(cmds: []Response_Cmd) -> (body_len: int, ok: bool) {
 // Phase 3 Writev wire: heading in resp_buf; body slices borrowed from cmds.
 // Prefers Linux IORING_OP_WRITEV (plan_wire_kernel_writev); falls back to sequential
 // multi-buffer submit_send (plan_wire_multi_send) when kernel path is unavailable.
-// Returns true if the send was submitted (or cleaned for empty). Caller must not
 // also materialize. On false, heading was not written — caller may materialize.
 // LIFETIME: body slices are NOT copied. Data behind Static/Bytes must remain valid
 // until the final send CQE (after respond returns). Safe: string literals, #load,
@@ -1476,7 +1468,6 @@ _response_send_writev :: proc(r: ^Response, cmds: []Response_Cmd) -> bool {
 // or chunked pread+send of the file region. Does NOT load the full file into resp_buf.
 // Counters: plan_wire_sendfile (kernel) or plan_wire_copy_into (chunked fallback),
 // plus kernel_writev/multi_send when a mem prefix is gathered.
-// Returns true if path handled the response (submitted / cleaned / closed).
 // false → heading not written; caller may materialize.
 // Ownership: File fd in cmds must stay open until final CQE (handler/app owns fd).
 @(private)

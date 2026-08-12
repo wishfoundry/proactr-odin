@@ -1,7 +1,5 @@
 // - Always: lightweight connection_enable_ciphered + pipe firehose path stays green (no OpenSSL).
 // - With OpenSSL: server_tls_init loads PEMs into shared SSL_CTX; conn_new + mem-BIO smoke.
-// - Full HTTPS e2e (curl) is manual — see docs/ARCHITECTURE.md.
-// Run: odin test http -define:ODIN_TEST_THREADS=1
 package http
 
 import "core:testing"
@@ -400,8 +398,6 @@ test_tls_stream_dual_ct_plain_n_bookkeeping :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.tls_stream_plain_n, 0)
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 
 @(test)
 test_tls_host_stream_long_lived_gates_clean :: proc(t: ^testing.T) {

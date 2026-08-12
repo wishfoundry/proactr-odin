@@ -35,8 +35,6 @@ h2_host_emit_goaway_and_close :: proc(conn: ^Connection, feed_err: http2.H2_Erro
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 
 // h2_host_on_server_closing: once when Server.closing is observed for this conn.
 // Writes GOAWAY(last_peer_sid, NO_ERROR) once; existing streams (incl. SSE) continue;

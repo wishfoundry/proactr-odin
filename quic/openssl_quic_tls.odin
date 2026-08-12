@@ -181,7 +181,6 @@ _map_prot_level :: proc(prot_level: u32) -> (Encryption_Level, bool) {
 	return .Initial, false
 }
 
-// --- OSSL_DISPATCH callbacks ---
 
 @(private)
 _ossl_crypto_send :: proc "c" (

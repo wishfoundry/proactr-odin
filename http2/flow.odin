@@ -1,21 +1,5 @@
 // HTTP/2 outbound flow control (RFC 9113 §6.9) — the streaming response path.
 // DATA a peer will accept is bounded by two send windows: a per-stream window
-// and a single connection-level window, each advertised initially and grown by
-// WINDOW_UPDATE frames. A handler streaming a large body therefore cannot just
-// dump bytes; it produces into `stream.pending`, and `_flush_stream` emits only
-// as many DATA frames as min(stream window, conn window, max frame) allows. When
-// a WINDOW_UPDATE later arrives (see conn_feed → FRAME_WINDOW_UPDATE), the
-// buffer drains further. This is the kernel of async backpressure: the write
-// side (the handler) and the read side (WINDOW_UPDATE) meet here.
-// Hosts use `conn_send_body` as a streaming sink; its return value is the
-// backpressure signal (how many bytes are still buffered) used to pause the
-// producer until WINDOW_UPDATE arrives.
-// Bulk perf: unread body is tracked with `pending_off` (cursor). Advancing the
-// cursor is O(1); remove_range(front) was O(n) memmove per DATA frame and
-// dominated H2 s1m CPU on bastion (~72% memmove).
-// Item 5 micros: pre-reserve framed `dst` / pending; sole-stream partial direct
-// DATA from the caller slice (avoids double-buffer of the portion that fits
-// windows now); single-copy frame_write (see frame.odin).
 package http2
 
 import "core:slice"

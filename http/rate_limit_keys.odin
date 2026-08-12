@@ -4,7 +4,6 @@ package http
 import "core:net"
 import "core:strings"
 
-// Returns ok=false → policy on_miss applies.
 Key_Fn :: proc(req: ^Request, user: rawptr) -> (key: u64, ok: bool)
 
 Key_Miss :: enum u8 {
@@ -258,7 +257,6 @@ xff_client_address :: proc(xff: string, trusted: []Cidr) -> (net.Address, bool) 
 	return nil, false
 }
 
-// --- hashing / IP helpers ---------------------------------------------------
 
 hash_net_address :: proc(addr: net.Address) -> u64 {
 	switch a in addr {

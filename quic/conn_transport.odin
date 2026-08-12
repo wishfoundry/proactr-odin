@@ -152,7 +152,6 @@ _send_pending_handshake :: proc(conn: ^Conn) -> Transport_Error {
 	return .None
 }
 
-// --- Post-handshake send/recv helpers ---
 
 // Ship one zenoh frame as a DATAGRAM over the connected UDP socket.
 conn_udp_send_datagram :: proc(conn: ^Conn, data: []u8) -> Transport_Error {

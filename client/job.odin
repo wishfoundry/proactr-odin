@@ -85,7 +85,6 @@ Client_Job :: struct {
 	content_length:  int, // -1 = until close; >=0 = fixed
 	// Result ownership only (headers/body clones). Wire buffers use runtime.allocator.
 	allocator:       mem.Allocator,
-	// ---- TLS mem-BIO (use_tls) ----
 	use_tls:           bool,
 	ssl:               rawptr, // OpenSSL SSL*; BIOs owned via SSL_set_bio
 	insecure:          bool,
@@ -103,7 +102,6 @@ Client_Job :: struct {
 	h2:                H2_Session,
 	h2_started:        bool,
 	h2_sid:            u32,
-	// ---- HTTP/3 / QUIC
 	// Dial residual may sleep in quic.conn_connect; post-connect drive has no sleep.
 	use_h3:              bool,
 	quic:                ^quic.Conn,

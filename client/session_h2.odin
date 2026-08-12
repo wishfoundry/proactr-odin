@@ -1,16 +1,5 @@
 // Mirror of server.H2_Session on the client side: you own the byte stream
 // (TLS, pipe, SSH, …). Feed peer bytes, drain `session.out`, open streams with
-// send_request, poll take_response. No sockets or threads.
-// Pull-based state machine (typical non-blocking host):
-//   1. h2_client_session_init        — preface + SETTINGS into out
-//   2. write(fd, session.out); clear
-//   3. h2_client_session_send_request — HEADERS[+DATA] into out
-//   4. write(fd, session.out); clear
-//   5. on readable: h2_client_session_feed(inbound)  // ACKs/WINDOW_UPDATE → out
-//   6. write any out; if take_response(sid) → done
-// Blocking io.Stream drivers (client.request) still work; this type is for
-// embedders that want feed/poll without owning http2.Http2_Connection directly.
-// See docs/LIBRARY.md.
 package client
 
 import "../http2"
@@ -57,7 +46,6 @@ h2_client_session_goaway :: proc(s: ^H2_Session, error_code: u32 = 0) {
 
 // Open a new client stream and enqueue HEADERS [+ DATA] on s.out.
 // Pseudo-headers are built from `req` (method, scheme, authority, path).
-// Returns the stream id (1, 3, 5, …). Flush s.out after calling.
 h2_client_session_send_request :: proc(
 	s: ^H2_Session, req: ^Request, allocator := context.allocator,
 ) -> u32 {
@@ -100,7 +88,6 @@ h2_client_session_response :: proc(
 }
 
 // Fully-received response for `sid`, copied into a client.Response.
-// Returns ok=false if the stream is not yet complete.
 h2_client_session_take_response :: proc(
 	s: ^H2_Session, sid: u32, allocator := context.allocator,
 ) -> (res: Response, ok: bool) {

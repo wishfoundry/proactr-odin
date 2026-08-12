@@ -1,6 +1,5 @@
 // Shared ordered header field for HPACK (H2) and QPACK (H3).
 // One wire-facing type: name/value + ownership flags for safe destroy.
-// Not the same as package http's map-based Headers (H1 request/response access).
 package httpfield
 
 import "core:strings"

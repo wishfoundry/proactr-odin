@@ -13,7 +13,6 @@ import "../qpack"
 
 // Which protocol a request runs over.
 // Auto = TLS ALPN h2|http/1.1 (client toolkit default). Http3 = QUIC (explicit).
-// Optional client follow_alt_svc can upgrade Auto via cached Alt-Svc h3.
 // Forced Http1/Http2 must match ALPN.
 ProtocolVersion :: enum {
 	Auto,

@@ -30,6 +30,5 @@ test_conn_poll_send_no_crash :: proc(t: ^testing.T) {
 		if len(packet) > 0 do c^ += 1
 	}
 	conn_poll_send(conn, emit, &count)
-	// Optional Initial flight depending on when ClientHello is buffered.
 	testing.expect(t, count >= 0)
 }

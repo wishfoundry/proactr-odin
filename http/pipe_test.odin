@@ -1,13 +1,10 @@
 // Pure unit tests for pipe POD + seal∥send physics (Plan A R4–PR5).
 // No OpenSSL, no sockets, no ring — laws + mock-seal bulk sim only.
-// Run: odin test http -o:none
 package http
 
 import "core:testing"
 
-// ---------------------------------------------------------------------------
 // Constants sanity
-// ---------------------------------------------------------------------------
 
 @(test)
 test_pipe_pod_constants :: proc(t: ^testing.T) {
@@ -30,9 +27,7 @@ test_pipe_pod_constants :: proc(t: ^testing.T) {
 	testing.expect_value(t, TLS_RECORD_BATCH_TARGET * TLS_RECORD_PLAIN, PULL_WINDOW_DEFAULT)
 }
 
-// ---------------------------------------------------------------------------
 // Conn_Caps orthogonal (defined in plan.odin; part of pipe caps story)
-// ---------------------------------------------------------------------------
 
 @(test)
 test_conn_caps_orthogonal :: proc(t: ^testing.T) {
@@ -48,9 +43,7 @@ test_conn_caps_orthogonal :: proc(t: ^testing.T) {
 	testing.expect(t, .Sendfile_Possible in clear_caps)
 }
 
-// ---------------------------------------------------------------------------
 // pt_admit / pt_release high-water
-// ---------------------------------------------------------------------------
 
 @(test)
 test_pt_admit_under_high_water :: proc(t: ^testing.T) {
@@ -107,9 +100,7 @@ test_pt_ring_init_default_hw :: proc(t: ^testing.T) {
 	testing.expect_value(t, pt.admitted, u32(0))
 }
 
-// ---------------------------------------------------------------------------
 // Dual CT high-water
-// ---------------------------------------------------------------------------
 
 @(test)
 test_ct_admit_under_high_water :: proc(t: ^testing.T) {
@@ -138,9 +129,7 @@ test_ct_admit_metered_hw_hit :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.ct_hw_hits, u64(1))
 }
 
-// ---------------------------------------------------------------------------
 // seal_n max 2
-// ---------------------------------------------------------------------------
 
 @(test)
 test_seal_n_max_two :: proc(t: ^testing.T) {
@@ -169,10 +158,8 @@ test_wire_conn_seal_n_field :: proc(t: ^testing.T) {
 	testing.expect_value(t, wc.seal_n, u8(SEAL_N_MAX))
 }
 
-// ---------------------------------------------------------------------------
 // seal_q push / gen-checked pop / remove_gen
 // Queue storage is Seal_Queue (stack in tests; deferred alloc on Connection).
-// ---------------------------------------------------------------------------
 
 @(private = "file")
 _su :: proc(gen: u32, idx: u16, frame: u32 = 0, is_ct: bool = false) -> Seal_Unit {
@@ -271,9 +258,7 @@ test_seal_q_remove_gen_all :: proc(t: ^testing.T) {
 	testing.expect_value(t, q.len, 0)
 }
 
-// ---------------------------------------------------------------------------
 // wire_conn Seal_Queue enable / disable
-// ---------------------------------------------------------------------------
 
 @(test)
 test_wire_conn_enable_disable_seal_q :: proc(t: ^testing.T) {
@@ -343,9 +328,7 @@ test_connection_enable_ciphered_pipe_sm :: proc(t: ^testing.T) {
 	testing.expect(t, c.tls_pipe.bufs == nil)
 }
 
-// ---------------------------------------------------------------------------
 // Tls_Pipe skeleton + CT buffers
-// ---------------------------------------------------------------------------
 
 @(test)
 test_tls_pipe_init_skeleton :: proc(t: ^testing.T) {
@@ -393,9 +376,7 @@ test_seal_sm_variants :: proc(t: ^testing.T) {
 	testing.expect_value(t, sm, Seal_SM.Send_And_Sealed)
 }
 
-// ---------------------------------------------------------------------------
 // Mock seal∥send driver
-// ---------------------------------------------------------------------------
 
 @(test)
 test_pipe_seal_step_identity :: proc(t: ^testing.T) {
@@ -543,9 +524,7 @@ test_pipe_seal_send_parallel_two_slots :: proc(t: ^testing.T) {
 	testing.expect_value(t, pipe.seal_sm, Seal_SM.Idle)
 }
 
-// ---------------------------------------------------------------------------
 // Firehose detector
-// ---------------------------------------------------------------------------
 
 @(test)
 test_firehose_fail_detector :: proc(t: ^testing.T) {
@@ -563,16 +542,12 @@ test_firehose_fail_detector :: proc(t: ^testing.T) {
 	testing.expect(t, firehose_fail(&m))
 }
 
-// ---------------------------------------------------------------------------
 // Pure bulk simulator — O(window) path (4 MiB body, dual HW, firehose CI)
-// ---------------------------------------------------------------------------
 
 // ε slab slack: peaks may touch HW exactly; allow one extra PULL_WINDOW only if
-// design admits a transient (we assert ≤ HW for well-behaved path).
 FIREHOSE_SIM_BODY :: 4 * 1024 * 1024
 
 // Run well-behaved bulk: admit ≤ PT_HW, seal, mark send, complete, release.
-// Returns meters after draining full body.
 @(private = "file")
 _pipe_bulk_sim_windowed :: proc(body_len: int) -> (meters: Pipe_Meters, ok: bool) {
 	pipe: Tls_Pipe
@@ -726,9 +701,7 @@ test_pipe_bulk_sim_deliberate_firehose :: proc(t: ^testing.T) {
 	testing.expect(t, firehose_fail(&m))
 }
 
-// ---------------------------------------------------------------------------
 // Connection embeds Plan A pipe bags; alloc-path init zeros pt high_water
-// ---------------------------------------------------------------------------
 
 @(test)
 test_connection_pipe_bags_init :: proc(t: ^testing.T) {

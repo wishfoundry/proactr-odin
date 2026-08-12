@@ -1,8 +1,5 @@
 // WASI demo: prove proactr soft_cq / timer / host-complete path,
 // and that parked socket ops never complete without ring_wasi_complete.
-// WASI is the only WASM backend (browser/JS hosts load wasi_wasm32 too).
-// Build + run:  odin run examples/wasi_demo/build.odin -file
-// Or:           cd examples/wasi_demo && odin run build.odin -file
 package main
 
 import "core:fmt"
@@ -47,7 +44,6 @@ main :: proc() {
 
 	cq := make([]proactr.Completion, 16)
 
-	// --- WORKS: nop completes via soft_cq immediately ---
 	{
 		id, e := proactr.submit_nop(&r)
 		ok("submit_nop", e == .None, fmt.tprintf("id=%v err=%v", id, e))
@@ -60,7 +56,6 @@ main :: proc() {
 		}
 	}
 
-	// --- WORKS: close completes via soft_cq ---
 	{
 		_, e := proactr.submit_close(&r, 7)
 		ok("submit_close", e == .None)
@@ -73,7 +68,6 @@ main :: proc() {
 		}
 	}
 
-	// --- WORKS: software timer ---
 	{
 		_, e := proactr.submit_timeout(&r, 5_000_000) // 5ms
 		ok("submit_timeout", e == .None)
@@ -90,7 +84,6 @@ main :: proc() {
 		}
 	}
 
-	// --- WORKS: host posts completion for parked Recv ---
 	{
 		buf: [64]u8
 		id, e := proactr.submit_recv(&r, 3, buf[:])
@@ -107,7 +100,6 @@ main :: proc() {
 		}
 	}
 
-	// --- CANNOT WORK alone: Accept ---
 	{
 		id, e := proactr.submit_accept(&r, 1, continuous = false)
 		ok("submit_accept parks only", e == .None)
@@ -127,7 +119,6 @@ main :: proc() {
 		}
 	}
 
-	// --- CANNOT WORK alone: Send ---
 	{
 		msg := transmute([]u8)string("hello")
 		id, e := proactr.submit_send(&r, 4, msg)

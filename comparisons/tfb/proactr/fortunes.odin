@@ -1,12 +1,5 @@
 // TechEmpower Fortunes — two execution models for bastion comparison.
 // Hot path: one SQL pass (`ORDER BY message`) → write HTML while stepping.
-// No Fortune[] materialization, no message clones, no app-side sort.
-// sqlite3_column_text is only used between step() calls.
-//   FORTUNES_MODE=sync  (default): stream on the I/O worker.
-//     Default: one SQLite connection per I/O worker (thread_local).
-//     FORTUNES_SYNC_SHARED=1: one shared conn + mutex around the stream.
-//   FORTUNES_MODE=async: offload stream to a thread pool.
-// Profile: odin build -define:FORTUNES_PROFILE=true
 package main
 
 import "core:c"
@@ -234,7 +227,6 @@ fortunes_shutdown :: proc() {
 	}
 }
 
-// --- single-pass HTML stream -------------------------------------------------
 
 html_escape_write :: proc(b: ^strings.Builder, s: string) {
 	// Copy runs of non-special bytes; expand only & < > " '
@@ -381,7 +373,6 @@ fortunes_fill_body :: proc(out: []byte) -> (
 	return
 }
 
-// --- async -------------------------------------------------------------------
 
 fortune_task :: proc(task: thread.Task) {
 	job := cast(^Fortune_Job)task.data
@@ -443,7 +434,6 @@ fortunes_worker_tick :: proc(user: rawptr) {
 	delete(batch)
 }
 
-// --- handlers ----------------------------------------------------------------
 
 on_fortunes :: proc(req: ^http.Request, res: ^http.Response) {
 	_ = req

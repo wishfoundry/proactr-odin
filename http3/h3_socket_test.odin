@@ -47,7 +47,6 @@ test_h3_real_socket :: proc(t: ^testing.T) {
 	server.remote = cep
 	defer quic.conn_free(server)
 
-	// --- Handshake over the sockets ---
 	quic.conn_start_handshake(client)
 	connected := false
 	for _ in 0 ..< 500 {
@@ -63,7 +62,6 @@ test_h3_real_socket :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, connected, "QUIC handshake completed over UDP sockets")
 
-	// --- H3 bring-up + request/response ---
 	hc: Http3_Connection
 	hs: Http3_Connection
 	h3_conn_init(&hc, client, false)

@@ -1,9 +1,5 @@
 // QPACK dynamic table (RFC 9204 §3.2) and encoder/decoder stream codecs (§4.3–4.4).
 // The same `Dynamic_Table` shape is used on both sides:
-//   - Decoder: peer encoder stream → table; field sections resolve dynamic refs.
-//   - Encoder: we insert when peer capacity > 0, emit encoder-stream instructions,
-//     and field sections may index entries (gated by known-received when the peer
-//     advertises blocked_streams = 0).
 package qpack
 
 import "core:mem"
@@ -92,7 +88,6 @@ dyn_set_capacity :: proc(dt: ^Dynamic_Table, capacity: int) -> Qpack_Error {
 }
 
 // Insert a cloned entry at the front; evict oldest until it fits.
-// Returns error if the entry is larger than capacity.
 dyn_insert :: proc(dt: ^Dynamic_Table, name, value: string) -> Qpack_Error {
 	h := Header{name = name, value = value}
 	es := dyn_entry_size(h)
@@ -173,7 +168,6 @@ dyn_find_name :: proc(dt: ^Dynamic_Table, name: string) -> (rel: u64, abs: u64, 
 	return 0, 0, false
 }
 
-// ---- Encoder stream instructions (we emit these) -------------------------
 
 // Set Dynamic Table Capacity (§4.3.1): 001 Capacity(5+)
 qpack_encode_set_capacity :: proc(dst: ^[dynamic]u8, capacity: u64) {
@@ -308,7 +302,6 @@ decode_one_encoder_instruction :: proc(
 	return c, .None
 }
 
-// ---- Decoder stream instructions -----------------------------------------
 
 // Section Acknowledgment (§4.4.1): 1 StreamID(7+)
 qpack_encode_section_ack :: proc(dst: ^[dynamic]u8, stream_id: u64) {

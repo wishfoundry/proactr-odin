@@ -1,10 +1,5 @@
 // HTTP/3 on Client_Job via proactr completions + software timers.
 // during the QUIC handshake. After connect, drive uses only:
-//   - nonblocking http3.pump_quic_send
-//   - proactr.submit_recv on the connected UDP fd
-//   - proactr.submit_timeout for request deadline / PTO
-// No time.sleep on this path.
-// (job_free_transport). Cancel cancel timer, close UDP, free when quiet.
 package client
 
 import "core:mem"
@@ -104,7 +99,6 @@ _job_h3_pump_send :: proc(conn: ^quic.Conn) {
 }
 
 // Dial residual: conn_connect (may sleep) + conn_udp_connect + session init.
-// Returns connected job.quic with nonblocking UDP; peer SETTINGS may still be pending.
 @(private)
 _job_h3_dial_residual :: proc(
 	job: ^Client_Job,

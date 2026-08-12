@@ -1,12 +1,5 @@
 // HTTP/3 connection layer (RFC 9114 §3–§6): brings up the control + QPACK
 // unidirectional streams, exchanges SETTINGS, and maps requests/responses onto
-// QUIC bidirectional streams — wiring `webstream` (streams), `h3` (frames), and
-// `qpack` (header compression) together.
-// QPACK: decoder table (peer encoder stream → our table) and encoder table
-// (our inserts → peer). Field sections use dynamic indexing when the peer
-// advertises capacity > 0; with blocked_streams = 0 we only index known-received
-// entries (inserts still go out for later sections). SETTINGS default to
-// DEFAULT_SETTINGS (max table capacity 4096) unless the caller overrides.
 package http3
 
 import "core:mem"
@@ -386,7 +379,6 @@ _drain_bidi :: proc(h: ^Http3_Connection, id: u64, data: []u8, eof: bool) -> Htt
 	return .None
 }
 
-// ---- Client API -----------------------------------------------------------
 
 // Open a bidi stream and send a request (HEADERS [+ DATA]), then FIN. Returns
 // the stream token to correlate the response. `headers` should include the
@@ -402,7 +394,6 @@ h3_send_request :: proc(
 	return s, .None
 }
 
-// Return the decoded response for a request stream, once fully received.
 h3_response :: proc(
 	h: ^Http3_Connection, s: Http3_Stream,
 ) -> (headers: []qpack.Header, body: []u8, done: bool) {
@@ -411,9 +402,7 @@ h3_response :: proc(
 	return x.headers[:], x.body[:], true
 }
 
-// ---- Server API -----------------------------------------------------------
 
-// Return the next fully-received request not yet handed out.
 h3_next_request :: proc(
 	h: ^Http3_Connection,
 ) -> (s: Http3_Stream, headers: []qpack.Header, body: []u8, ok: bool) {
@@ -537,13 +526,6 @@ _write_data :: proc(h: ^Http3_Connection, s: Http3_Stream, body: []u8) -> Http3_
 	}
 	return .None
 }
-
-
-
-
-
-
-
 
 
 // ///////////////////////////////////////////////////////////////
@@ -690,14 +672,12 @@ test_h3_loopback_request_response :: proc(t: ^testing.T) {
 	defer h3_conn_destroy(&client)
 	defer h3_conn_destroy(&server)
 
-	// --- SETTINGS exchange ---
 	pump(cc, sc)
 	testing.expect_value(t, h3_conn_process(&client), Http3_Error.None)
 	testing.expect_value(t, h3_conn_process(&server), Http3_Error.None)
 	testing.expect(t, client.peer_settings_received, "client received server SETTINGS")
 	testing.expect(t, server.peer_settings_received, "server received client SETTINGS")
 
-	// --- Client request ---
 	req := []qpack.Header {
 		{name = ":method", value = "GET"},
 		{name = ":scheme", value = "https"},
@@ -705,14 +685,12 @@ test_h3_loopback_request_response :: proc(t: ^testing.T) {
 		{name = ":path", value = "/"},
 		{name = "user-agent", value = "odin-http-h3"},
 	}
-	// note: qpack.Header == httpfield.Header
 	rs, rerr := h3_send_request(&client, req)
 	testing.expect_value(t, rerr, Http3_Error.None)
 
 	pump(cc, sc)
 	testing.expect_value(t, h3_conn_process(&server), Http3_Error.None)
 
-	// --- Server reads request ---
 	req_stream, got_headers, _, ok := h3_next_request(&server)
 	testing.expect(t, ok, "server received a request")
 	method_ok, path_ok := false, false
@@ -723,7 +701,6 @@ test_h3_loopback_request_response :: proc(t: ^testing.T) {
 	testing.expect(t, method_ok, "decoded :method GET")
 	testing.expect(t, path_ok, "decoded :path /")
 
-	// --- Server response ---
 	resp := []qpack.Header{{name = ":status", value = "200"}, {name = "content-type", value = "text/plain"}}
 	serr := h3_send_response(&server, req_stream, resp, transmute([]u8)string("hello h3"))
 	testing.expect_value(t, serr, Http3_Error.None)
@@ -731,7 +708,6 @@ test_h3_loopback_request_response :: proc(t: ^testing.T) {
 	pump(cc, sc)
 	testing.expect_value(t, h3_conn_process(&client), Http3_Error.None)
 
-	// --- Client reads response ---
 	r_headers, r_body, done := h3_response(&client, rs)
 	testing.expect(t, done, "client received the response")
 	status_ok := false

@@ -1,10 +1,5 @@
 // HTTP/2 framing (RFC 9113 §4–§6). Fixed 9-byte frame header followed by a
 // type-specific payload, all big-endian:
-//   Length(24) Type(8) Flags(8) R(1)+StreamID(31)  Payload(Length)
-// Sans-I/O: encode/decode only; no sockets, TLS, or host wiring.
-// Hot path (item 5): frame_write does one capacity check + one payload copy
-// (no multi-step append growth on DATA). Callers pre-size known body framing
-// via frame_dst_reserve_data to kill _append_elems reallocation churn on s1m.
 package http2
 
 // Client connection preface (RFC 9113 §3.4) — sent before the first SETTINGS.
@@ -123,7 +118,6 @@ frame_decode :: proc(
 	return h, buf[FRAME_HEADER_LEN:total], total, .None
 }
 
-// ---- SETTINGS (§6.5) -------------------------------------------------------
 
 // Build a SETTINGS frame advertising the values we care to change from default.
 settings_write :: proc(dst: ^[dynamic]u8, s: Settings) {
@@ -172,7 +166,6 @@ settings_decode :: proc(payload: []u8, s: ^Settings) -> Frame_Error {
 	return .None
 }
 
-// ---- RST_STREAM (§6.4) -------------------------------------------------------
 
 rst_stream_write :: proc(dst: ^[dynamic]u8, stream_id: u32, error_code: u32) {
 	payload: [4]u8
@@ -183,7 +176,6 @@ rst_stream_write :: proc(dst: ^[dynamic]u8, stream_id: u32, error_code: u32) {
 	frame_write(dst, FRAME_RST_STREAM, 0, stream_id, payload[:])
 }
 
-// ---- GOAWAY (§6.8) ----------------------------------------------------------
 
 // Graceful shutdown: streams at or below `last_sid` were (or will be)
 // processed; everything above was not.
@@ -200,7 +192,6 @@ goaway_write :: proc(dst: ^[dynamic]u8, last_sid: u32, error_code: u32) {
 	frame_write(dst, FRAME_GOAWAY, 0, 0, payload[:])
 }
 
-// ---- WINDOW_UPDATE (§6.9) --------------------------------------------------
 
 // 13-byte WINDOW_UPDATE: length=4, type=0x8, flags=0, stream_id, increment.
 // Hot inbound path writes these often; avoid a 4-byte stack payload + general

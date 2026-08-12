@@ -1,15 +1,5 @@
 // Package webstream is a thin, protocol-agnostic facade over the QUIC transport.
 // It exposes streams as stable id-tokens, write/read/close, an io.Stream adapter
-// (the seam the HTTP parser plugs into — same one odin-http uses for TCP/TLS
-// sockets), and a level-triggered event poll. It is intentionally thin: QUIC
-// already owns the stream buffers, flow control, and lifecycle, so this layer
-// adds no buffers of its own.
-// A `Stream` IS the wire stream id. QUIC stream ids are monotonic and never
-// reused, so a stale token simply misses the connection's registry (→
-// .Unknown_Stream) — there's no ABA hazard, hence no need for generational
-// handles here. When an HTTP/2 backend is added later, the seam to generalize
-// is a small Transport-hooks struct; that indirection is deliberately NOT built
-// yet (a single backend doesn't justify it).
 package http3
 
 import "core:io"
@@ -127,7 +117,6 @@ stream_readable :: proc(conn: ^quic.Conn, s: Http3_Stream) -> bool {
 	return err == .None && len(qs.rx_delivered) > 0
 }
 
-// ---- io.Stream adapter: the unifying seam ---------------------------------
 
 // Wrap a stream as a core:io.Stream so the bufio.Scanner + HTTP parser consume
 // it unchanged. Backed directly by the ^quic.Stream — no extra allocation.
@@ -167,7 +156,6 @@ _io_proc :: proc(
 	return 0, .Empty
 }
 
-// ---- Events (server / event-loop side): data, not callbacks ---------------
 
 Http3_Stream_Event :: union {
 	Opened,   // a stream id not seen before (peer- or locally-initiated)
@@ -214,15 +202,9 @@ poll :: proc(p: ^Http3_Stream_Poller, conn: ^quic.Conn, out: ^[dynamic]Http3_Str
 }
 
 
-
-
 //////////////////////////////////////////////////////////////////////
 //                            Tests
 // ///////////////////////////////////////////////////////////////////
-
-
-
-
 
 
 // Build a bare client-side Conn with an initialized stream registry. No TLS

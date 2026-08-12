@@ -1,11 +1,5 @@
 // Package h3 implements the HTTP/3 application layer (RFC 9114) on top of the
 // QUIC transport (`quic`), the stream facade (`webstream`), and QPACK (`qpack`).
-// This file is the frame codec. HTTP/3 frames live inside QUIC STREAM payloads
-// (they are NOT QUIC frames) and use the simple TLV form:
-//     Frame { Type (varint), Length (varint), Payload (Length bytes) }
-// The variable-length integers are QUIC varints (RFC 9000 §16), so we reuse
-// `quic.varint_*`. Unidirectional streams additionally begin with a varint
-// stream-type byte (RFC 9114 §6.2), handled here too.
 package http3
 
 // Frame decode errors (local; vapor used shared Frame_Error).
@@ -74,7 +68,6 @@ put_varint :: proc(dst: ^[dynamic]u8, v: u64) {
 	quic.varint_encode((dst^)[start:], v)
 }
 
-// ---- Encoding -------------------------------------------------------------
 
 // Write a frame with an explicit type and pre-built payload.
 frame_write :: proc(dst: ^[dynamic]u8, ftype: u64, payload: []u8) {
@@ -126,7 +119,6 @@ stream_type_write :: proc(dst: ^[dynamic]u8, stype: u64) {
 	put_varint(dst, stype)
 }
 
-// ---- Decoding -------------------------------------------------------------
 
 // Decode just the Type+Length header. .Incomplete if the header bytes aren't
 // all present yet.

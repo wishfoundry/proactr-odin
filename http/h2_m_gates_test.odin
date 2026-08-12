@@ -1,21 +1,12 @@
 // Existing coverage aliased here for the product bar:
 //   M1 — concurrent unary ≥2  (also: test_h2_host_concurrent_two_get_streams)
-//   M2 — concurrent deferred large bodies ≥2 + WINDOW_UPDATE drain
-//   M3 — fair RR flush under equal windows (engine: test_h2_flush_rr_two_pending_streams)
-//   M4 — duplex: flush does not unarm CT recv; send-complete arm path (count)
-//   M5 — peak on-wire DATA O(window), not O(sum full bodies)
-//   M6 — two concurrent SSE via dispatch+handler + RST Client_Gone (M6a+M6b)
-//        (also: test_h2_sse_two_sessions_data_frames, test_h2_sse_rst_client_gone_once)
-// Run: odin test http -define:ODIN_TEST_THREADS=1 -o:none
 package http
 
 import "core:testing"
 
 import http2 "../http2"
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 @(private = "file")
 m_gate_data_bytes_for_sid :: proc(buf: []u8, want_sid: u32) -> int {
@@ -54,9 +45,7 @@ m_gate_has_data_sid :: proc(buf: []u8, want_sid: u32) -> bool {
 	return m_gate_data_bytes_for_sid(buf, want_sid) > 0
 }
 
-// ---------------------------------------------------------------------------
 // M1 — Concurrent unary ≥2
-// ---------------------------------------------------------------------------
 
 // Alias gate: two concurrent GET streams → two 200 responses (product concurrent).
 @(test)
@@ -120,9 +109,7 @@ test_m1_concurrent_unary_two_get :: proc(t: ^testing.T) {
 	testing.expect(t, got_a && got_b, "M1: both path bodies")
 }
 
-// ---------------------------------------------------------------------------
 // M2 — Concurrent deferred large bodies ≥2 + WINDOW_UPDATE drain
-// ---------------------------------------------------------------------------
 
 @(test)
 test_m2_concurrent_deferred_large_bodies_window_update :: proc(t: ^testing.T) {
@@ -192,9 +179,7 @@ test_m2_concurrent_deferred_large_bodies_window_update :: proc(t: ^testing.T) {
 	testing.expect(t, s1.end_sent && s2.end_sent, "M2: END_STREAM both streams")
 }
 
-// ---------------------------------------------------------------------------
 // M3 — Fair RR (engine cursor + both streams progress)
-// ---------------------------------------------------------------------------
 
 @(test)
 test_m3_fair_rr_both_streams_progress :: proc(t: ^testing.T) {
@@ -254,9 +239,7 @@ test_m3_fair_rr_both_streams_progress :: proc(t: ^testing.T) {
 	testing.expect(t, srv.flush_rr > 0, "M3: flush_rr advanced")
 }
 
-// ---------------------------------------------------------------------------
 // M4 — Duplex: flush does not unarm recv; send-complete re-arms
-// ---------------------------------------------------------------------------
 
 @(test)
 test_m4_duplex_flush_does_not_unarm_recv :: proc(t: ^testing.T) {
@@ -303,9 +286,7 @@ test_m4_duplex_flush_does_not_unarm_recv :: proc(t: ^testing.T) {
 	testing.expect(t, h2_test_arm_recv_count == before2, "M4: no arm when pipe not Open")
 }
 
-// ---------------------------------------------------------------------------
 // M5 — Peak on-wire O(window)
-// ---------------------------------------------------------------------------
 
 @(test)
 test_m5_peak_wire_o_window_not_o_sum_bodies :: proc(t: ^testing.T) {
@@ -358,9 +339,7 @@ test_m5_peak_wire_o_window_not_o_sum_bodies :: proc(t: ^testing.T) {
 	testing.expect(t, pending_sum + wire == 400, "M5: body bytes conserved (wire + pending)")
 }
 
-// ---------------------------------------------------------------------------
 // M6 — Two concurrent SSE via dispatch+handler + RST Client_Gone (M6a+M6b)
-// ---------------------------------------------------------------------------
 
 // Package-level gone cookies (handler procs cannot capture test locals).
 @(private)

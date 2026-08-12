@@ -1,6 +1,5 @@
 // TLS/H2 peer for comparisons/tls-h2 matrix.
 // WORKERS, PORT, CERT_FILE, KEY_FILE from env.
-// Instrumentation: GET /_matrix/stats (path_metrics scrape) + PHASE if built with HTTP_PHASE_STATS.
 package main
 
 import "core:fmt"

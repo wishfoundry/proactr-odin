@@ -35,7 +35,6 @@ FRAME_TYPE_STREAM_DATA_BLOCKED :: u8(0x15)
 FRAME_TYPE_STREAMS_BLOCKED_BI  :: u8(0x16)
 FRAME_TYPE_STREAMS_BLOCKED_UNI :: u8(0x17)
 
-// --- Decoded STREAM frame view ---
 
 Stream_Frame :: struct {
 	stream_id: u64,
@@ -44,7 +43,6 @@ Stream_Frame :: struct {
 	data:      []u8, // slice into the caller's buffer, valid for the lifetime of the packet
 }
 
-// --- Decoded flow-control frame views ---
 
 Max_Stream_Data_Frame :: struct {
 	stream_id: u64,
@@ -66,11 +64,9 @@ Stop_Sending_Frame :: struct {
 	error_code: u64,
 }
 
-// --- Decoders ---
 
 // Decode a STREAM frame. `type_byte` is the frame type (0x08..0x0f).
 // `buf` starts at the byte immediately after the type byte.
-// Returns the decoded frame and number of bytes consumed from `buf` (not
 // including the type byte itself).
 decode_stream_frame :: proc(type_byte: u8, buf: []u8) -> (frame: Stream_Frame, n: int, ok: bool) {
 	pos := 0
@@ -162,12 +158,10 @@ decode_skip_two_varints :: proc(buf: []u8) -> (n: int, ok: bool) {
 	return vn1 + vn2, true
 }
 
-// --- Encoders ---
 
 // Encode a STREAM frame with the given stream_id, offset, and payload.
 // Always uses LEN flag so callers don't need to know packet-boundary state.
 // Sets OFF flag iff offset > 0. Sets FIN flag iff fin is true.
-// Returns bytes written, or -1 on overflow.
 encode_stream_frame :: proc(
 	buf:       []u8,
 	stream_id: u64,

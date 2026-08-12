@@ -25,7 +25,6 @@ import "core:time"
 Static_Opts :: struct {
 	// Required: directory to serve (relative or absolute). Resolved once at handler creation.
 	root: string,
-	// Optional URL prefix stripped before joining to root (e.g. "/static").
 	strip_prefix: string,
 	// Directory index file name. Empty → "index.html". Use disable_index to turn off.
 	index: string,
@@ -46,7 +45,6 @@ Static_Opts :: struct {
 	disable_ranges:         bool,
 	disable_etag:           bool,
 	disable_last_modified:  bool,
-	// Optional extension overrides (ext lowercase with leading '.', e.g. ".gltf").
 	// Matched before builtin mime table. Content-Type may include charset.
 	extra_mimes: []http.Mime_Extra,
 }
@@ -62,9 +60,7 @@ Static_State :: struct {
 	terminal: bool,
 }
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
 // http.Handler for a route: GET/HEAD serve files under opts.root; other methods → 405.
 static_handler :: proc(opts: Static_Opts, allocator := context.allocator) -> http.Handler {
@@ -99,9 +95,7 @@ static_mount :: proc(prefix, root: string, allocator := context.allocator) -> ht
 	return static_handler(Static_Opts{root = root, strip_prefix = prefix}, allocator)
 }
 
-// ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
-// ---------------------------------------------------------------------------
 
 // Resolve the request URL path into a clean relative path under root (no leading '/').
 // Does not touch the filesystem. ok=false → treat as not found / forbidden.
@@ -396,9 +390,7 @@ static_content_range_fmt :: proc(start, end, size: i64, allocator := context.tem
 	return fmt.tprintf("bytes %v-%v/%v", start, end, size)
 }
 
-// ---------------------------------------------------------------------------
 // Internal serve path
-// ---------------------------------------------------------------------------
 
 // Package-private for integration tests (temp dir + real open/prepare).
 @(private)

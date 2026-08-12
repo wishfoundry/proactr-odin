@@ -17,7 +17,6 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	out: [dynamic]u8
 	defer delete(out)
 
-	// --- Bring up: client preface + the peer's SETTINGS (INITIAL_WINDOW_SIZE=10) ---
 	in_buf: [dynamic]u8
 	defer delete(in_buf)
 	append(&in_buf, ..transmute([]u8)string(CLIENT_PREFACE))
@@ -26,7 +25,6 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	testing.expect_value(t, conn_feed(&srv, in_buf[:], &out), H2_Error.None)
 	testing.expect_value(t, srv.peer_settings.initial_window_size, u32(10))
 
-	// --- Client opens stream 1 (bodyless GET) ---
 	req_block: [dynamic]u8
 	defer delete(req_block)
 	hpack.encode(&req_block, []Header{{name = ":method", value = "GET"}, {name = ":scheme", value = "http"}, {name = ":authority", value = "x"}, {name = ":path", value = "/"}})
@@ -40,7 +38,6 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "stream 1 exists")
 	testing.expect_value(t, s.send_window, i64(10)) // inherited the peer's initial window
 
-	// --- Server streams a 25-byte body: only 10 go out, 15 buffer ---
 	body := make([]u8, 25)
 	defer delete(body)
 	for i in 0 ..< 25 do body[i] = u8('A') + u8(i)
@@ -60,7 +57,6 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	testing.expect_value(t, d1.length, u32(10))
 	testing.expect(t, d1.flags & FLAG_END_STREAM == 0, "not END_STREAM yet")
 
-	// --- WINDOW_UPDATE(+10) → 10 more bytes drain ---
 	wu: [dynamic]u8
 	defer delete(wu)
 	window_update_write(&wu, 1, 10)
@@ -73,7 +69,6 @@ test_h2_flow_control :: proc(t: ^testing.T) {
 	testing.expect(t, d2.flags & FLAG_END_STREAM == 0, "still 5 to go")
 	testing.expect_value(t, stream_pending_len(s), 5)
 
-	// --- WINDOW_UPDATE(+100) → final 5 bytes + END_STREAM ---
 	clear(&wu)
 	window_update_write(&wu, 1, 100)
 	clear(&out)

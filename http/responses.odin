@@ -116,9 +116,7 @@ respond_json :: proc(r: ^Response, v: any, status: Status = .OK, opt: json.Marsh
 	return
 }
 
-// ---------------------------------------------------------------------------
 // Status / redirect / problem helpers (oneshot; App Contract body_* + respond)
-// ---------------------------------------------------------------------------
 
 /*
 Pure status with no body. Prefer this name over respond(r, status).

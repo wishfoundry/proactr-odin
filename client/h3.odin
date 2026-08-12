@@ -1,10 +1,5 @@
 // HTTP/3 convenience adapter. Unlike h1/h2 (which ride an io.Stream), h3 runs
 // over QUIC: this file dials a UDP/QUIC connection, wraps it in client.H3_Session
-// (sans-I/O core — see session_h3.odin), and drives the session with a
-// sleep-poll loop. Embedders that own the UDP loop should use H3_Session
-// directly and call quic.conn_poll_recv / conn_poll_send themselves.
-// There is no separate client object — this is the h3 arm of the unified
-// client.Connection (Http3_State).
 package client
 
 import "core:mem"

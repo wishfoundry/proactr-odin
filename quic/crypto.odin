@@ -39,7 +39,6 @@ Initial_Keys :: struct {
 	server: Packet_Keys,
 }
 
-// --- HKDF: prefer one-shot HMAC (fast path); fall back to EVP_KDF ---
 
 @(private)
 _hmac :: proc(md: rawptr, key: []u8, data: []u8, out: []u8) -> bool {
@@ -143,7 +142,6 @@ hkdf_expand_label :: proc(out: []u8, secret: []u8, label: string, sha384: bool) 
 	return hkdf_expand_sha256(out, secret, info[:n])
 }
 
-// --- CTX free / install ---
 
 packet_keys_free_ctx :: proc(keys: ^Packet_Keys) {
 	if keys == nil || !os_ensure() do return
@@ -268,7 +266,6 @@ derive_initial_keys :: proc(keys: ^Initial_Keys, dcid: []u8) -> bool {
 	return true
 }
 
-// --- AEAD seal / open (long-lived CTX; zero heap) ---
 
 aead_seal :: proc(keys: ^Packet_Keys, out: []u8, nonce: []u8, plaintext: []u8, aad: []u8) -> (n: int, ok: bool) {
 	if keys == nil || !os_ensure() do return 0, false

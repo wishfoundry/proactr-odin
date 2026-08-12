@@ -64,7 +64,7 @@ use each table only against peers on the **same** host.
 
 ## Notes
 
-- Fortunes app work differs across stacks (`comparisons/tfb/WORKLOAD.md`).
+- Fortunes app work differs across stacks (`benchmarks/TFB.md`).
 - TLS/H2 last pin (io_uring bastion, 2026-08-10):  
   [`comparisons/tls-h2/results/BASTION_TLS_H2.md`](../comparisons/tls-h2/results/BASTION_TLS_H2.md).
 

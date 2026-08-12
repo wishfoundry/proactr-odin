@@ -1,8 +1,5 @@
 // WebSocket session adapter (D3) on the same progressive Stream engine as SSE.
 // Minimal framing: text/binary data frames, close frame. No extensions / permessage-deflate.
-// Inbound client frames are not fully parsed in D3 v1 (send-oriented session).
-// Peer death: idle timer + stream send errors; ciphered Open also arms CT recv hangup.
-// Clear-H1: no hangup-recv PIN without cancel (same as SSE).
 package http
 
 import "core:bytes"
@@ -28,7 +25,6 @@ effect_ws_close :: proc(code: u16 = 1000, reason: string = "") -> Effect {
 }
 
 // Validate Upgrade request and set 101 Switching Protocols headers + accept key.
-// Returns false if not a valid WebSocket handshake (caller should respond 400).
 ws_accept_upgrade :: proc(req: ^Request, res: ^Response) -> bool {
 	if req == nil || res == nil {
 		return false
@@ -83,7 +79,6 @@ ws_start :: proc(
 	assert(!res._session_attached, "ws_start: session already attached", loc)
 	assert(res.status == .Switching_Protocols, "ws_start: call ws_accept_upgrade first", loc)
 	conn := res._conn
-	// Matrix: WebSocket over H2 is not supported (capability ⏳). Hard-fail.
 	assert(!conn.h2_active, "ws_start: WebSocket over HTTP/2 is not supported", loc)
 	ex := response_slot(res)
 	assert(ex != nil, "ws_start: no exchange slot", loc)

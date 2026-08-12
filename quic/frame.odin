@@ -58,7 +58,6 @@ Frame_Error :: enum {
 	Invalid_Range_Count,
 }
 
-// --- Decoded frame views (zero-copy where possible) ---
 
 Crypto_Frame :: struct {
 	offset: u64,
@@ -99,7 +98,6 @@ Datagram_Frame :: struct {
 	data: []u8, // slice into caller's buffer
 }
 
-// --- Decoded frame union ---
 
 Frame :: union {
 	Padding_Frame,
@@ -142,7 +140,6 @@ Padding_Frame :: struct {
 
 Ping_Frame :: struct{}
 
-// --- Decode one frame from buf. Returns (frame, bytes_consumed, error).
 
 frame_decode :: proc(buf: []u8) -> (frame: Frame, n: int, err: Frame_Error) {
 	if len(buf) == 0 do return nil, 0, .Truncated
@@ -371,7 +368,6 @@ frame_decode :: proc(buf: []u8) -> (frame: Frame, n: int, err: Frame_Error) {
 	return nil, 0, .Unknown_Type
 }
 
-// --- Encoders. Each returns bytes written, or -1 on buffer overflow. ---
 
 encode_padding :: proc(buf: []u8, count: int) -> int {
 	if len(buf) < count do return -1

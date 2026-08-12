@@ -1,1 +1,0 @@
-host=Benjamins-MacBook-Pro.local Darwin 25.5.0 arm64 ncpu=12

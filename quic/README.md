@@ -1,24 +1,10 @@
-# package `quic`
+# quic
 
-QUIC transport (RFC 9000/9001) using **OpenSSL ≥3.5** dynlib for TLS-in-QUIC
-(`SSL_set_quic_tls_cbs`) and packet AEAD/HP via long-lived `EVP_CIPHER_CTX`.
-
-| Layer | Implementation |
-|-------|----------------|
-| TLS | System OpenSSL ≥3.5 quic-tls callbacks |
-| Packet protect | AES-GCM / ChaCha20-Poly1305 (libcrypto) |
-
-## Requirements
+QUIC (RFC 9000/9001) with OpenSSL ≥3.5 dynlib (`SSL_set_quic_tls_cbs` + libcrypto AEAD).
 
 ```bash
-export LIBRARY_PATH="/opt/homebrew/opt/openssl@3/lib:$LIBRARY_PATH"
 export DYLD_LIBRARY_PATH="/opt/homebrew/opt/openssl@3/lib:${DYLD_LIBRARY_PATH:-}"
-```
-
-Optional: `-define:QUIC_OPENSSL_DYNLIB_PATH=/path/to/libssl.3.dylib`
-
-## Test
-
-```bash
 odin test quic
 ```
+
+Optional: `-define:PROACTR_OPENSSL_DYNLIB_PATH=/path/to/libssl.3.dylib`

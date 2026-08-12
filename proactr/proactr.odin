@@ -1,14 +1,5 @@
 // Package proactr: portable completion-based (proactor) async I/O.
 // Model: submit ops → reap completions → dispatch. Hosts never see readiness.
-// Backends (same portable API; separate from core:nbio):
-//   - Linux:   io_uring
-//   - Windows: IOCP
-//   - Darwin / FreeBSD / OpenBSD / NetBSD: kqueue façade
-//   - WASI:    host façade (only WASM port; no js_wasm32)
-// Buffer rule: for Recv/Send, caller-owned buffers stay valid until the matching
-// completion is harvested and operation_free is called (or the op is recycled).
-// Linux registration (REGISTER_FILES / REGISTER_BUFFERS): platform_linux.odin.
-// Non-Linux no-ops: registration_stub.odin (+build !linux).
 package proactr
 
 import "core:mem"
@@ -133,7 +124,6 @@ DEFAULT_ENTRIES :: 256
 DEFAULT_RECV_BUF_SIZE :: 16 * 1024
 DEFAULT_REG_BUF_COUNT :: 1024
 
-// --- lifecycle --------------------------------------------------------------
 
 ring_init :: proc(
 	r: ^Ring,
@@ -168,7 +158,6 @@ ring_destroy :: proc(r: ^Ring) {
 	r^ = {}
 }
 
-// --- operation slab ---------------------------------------------------------
 
 operation_alloc :: proc(r: ^Ring) -> (id: u32, op: ^Operation, err: Error) {
 	if len(r.free) > 0 {
@@ -227,7 +216,6 @@ completion_has_more :: #force_inline proc(c: Completion) -> bool {
 
 // Software timers: timers.odin (submit_timeout, cancel_timeout, soft_cq, heap).
 
-// --- submit helpers ---------------------------------------------------------
 
 // _begin_submit allocates and marks Submitted; caller fills fields then _finish_submit.
 _begin_submit :: proc(r: ^Ring, kind: Operation_Kind, user: rawptr) -> (id: u32, op: ^Operation, err: Error) {
@@ -390,7 +378,6 @@ submit_sendfile :: proc(
 	return _finish_submit(r, oid, op, _submit_sendfile(r, oid, op))
 }
 
-// --- wait / complete --------------------------------------------------------
 // submit_timeout / cancel_timeout: timers.odin
 
 ring_submit :: proc(r: ^Ring) -> Error {

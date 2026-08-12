@@ -68,9 +68,7 @@ _conn_wire_in_flight :: proc(c: ^Connection) -> bool {
 	return c.wire.kind != .None
 }
 
-// ---------------------------------------------------------------------------
 // Shared fail / mem-queue helpers
-// ---------------------------------------------------------------------------
 
 // Log, full wire teardown (mem + file + kind), close connection.
 @(private)
@@ -114,9 +112,7 @@ _wire_mem_done :: proc(conn: ^Connection) {
 	clean_request_loop(conn)
 }
 
-// ---------------------------------------------------------------------------
 // Submit paths
-// ---------------------------------------------------------------------------
 
 // host_submit_send enqueues send of conn.wire.pending_send.
 // Linux: proactr submit_send (io_uring). Darwin P5: native reactor EVFILT_WRITE
@@ -153,7 +149,6 @@ host_submit_send :: proc(conn: ^Connection) -> proactr.Error {
 }
 
 // host_try_send_nb: nonblocking send of buf on conn.socket (no ring arm).
-// Returns (bytes_sent, would_block, hard_error).
 // Pure EAGAIN → (0, true, false). Full delivery → (len, false, false).
 // EINTR retried; other errors → (0, false, true). Windows forces again (arm path).
 @(private)
@@ -184,7 +179,6 @@ host_try_send_nb :: proc(conn: ^Connection, buf: []u8) -> (n: int, again: bool, 
 }
 
 // Pack non-empty exec_bufs[exec_i..] into conn.wire.iovecs (ephemeral for WRITEV submit).
-// Returns iov count (0 if nothing to send).
 @(private)
 _conn_pack_iovecs :: proc(conn: ^Connection) -> int {
 	n := 0
@@ -208,9 +202,6 @@ _conn_pack_iovecs :: proc(conn: ^Connection) -> int {
 
 // Primary host mutator for mem-queue progress (WRITEV short writes and multi_send).
 // Advances exec_bufs after `sent` bytes delivered from the remaining queue.
-// Returns true if more non-empty buffers remain.
-// CRITICAL: never leave a zero-length buffer at exec_i with remain=true — host_submit_send
-// returns .None for empty slices without posting a CQE (connection would hang).
 @(private)
 _conn_advance_exec_bufs :: proc(conn: ^Connection, sent: int) -> bool {
 	if sent <= 0 || conn.wire.exec_n <= 0 {
@@ -241,7 +232,6 @@ _conn_advance_exec_bufs :: proc(conn: ^Connection, sent: int) -> bool {
 }
 
 // Pack heading + body slices into conn.wire.exec_bufs; set exec_i/n; skip empties.
-// Returns false if nothing to send or too many segments.
 @(private)
 _conn_arm_mem_queue :: proc(conn: ^Connection, heading: []u8, bodies: [][]u8) -> bool {
 	n_slots := 0
@@ -281,7 +271,6 @@ _conn_arm_mem_queue :: proc(conn: ^Connection, heading: []u8, bodies: [][]u8) ->
 }
 
 // Prefer WRITEV if plan_wire_prefer_kernel && n_iov >= 2; else multi_send.
-// Returns which mechanism was armed (first-arm counters stay in the caller).
 // ok=false → submit failed or empty queue (caller closes / finishes).
 // Packs iovecs at most once on the WRITEV arm (no re-pack inside submit).
 @(private)
@@ -370,7 +359,6 @@ host_submit_sendfile :: proc(conn: ^Connection) -> proactr.Error {
 }
 
 // Pure math: after pread of `got` bytes from a known remaining region.
-// Returns false if got is invalid (0, negative, or > remaining).
 @(private)
 file_send_after_pread :: proc(off, remaining, got: i64) -> (new_off, new_remaining: i64, ok: bool) {
 	if remaining <= 0 || got <= 0 || got > remaining {
@@ -396,7 +384,6 @@ _conn_clear_file_send :: proc(conn: ^Connection) {
 
 // After mem/heading complete: start kernel sendfile if preferred, else chunked pread.
 // Increments plan_wire_sendfile or plan_wire_copy_into once when the file body is first armed.
-// Returns true if a new SQE was submitted or clean finished; false if connection closed.
 @(private)
 _conn_file_region_start_or_finish :: proc(conn: ^Connection) -> bool {
 	if conn.wire.file_send_remaining > 0 {
@@ -529,7 +516,6 @@ _conn_clear_exec :: proc(conn: ^Connection) {
 	_conn_clear_file_send(conn)
 }
 
-// True when pending_send is a view into file_send_buf (chunked file body in progress).
 @(private)
 _conn_pending_is_file_chunk :: proc(conn: ^Connection) -> bool {
 	if len(conn.wire.file_send_buf) == 0 || len(conn.wire.pending_send) == 0 {

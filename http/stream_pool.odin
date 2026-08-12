@@ -1,6 +1,5 @@
 // Fixed-size stream send buffers for progressive Stream / Session (follow-up pins).
 // Each Stream send takes one 8 KiB slab from a per-worker free list; returned on CQE.
-// Caps total admitted stream buffer bytes per worker (max_stream_bytes_total).
 package http
 
 import "core:log"
@@ -81,7 +80,6 @@ stream_pool_take :: proc() -> []u8 {
 	return slab
 }
 
-// Return slab after Stream CQE (or abandon).
 @(private)
 stream_pool_put :: proc(slab: []u8) {
 	if slab == nil || len(slab) == 0 {

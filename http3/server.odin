@@ -1,6 +1,4 @@
-// CONVENIENCE RUNTIME — single-connection HTTP/3 server loop.
 // Owns a UDP socket, handshake, and request dispatch to http3.Handler.
-// Prefer server.H3_Session + your own I/O for embedders (docs/LIBRARY.md).
 package http3
 
 import "core:mem"
@@ -16,7 +14,6 @@ Http3_Server_Error :: enum {
 	None,
 	Server_Create_Failed,
 }
-
 
 
 // Handler receives a request and returns a response. Allocate response data

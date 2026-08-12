@@ -201,7 +201,6 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.temp_
 	return
 }
 
-// Returns if this is a valid trailer header.
 // RFC 7230 4.1.2:
 // A sender MUST NOT generate a trailer that contains a field necessary
 // for message framing (e.g., Transfer-Encoding and Content-Length),

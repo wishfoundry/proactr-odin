@@ -86,9 +86,7 @@ encode_str_raw :: proc(dst: ^[dynamic]u8, s: string) {
 	append(dst, ..transmute([]u8)s)
 }
 
-// ---------------------------------------------------------------------------
 // RFC 7541 Appendix C known-answer vectors (decode-focused)
-// ---------------------------------------------------------------------------
 
 @(test)
 test_c1_prefix_int :: proc(t: ^testing.T) {
@@ -230,9 +228,7 @@ test_c4_request_series_huffman :: proc(t: ^testing.T) {
 	testing.expect_value(t, dt.size, 164)
 }
 
-// ---------------------------------------------------------------------------
 // P0/P1 hardening tests
-// ---------------------------------------------------------------------------
 
 @(test)
 test_prefix_int_overflow_and_truncated :: proc(t: ^testing.T) {
@@ -498,8 +494,6 @@ test_encode_nil_enc_unchanged :: proc(t: ^testing.T) {
 	testing.expect_value(t, buf[0], u8(0x00))
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 
 @(test)
 test_indexed_zero_bad_index :: proc(t: ^testing.T) {
