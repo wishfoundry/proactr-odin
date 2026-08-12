@@ -100,7 +100,7 @@ if [[ ! -f "$DATABASE_PATH" ]]; then
 fi
 
 # Sanity: same payload sizes for size ladder (proactr peer uses fixed buffers).
-echo "==> body size check notes (see WORKLOAD.md): plaintext=13 s4k=4096 s64k=65536 s1m=1048576"
+echo "==> body size check: plaintext=13 s4k=4096 s64k=65536 s1m=1048576"
 echo "    run_bench.sh verifies Content body lengths after each peer starts"
 echo ""
 

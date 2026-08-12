@@ -509,7 +509,7 @@ echo "proactr size-ladder wire: materialize (plan_optimize=false) — not kernel
 echo "proactr-opt assembled=multi_send (NOT writev); file=file_chunked (NOT kernel_sendfile)"
 echo "peers assembled=preconcat_blob (ntex/drogon/laytan/proactr-mat)"
 echo "PLAN_FILE_PATH=$PLAN_FILE_PATH"
-echo "fortunes app work is NOT equal across peers — see WORKLOAD.md / run_peer_matrix.sh notes"
+echo "fortunes app work is NOT equal across peers — see run_peer_matrix.sh notes"
 echo ""
 
 # matrix header

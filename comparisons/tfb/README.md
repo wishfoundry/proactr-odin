@@ -38,4 +38,4 @@ SERVERS="proactr laytan ntex drogon go" WORKERS=8 \
 | `BENCH_C` / `BENCH_Z` | load tool concurrency / duration |
 | `DATABASE_PATH` | `/tmp/proactr-tfb.sqlite` |
 
-Fortunes fairness notes: [`WORKLOAD.md`](WORKLOAD.md). io_uring host check: [`IO_URING.md`](IO_URING.md).
+Fortunes app work differs by peer — see notes in `run_peer_matrix.sh`.

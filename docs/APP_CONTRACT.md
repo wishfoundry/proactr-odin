@@ -72,4 +72,4 @@ When live sessions hit `max_sessions_per_worker × thread_count`, `sse_start` / 
 
 H2 multi-slot full refuses the extra stream with `RST_STREAM(REFUSED_STREAM)` and keeps the connection open (not a new app event).
 
-Metric: `session_metrics_admission_reject`. Operator checklist: [`PRODUCTION_CHECKLIST.md`](PRODUCTION_CHECKLIST.md).
+Metric: `session_metrics_admission_reject`.

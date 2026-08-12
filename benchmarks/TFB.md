@@ -8,7 +8,7 @@ Clear HTTP/1.1 peer matrices. Two hosts, same harness knobs:
 | **Host** | ranch-bastion · Linux 6.14 · 40 cores | Darwin 25.5.0 · arm64 |
 | **Load** | `oha` · `WORKERS=8` · `c=100` · warm 3 s · **15 s** | same |
 | **Routes** | `/api/tiny` (13 B) · `/s/4k` · `/s/64k` · `/s/1m` · `/s/4m` · `/fortunes` | same |
-| **TSV** | `comparisons/tfb/results/summary_20260811.tsv` | `…/summary_kqueue_20260811.tsv` |
+| **TSV** | `comparisons/tfb/results/summary_20260811.tsv` | `…/summary_kqueue_20260812.tsv` |
 
 proactr wire = **materialize** (`plan_optimize` off) on both.
 
