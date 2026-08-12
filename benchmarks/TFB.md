@@ -1,27 +1,28 @@
 # TFB-style baselines
 
-Latest **clear HTTP/1.1** peer matrix on ranch-bastion.
+Clear HTTP/1.1 peer matrices. Two hosts, same harness knobs:
 
-| Field | Value |
-|-------|--------|
-| **When** | 2026-08-11 |
-| **Host** | ranch-bastion · Linux 6.14.0-37-generic · 40 cores |
-| **Load** | `oha` · `WORKERS=8` · `c=100` · warm 3 s · steady **15 s** · localhost |
-| **Routes** | `/api/tiny` (13 B), `/s/4k`, `/s/64k`, `/s/1m`, `/s/4m`, `/fortunes` |
-| **Source** | `comparisons/tfb/results/summary_20260811.tsv` |
-| **Harness** | `comparisons/tfb/run_peer_matrix.sh` |
+| | **io_uring (Linux)** | **kqueue (Darwin)** |
+|--|----------------------|---------------------|
+| **When** | 2026-08-11 | 2026-08-12 |
+| **Host** | ranch-bastion · Linux 6.14 · 40 cores | Darwin 25.5.0 · arm64 |
+| **Load** | `oha` · `WORKERS=8` · `c=100` · warm 3 s · **15 s** | same |
+| **Routes** | `/api/tiny` (13 B) · `/s/4k` · `/s/64k` · `/s/1m` · `/s/4m` · `/fortunes` | same |
+| **TSV** | `comparisons/tfb/results/summary_20260811.tsv` | `…/summary_kqueue_20260811.tsv` |
 
-proactr wire = **materialize** (`plan_optimize` off) — not kernel writev/sendfile.
+proactr wire = **materialize** (`plan_optimize` off) on both.
 
-### Peers
+---
+
+## io_uring — Linux bastion
 
 | Peer | I/O | Notes |
 |------|-----|--------|
 | **proactr** | io_uring | this tree |
 | **ntex** | neon-uring | crates.io |
-| **laytan** | nbio → io_uring | `vendor/laytan` · fortunes n/a (501) |
-| **go** | net/http | `comparisons/tfb/go` · GOMAXPROCS label only |
-| **drogon** | trantor / **epoll** | not same I/O class; oha Size often wrong on large bodies |
+| **laytan** | nbio → io_uring | fortunes n/a (501) |
+| **go** | net/http | GOMAXPROCS label only |
+| **drogon** | trantor / **epoll** | not same I/O class |
 
 ### RPS (avg requests/sec)
 
@@ -33,37 +34,52 @@ proactr wire = **materialize** (`plan_optimize` off) — not kernel writev/sendf
 | **drogon**† | 278 285 | 147 992 | 22 983 | 1 455 | 330 | 7 813 |
 | **go** | 231 598 | 194 346 | 125 224 | 5 513 | 1 788 | 8 431 |
 
-† drogon large-body RPS is epoll reference only (oha reported wrong Size/request; body re-check passed for len path).
-
-Fortunes app work still differs across stacks (see `comparisons/tfb/WORKLOAD.md`). proactr fortunes use per-worker SQLite; ntex uses shared mutex + prepare-per-request.
-
-### vs older pins (plaintext)
-
-| Pin | proactr | ntex |
-|-----|--------:|-----:|
-| 2026-07-25 published | ~349 k | ~362 k |
-| bastion R3 (size ladder only) | ~366 k | ~358 k |
-| **2026-08-11 (this run)** | **~352 k** | **~354 k** |
-
-Host noise ± a few percent is normal. Prefer this file’s table over older docs.
+† drogon large-body RPS is epoll reference only (oha Size/request flaky; body re-check OK).
 
 ---
 
-## TLS size ladder (previous pin)
+## kqueue — Darwin (arm64)
 
-Clear H1 was re-run above. TLS/H2 matrix was **not** re-run today; last pin remains
-2026-08-10 in [`comparisons/tls-h2/results/BASTION_TLS_H2.md`](../comparisons/tls-h2/results/BASTION_TLS_H2.md).
+| Peer | I/O | Notes |
+|------|-----|--------|
+| **proactr** | reactor **kqueue** | product sockets on kqueue |
+| **laytan** | nbio / kqueue | fortunes n/a (501) |
+| **ntex** | **tokio** | not neon-uring on Darwin |
+| **go** | net/http | |
+| **drogon** | — | not built on this pass |
+
+### RPS (avg requests/sec)
+
+| Peer | plaintext | 4 KiB | 64 KiB | 1 MiB | 4 MiB | fortunes |
+|------|----------:|------:|-------:|------:|------:|---------:|
+| **go** | **130 387** | 104 462 | 56 234 | 7 726 | 1 545 | 35 810 |
+| **laytan** | 119 354 | **118 952** | 71 232 | 8 002 | **1 738** | n/a |
+| **proactr** | 116 505 | 115 667 | **73 978** | **8 885** | 1 598 | **119 079** |
+| **ntex** | 102 701 | 98 063 | 66 313 | 8 517 | 1 473 | 68 706 |
+
+Do not cross-rank absolute RPS between bastion (40-core Linux) and laptop (arm64) —
+use each table only against peers on the **same** host.
 
 ---
+
+## Notes
+
+- Fortunes app work differs across stacks (`comparisons/tfb/WORKLOAD.md`).
+- TLS/H2 last pin (io_uring bastion, 2026-08-10):  
+  [`comparisons/tls-h2/results/BASTION_TLS_H2.md`](../comparisons/tls-h2/results/BASTION_TLS_H2.md).
 
 ## Reproduce
 
 ```bash
-./scripts/fetch_third_party.sh
 ./comparisons/tfb/schema/prepare.sh
-# build drogon: comparisons/tfb/drogon/build.sh (on Linux bastion)
 
+# Linux bastion (io_uring + drogon)
 SERVERS="proactr laytan ntex drogon go" WORKERS=8 BENCH_C=100 BENCH_Z=15s \
+  TESTS="plaintext s4k s64k s1m s4m fortunes" \
+  ./comparisons/tfb/run_peer_matrix.sh
+
+# Darwin (kqueue; no drogon)
+SERVERS="proactr laytan ntex go" WORKERS=8 BENCH_C=100 BENCH_Z=15s \
   TESTS="plaintext s4k s64k s1m s4m fortunes" \
   ./comparisons/tfb/run_peer_matrix.sh
 ```

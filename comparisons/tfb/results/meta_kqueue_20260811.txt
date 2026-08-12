@@ -1,0 +1,11 @@
+# peer matrix meta — kqueue / Darwin
+when=2026-08-12T01:27:35Z
+host=Darwin 25.5.0 arm64 (Apple M2 Pro class)
+workers=8 c=100 z=15s warmup=3s
+loadgen=oha
+proactr_io=reactor kqueue (product sockets)
+ntex_io=tokio (not neon-uring)
+laytan_io=nbio/kqueue
+go_io=net/http
+drogon=not run (no mac binary in this pass)
+logdir=/tmp/proactr-peer-matrix-kqueue-20260812T012735Z
